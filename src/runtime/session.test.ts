@@ -48,7 +48,7 @@ const input = { channel: 'C', threadTs: '1.0', threadKey: 'k1' };
 describe('session state machine', () => {
   test('runs a turn and returns to idle', async () => {
     const { web, edits } = makeWebStub();
-    const callModel: CallModel = async () => 'hi';
+    const callModel: CallModel = async () => ({ role: 'assistant', content: 'hi' });
     await startOrQueue(web, callModel, 'sys', input);
     expect(getStatus('k1')).toBe('idle');
     expect(edits.some((e) => e.text === 'hi')).toBe(true);
@@ -64,7 +64,7 @@ describe('session state machine', () => {
     const callModel: CallModel = async () => {
       calls++;
       if (calls === 1) await gate;
-      return `reply-${calls}`;
+      return { role: 'assistant', content: `reply-${calls}` };
     };
     const first = startOrQueue(web, callModel, 'sys', input);
     // Wait a tick so the first turn is in flight.
@@ -82,14 +82,14 @@ describe('session state machine', () => {
   test('signalStop aborts the in-flight turn', async () => {
     const { web, edits } = makeWebStub();
     let aborted = false;
-    const callModel: CallModel = async (_messages, signal) => {
+    const callModel: CallModel = async (_messages, opts) => {
       await new Promise<void>((_resolve, reject) => {
-        signal?.addEventListener('abort', () => {
+        opts?.signal?.addEventListener('abort', () => {
           aborted = true;
           reject(new DOMException('aborted', 'AbortError'));
         });
       });
-      return 'unreached';
+      return { role: 'assistant', content: 'unreached' };
     };
     const run = startOrQueue(web, callModel, 'sys', input);
     await new Promise((r) => setTimeout(r, 5));
@@ -109,16 +109,16 @@ describe('session state machine', () => {
   test('mention during stopping runs a fresh turn after abort', async () => {
     const { web } = makeWebStub();
     let calls = 0;
-    const callModel: CallModel = async (_messages, signal) => {
+    const callModel: CallModel = async (_messages, opts) => {
       calls++;
       if (calls === 1) {
         await new Promise<void>((_, reject) => {
-          signal?.addEventListener('abort', () =>
+          opts?.signal?.addEventListener('abort', () =>
             reject(new DOMException('aborted', 'AbortError')),
           );
         });
       }
-      return `reply-${calls}`;
+      return { role: 'assistant', content: `reply-${calls}` };
     };
     const run = startOrQueue(web, callModel, 'sys', input);
     await new Promise((r) => setTimeout(r, 5));

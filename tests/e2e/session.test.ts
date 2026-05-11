@@ -37,23 +37,24 @@ function queueGate(): Gate {
   return g;
 }
 
-const gatedCallModel: CallModel = async (messages, signal) => {
+const gatedCallModel: CallModel = async (messages, opts) => {
   calls.push(messages);
   const g = gates.shift();
-  if (!g) return 'ungated';
-  return await new Promise<string>((resolve, reject) => {
+  if (!g) return { role: 'assistant', content: 'ungated' };
+  const text = await new Promise<string>((resolve, reject) => {
     let settled = false;
     g.promise.then((reply) => {
       if (settled) return;
       settled = true;
       resolve(reply);
     });
-    signal?.addEventListener('abort', () => {
+    opts?.signal?.addEventListener('abort', () => {
       if (settled) return;
       settled = true;
       reject(new DOMException('aborted', 'AbortError'));
     });
   });
+  return { role: 'assistant', content: text };
 };
 
 beforeAll(async () => {
@@ -82,13 +83,7 @@ test('/stop cancels an in-flight turn and edits checklist to "stopped"', async (
   createdThreads.push(threadTs);
 
   // Wait until the model is actually being called.
-  await waitForReply(
-    tester,
-    channel,
-    threadTs,
-    agent.botUserId,
-    (t) => t === '• calling model',
-  );
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === '• calling model');
 
   // Fire /stop while the turn is hanging on the gate.
   await mention(tester, agent.botUserId, channel, threadTs, '/stop');
@@ -111,13 +106,7 @@ test('mention during a running turn is batched into a follow-up turn', async () 
   const gate1 = queueGate();
   const gate2 = queueGate();
 
-  const threadTs = await mention(
-    tester,
-    agent.botUserId,
-    channel,
-    undefined,
-    'first message',
-  );
+  const threadTs = await mention(tester, agent.botUserId, channel, undefined, 'first message');
   createdThreads.push(threadTs);
 
   // Wait until turn 1 has reached the model.

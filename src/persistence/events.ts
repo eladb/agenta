@@ -49,11 +49,37 @@ export type AssistantMessageEvent = Base & {
   payload: { slack_ts: string; text: string };
 };
 
+// Recorded when the model requests a tool. Linked back to the assistant
+// `message` event it came from via parent_event_id, so buildMessages can
+// reattach tool_calls to the right assistant message on reconstruction.
+export type ToolCallEvent = Base & {
+  source: 'assistant';
+  type: 'tool_call';
+  payload: {
+    parent_event_id: string;
+    tool_call_id: string;
+    name: string;
+    arguments_json: string;
+  };
+};
+
+export type ToolResultEvent = Base & {
+  source: 'assistant';
+  type: 'tool_result';
+  payload: {
+    tool_call_id: string;
+    content: string;
+    error?: boolean;
+  };
+};
+
 export type AgentaEvent =
   | SlackMessageEvent
   | SlackEditEvent
   | SlackDeleteEvent
-  | AssistantMessageEvent;
+  | AssistantMessageEvent
+  | ToolCallEvent
+  | ToolResultEvent;
 
 export function newEventId(): string {
   return crypto.randomUUID();

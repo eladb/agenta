@@ -222,4 +222,59 @@ describe('buildMessages', () => {
     const m = await buildMessages('t', 'sys');
     expect(m[1]?.content).toBe('just text');
   });
+
+  it('reattaches tool_calls to their parent assistant message and emits role:tool messages', async () => {
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: 'what time is it?' },
+    });
+    await appendEvent('t', {
+      event_id: 'a1',
+      source: 'assistant',
+      type: 'message',
+      payload: { slack_ts: '1.1', text: '' },
+    });
+    await appendEvent('t', {
+      source: 'assistant',
+      type: 'tool_call',
+      payload: {
+        parent_event_id: 'a1',
+        tool_call_id: 'call_1',
+        name: 'get_current_time',
+        arguments_json: '{}',
+      },
+    });
+    await appendEvent('t', {
+      source: 'assistant',
+      type: 'tool_result',
+      payload: { tool_call_id: 'call_1', content: '2026-01-01T00:00:03Z' },
+    });
+    await appendEvent('t', {
+      event_id: 'a2',
+      source: 'assistant',
+      type: 'message',
+      payload: { slack_ts: '1.1', text: 'it is 2026-01-01' },
+    });
+
+    const messages = await buildMessages('t', 'sys');
+
+    expect(messages).toHaveLength(5);
+    expect(messages[1]).toEqual({ role: 'user', content: 'what time is it?' });
+    const a1 = messages[2];
+    if (a1?.role !== 'assistant') throw new Error('expected assistant at [2]');
+    expect(a1.content).toBeNull();
+    expect(a1.tool_calls).toEqual([
+      { id: 'call_1', type: 'function', function: { name: 'get_current_time', arguments: '{}' } },
+    ]);
+    expect(messages[3]).toEqual({
+      role: 'tool',
+      tool_call_id: 'call_1',
+      content: '2026-01-01T00:00:03Z',
+    });
+    const a2 = messages[4];
+    if (a2?.role !== 'assistant') throw new Error('expected assistant at [4]');
+    expect(a2.content).toBe('it is 2026-01-01');
+    expect(a2.tool_calls).toBeUndefined();
+  });
 });

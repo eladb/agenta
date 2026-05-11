@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { AgentaEvent, AttachmentRef } from '../persistence/events';
+import type { AgentaEvent, AttachmentRef, ToolCallEvent } from '../persistence/events';
 import { readEvents, threadDir } from '../persistence/store';
-import type { ContentPart, Message } from './gateway';
+import type { ContentPart, Message, ToolCall } from './gateway';
 
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const TEXT_MIMES = new Set([
@@ -29,6 +29,17 @@ const TEXT_BYTE_CAP = 20 * 1024;
 //   - anything else: a `[attached: name (mime) — not passed to model]` placeholder
 export async function buildMessages(threadKey: string, systemPrompt: string): Promise<Message[]> {
   const events = await readEvents<AgentaEvent>(threadKey);
+  // Index tool_call events by parent assistant message event_id so each
+  // assistant 'message' can re-attach its tool_calls in original order.
+  const toolCallsByParent = new Map<string, ToolCallEvent[]>();
+  for (const e of events) {
+    if (e.source === 'assistant' && e.type === 'tool_call') {
+      const list = toolCallsByParent.get(e.payload.parent_event_id);
+      if (list) list.push(e);
+      else toolCallsByParent.set(e.payload.parent_event_id, [e]);
+    }
+  }
+
   const messages: Message[] = [{ role: 'system', content: systemPrompt }];
   for (const e of events) {
     if (e.source === 'slack' && e.type === 'message') {
@@ -45,8 +56,24 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
         messages.push({ role: 'user', content: parts });
       }
     } else if (e.source === 'assistant' && e.type === 'message') {
-      messages.push({ role: 'assistant', content: e.payload.text });
+      const tcs = toolCallsByParent.get(e.event_id);
+      const tool_calls: ToolCall[] | undefined = tcs?.map((tc) => ({
+        id: tc.payload.tool_call_id,
+        type: 'function',
+        function: { name: tc.payload.name, arguments: tc.payload.arguments_json },
+      }));
+      const content = e.payload.text.length > 0 ? e.payload.text : tool_calls ? null : '';
+      messages.push(
+        tool_calls ? { role: 'assistant', content, tool_calls } : { role: 'assistant', content },
+      );
+    } else if (e.source === 'assistant' && e.type === 'tool_result') {
+      messages.push({
+        role: 'tool',
+        tool_call_id: e.payload.tool_call_id,
+        content: e.payload.content,
+      });
     }
+    // tool_call events are folded into their parent assistant message above.
   }
   return messages;
 }

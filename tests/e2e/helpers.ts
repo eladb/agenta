@@ -27,12 +27,14 @@ export const stubCallModel: CallModel = async (messages) => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m?.role !== 'user') continue;
-    if (typeof m.content === 'string') return `${STUB_REPLY_PREFIX}${m.content}`;
+    if (typeof m.content === 'string') {
+      return { role: 'assistant', content: `${STUB_REPLY_PREFIX}${m.content}` };
+    }
     const textPart = m.content.find((p) => p.type === 'text');
     const text = textPart && textPart.type === 'text' ? textPart.text : '(multipart)';
-    return `${STUB_REPLY_PREFIX}${text}`;
+    return { role: 'assistant', content: `${STUB_REPLY_PREFIX}${text}` };
   }
-  return `${STUB_REPLY_PREFIX}(no user message)`;
+  return { role: 'assistant', content: `${STUB_REPLY_PREFIX}(no user message)` };
 };
 
 const STUB_SYSTEM_PROMPT = 'test stub system prompt';
