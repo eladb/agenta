@@ -2,6 +2,7 @@ import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from '../log';
 import type { AttachmentRef } from './events';
+import { detectMime } from './mime';
 import { attachmentsDir, readEvents, threadDir } from './store';
 
 type SlackFile = {
@@ -42,10 +43,11 @@ export async function downloadFiles(
       }
       const buf = new Uint8Array(await res.arrayBuffer());
       await writeFile(fullPath, buf);
+      const mimetype = await detectMime(buf);
       out.push({
         file_id: f.id,
         name: f.name ?? f.id,
-        mimetype: f.mimetype,
+        mimetype,
         local_path: join('attachments', localName),
       });
     } catch (err) {

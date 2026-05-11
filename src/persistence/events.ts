@@ -11,7 +11,7 @@ type Base = {
 export type AttachmentRef = {
   file_id: string;
   name: string;
-  mimetype?: string;
+  mimetype: string; // detected from file contents at ingest, never from extension
   local_path: string;
 };
 

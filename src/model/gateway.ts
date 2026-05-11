@@ -1,6 +1,10 @@
+export type TextPart = { type: 'text'; text: string };
+export type ImageUrlPart = { type: 'image_url'; image_url: { url: string } };
+export type ContentPart = TextPart | ImageUrlPart;
+
 export type Message = {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | ContentPart[];
 };
 
 export type CallModel = (messages: Message[]) => Promise<string>;
