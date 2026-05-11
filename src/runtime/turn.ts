@@ -17,12 +17,13 @@ export async function runTurn(
   callModel: CallModel,
   systemPrompt: string,
   input: TurnInput,
+  signal?: AbortSignal,
 ): Promise<void> {
   const checklistTs = await postInThread(web, input.channel, input.threadTs, 'thinking...');
   try {
     await editMessage(web, input.channel, checklistTs, '• calling model');
     const messages = await buildMessages(input.threadKey, systemPrompt);
-    const reply = await callModel(messages);
+    const reply = await callModel(messages, signal);
     await editMessage(web, input.channel, checklistTs, reply);
     await record({
       event_id: newEventId(),
@@ -35,6 +36,11 @@ export async function runTurn(
     });
     log.info('turn', `[${input.threadKey}] replied (${reply.length} chars)`);
   } catch (err) {
+    if (signal?.aborted) {
+      await editMessage(web, input.channel, checklistTs, 'stopped').catch(() => {});
+      log.info('turn', `[${input.threadKey}] stopped`);
+      return;
+    }
     const msg = redact((err as Error).message ?? String(err));
     log.error('turn', `[${input.threadKey}] model call failed`, msg);
     await editMessage(web, input.channel, checklistTs, `error: ${msg}`).catch(() => {});

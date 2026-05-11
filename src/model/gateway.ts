@@ -7,7 +7,7 @@ export type Message = {
   content: string | ContentPart[];
 };
 
-export type CallModel = (messages: Message[]) => Promise<string>;
+export type CallModel = (messages: Message[], signal?: AbortSignal) => Promise<string>;
 
 export type ModelConfig = {
   apiKey: string;
@@ -17,7 +17,7 @@ export type ModelConfig = {
 };
 
 export function createCallModel(config: ModelConfig): CallModel {
-  return async (messages) => {
+  return async (messages, signal) => {
     const res = await fetch(`${config.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -29,6 +29,7 @@ export function createCallModel(config: ModelConfig): CallModel {
         messages,
         max_tokens: config.maxTokens ?? 4096,
       }),
+      signal,
     });
     if (!res.ok) {
       throw new Error(`model HTTP ${res.status}: ${await res.text()}`);

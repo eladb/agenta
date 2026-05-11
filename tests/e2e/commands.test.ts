@@ -33,7 +33,7 @@ afterAll(async () => {
   cleanupTempDataDir();
 });
 
-test('/stop -> bot acks with "stopped (stub)"', async () => {
+test('/stop on idle thread -> bot acks with "stopped"', async () => {
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, '/stop');
   createdThreads.push(threadTs);
   const text = await waitForReply(
@@ -41,9 +41,9 @@ test('/stop -> bot acks with "stopped (stub)"', async () => {
     channel,
     threadTs,
     agent.botUserId,
-    (t) => t === 'stopped (stub)',
+    (t) => t === 'stopped',
   );
-  expect(text).toBe('stopped (stub)');
+  expect(text).toBe('stopped');
 });
 
 test('/delete -> bot acks with "deleted (stub)"', async () => {

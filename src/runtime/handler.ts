@@ -9,9 +9,8 @@ import type { DeleteMessage, EditMessage, IncomingEvent, NormalMessage } from '.
 import { postInThread } from '../slack/post';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
-import { withLock } from './mutex';
+import { signalStop, startOrQueue } from './session';
 import { threadKey } from './thread';
-import { runTurn } from './turn';
 
 const isDuplicate = createDedupe();
 
@@ -82,8 +81,7 @@ async function handleMessage(
   const cmd = parseCommand(e.text);
 
   if (cmd === 'stop') {
-    await postInThread(web, e.channel, e.threadTs, 'stopped (stub)');
-    log.info('handler', `[${tk}] /stop ack`);
+    await signalStop(web, e.channel, e.threadTs, tk);
     return;
   }
 
@@ -94,13 +92,11 @@ async function handleMessage(
     return;
   }
 
-  await withLock(tk, () =>
-    runTurn(web, callModel, systemPrompt, {
-      channel: e.channel,
-      threadTs: e.threadTs,
-      threadKey: tk,
-    }),
-  );
+  await startOrQueue(web, callModel, systemPrompt, {
+    channel: e.channel,
+    threadTs: e.threadTs,
+    threadKey: tk,
+  });
 }
 
 async function handleEdit(e: EditMessage): Promise<void> {
