@@ -3,19 +3,34 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
-import type { CallModel } from '../../src/model/gateway';
+import type { CallModel, Message } from '../../src/model/gateway';
 import { makeEventHandler } from '../../src/runtime/handler';
 import { connect } from '../../src/slack/connect';
 import { listen } from '../../src/slack/events';
 
 export const STUB_REPLY_PREFIX = 'stub: ';
 
-// Deterministic stub for e2e: echoes the last user message back with a prefix.
-// Lets tests assert without spending tokens on a real provider.
+// Recording stub: captures every call so tests can assert on the messages
+// array (incl. multipart content for attachments). Reset via resetStubCalls().
+export const stubCalls: Message[][] = [];
+
+export function resetStubCalls(): void {
+  stubCalls.length = 0;
+}
+
+export function lastStubCall(): Message[] | undefined {
+  return stubCalls[stubCalls.length - 1];
+}
+
 export const stubCallModel: CallModel = async (messages) => {
+  stubCalls.push(messages);
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m?.role === 'user') return `${STUB_REPLY_PREFIX}${m.content}`;
+    if (m?.role !== 'user') continue;
+    if (typeof m.content === 'string') return `${STUB_REPLY_PREFIX}${m.content}`;
+    const textPart = m.content.find((p) => p.type === 'text');
+    const text = textPart && textPart.type === 'text' ? textPart.text : '(multipart)';
+    return `${STUB_REPLY_PREFIX}${text}`;
   }
   return `${STUB_REPLY_PREFIX}(no user message)`;
 };
@@ -94,6 +109,31 @@ export async function mention(
   });
   if (!res.ts) throw new Error('tester postMessage returned no ts');
   return res.ts;
+}
+
+// Upload a file via the tester bot into an existing thread, with a mention of
+// the agent. Returns the file_id (use it to locate the file in the thread's
+// JSONL after ingest).
+export async function uploadFile(
+  tester: Tester,
+  agentUserId: string,
+  channel: string,
+  threadTs: string,
+  fileBytes: Buffer | Uint8Array,
+  filename: string,
+  comment: string,
+): Promise<string> {
+  const res = await tester.web.files.uploadV2({
+    channel_id: channel,
+    thread_ts: threadTs,
+    filename,
+    file: Buffer.from(fileBytes),
+    initial_comment: `<@${agentUserId}> ${comment}`,
+  });
+  const top = res.files?.[0] as { id?: string; files?: Array<{ id?: string }> } | undefined;
+  const fileId = top?.files?.[0]?.id ?? top?.id;
+  if (!fileId) throw new Error('files.uploadV2 returned no file id');
+  return fileId;
 }
 
 export async function waitForReply(

@@ -109,7 +109,15 @@ function normalize(
     };
   }
 
-  if (event.subtype) return null; // ignore joins/leaves/pins/etc.
+  // Allow regular messages, file uploads, and broadcast-replies. Anything else
+  // (joins/leaves/pins/topic-changes/channel meta) is noise we don't ingest.
+  if (
+    event.subtype !== undefined &&
+    event.subtype !== 'file_share' &&
+    event.subtype !== 'thread_broadcast'
+  ) {
+    return null;
+  }
   if (event.user === botUserId) return null;
   if (!event.user) return null;
 
