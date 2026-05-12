@@ -103,44 +103,57 @@ emit an empty array — keeps the prompt clean for skill-less bots).
 
 ### Per-thread freeze + persistence
 
-- Place: `data/{thread_key}/runtime.json`, schema extended.
-- `idle` becomes a real persisted status (currently file = non-idle).
-- `clearRuntime(threadKey)` no longer deletes the file when going idle; it
+- Place: `data/{thread_key}/session.json` (renamed from `runtime.json` — the
+  file used to mean "a turn is in flight" but now also carries the frozen
+  system prompt across the whole session lifecycle, so the new name fits).
+- Schema extended.
+- `idle` becomes a real persisted status (today's file = non-idle).
+- `clearSession(threadKey)` no longer deletes the file when going idle; it
   rewrites it as `{status: "idle", updated_at, system_prompt}` so the prompt
   survives across turns.
-- `/delete` still `rm -rf`s the thread dir — runtime.json goes with it.
+- `/delete` still `rm -rf`s the thread dir — session.json goes with it.
 - `recoverInterruptedSessions` filters on `status === 'running' | 'stopping'`,
   so idle entries don't trigger boot announcements.
 
 Schema (new):
 
 ```ts
-export type RuntimeState = {
+export type SessionState = {
   status: 'idle' | 'running' | 'stopping';
   updated_at: string;
   system_prompt?: string;  // present once the first turn has composed it
 };
 ```
 
-Backward compat: existing files in the wild only have `status:
-running|stopping` and no `system_prompt`. Recovery's idle filter handles the
-former; for the latter, on a thread with runtime.json but no `system_prompt`,
-the handler treats it as "first mention" and composes + writes the prompt.
+Backward compat: do not bother. Any existing `runtime.json` files in
+`data/*/` get a one-time `rm` at handler-init time (or simply ignored — they
+won't be read since the code now looks for `session.json`). The user's local
+state is dev-only; no migration path needed.
+
+Rename details:
+- File: `runtime.json` → `session.json`.
+- Module: `src/runtime/runtime-store.ts` → `src/runtime/session-store.ts`.
+- Type: `RuntimeState` → `SessionState`.
+- Functions: `writeRuntime` → `writeSession`, `readRuntime` → `readSession`,
+  `clearRuntime` → `clearSession`, `listRuntimes` → `listSessions`.
+- Update all call sites: `session.ts`, `recovery.ts`, any tests.
+- The `src/runtime/` directory keeps its name — it correctly groups runtime
+  concerns (handler, session machine, turn, recovery, asks).
 
 ### Prompt resolution flow
 
 In `handler.ts` for an incoming mention:
 
-1. `readRuntime(tk)` — read existing state, if any.
+1. `readSession(tk)` — read existing state, if any.
 2. If state exists and has `system_prompt`: use it.
 3. Otherwise: compose via `buildSystemPrompt()`, persist as
    `{status: 'idle', updated_at: nowIso(), system_prompt: composed}`, use it.
 4. Pass into `startOrQueue(web, callModel, prompt, input)`.
 
-The state machine in `session.ts` already overwrites runtime.json on
+The state machine in `session.ts` already overwrites session.json on
 running→stopping→idle transitions. Update those writes to preserve
 `system_prompt` (read first, or thread it through as an argument). The
-simplest is: `writeRuntime` callers pass `system_prompt`; `startOrQueue`
+simplest is: `writeSession` callers pass `system_prompt`; `startOrQueue`
 receives it and passes it through to each transition.
 
 ### Migration
@@ -191,11 +204,15 @@ to be long or perfect — its job is to be a load-target for tests.
   source path is relative to the Dockerfile's context (which is
   `sandbox/` per existing usage). Verify with `bun scripts/...` or manual
   test that this works given how `ensureImage` invokes docker build.
-- `src/runtime/runtime-store.ts` — extend `RuntimeState` schema; update
-  `writeRuntime`/`readRuntime`/`clearRuntime` semantics; `clearRuntime` now
-  writes idle state preserving system_prompt. `listRuntimes` still returns
-  all entries; recovery filters.
-- `src/runtime/recovery.ts` — filter to non-idle entries.
+- `src/runtime/session-store.ts` (renamed from `runtime-store.ts`) — extend
+  `SessionState` schema (was `RuntimeState`); update `writeSession` /
+  `readSession` / `clearSession` semantics (was `writeRuntime` / etc.);
+  `clearSession` now writes idle state preserving system_prompt.
+  `listSessions` still returns all entries; recovery filters.
+  Filename constant: `'session.json'` (was `'runtime.json'`). All callers
+  updated.
+- `src/runtime/recovery.ts` — filter to non-idle entries. Update imports
+  for the rename (`listSessions` etc.).
 - `src/runtime/session.ts` — accept system prompt as an argument (already
   does); ensure all runtime writes carry the prompt forward (read existing
   state and merge, OR thread the prompt through `startOrQueue` and pass to
@@ -227,12 +244,12 @@ to be long or perfect — its job is to be a load-target for tests.
 Use a `mkdtempSync` botspace dir per test; clean up in afterEach. No
 filesystem touches outside the temp dir.
 
-### Unit (`src/runtime/runtime-store.test.ts` if it exists, else inline)
+### Unit (`src/runtime/session-store.test.ts` if it exists, else inline)
 
-- `clearRuntime` preserves `system_prompt` across the running→idle
+- `clearSession` preserves `system_prompt` across the running→idle
   transition.
-- `listRuntimes` includes idle entries (recovery's responsibility to filter).
-- `readRuntime` returns `idle` state correctly.
+- `listSessions` includes idle entries (recovery's responsibility to filter).
+- `readSession` returns `idle` state correctly.
 
 ### E2E (`tests/e2e/skills.test.ts`)
 
@@ -247,8 +264,9 @@ E2E (HAS_DOCKER-gated): start a turn that calls `read_file('skills/python-charts
 via a stubbed model script and assert the file content comes back. Skip this
 test on machines without Docker (consistent with other Docker-gated tests).
 
-E2E: `/delete` removes runtime.json (already exercised; just confirm the
-existing test still passes given the new schema).
+E2E: `/delete` removes session.json (already exercised against runtime.json;
+update any test still referencing `runtime.json` to `session.json` and
+confirm it passes given the new schema).
 
 ### Manual verification before declaring done
 
