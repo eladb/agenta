@@ -1,6 +1,7 @@
 import { log } from './log';
 import { createCallModel } from './model/gateway';
 import { makeEventHandler } from './runtime/handler';
+import { killAllSandboxContainers } from './sandbox/docker';
 import { connect } from './slack/connect';
 import { listen } from './slack/events';
 
@@ -26,6 +27,13 @@ const callModel = createCallModel({
 const systemPrompt =
   process.env.SYSTEM_PROMPT ??
   'You are agenta, a helpful assistant participating in Slack threads. Reply concisely and in plain text suitable for Slack.';
+
+// Clean slate for sandboxes on every boot — see CLAUDE.md: state-machine
+// recovery is deferred, so any prior threads' containers would be unreachable
+// (we'd have lost their tokens) anyway.
+await killAllSandboxContainers().catch((err) => {
+  log.warn('boot', `sandbox cleanup failed: ${(err as Error).message}`);
+});
 
 const { socket, web, botUserId } = await connect(appToken, botToken);
 log.info('boot', `connected as bot user ${botUserId}`);

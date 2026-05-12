@@ -166,55 +166,6 @@ test.if(HAS_DOCKER)(
 );
 
 test.if(HAS_DOCKER)(
-  'egress is blocked: curl to external host fails inside the sandbox',
-  async () => {
-    script.length = 0;
-    calls.length = 0;
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_curl',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({
-              command: 'curl --max-time 3 -sS https://example.com; echo "exit=$?"',
-            }),
-          },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'curl attempted' });
-
-    const threadTs = await mention(
-      tester,
-      agent.botUserId,
-      channel,
-      undefined,
-      `e2e-egress-${Date.now()}`,
-    );
-    createdThreads.push(threadTs);
-
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'curl attempted');
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
-
-    const second = calls[1];
-    if (!second) throw new Error('expected second call');
-    const toolMsg = second.find((m) => m.role === 'tool');
-    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
-    // The bash command always exits 0 because we append "echo exit=$?". The
-    // *curl* exit should be non-zero (DNS or connect failure), so the tool
-    // output must NOT contain "exit=0" — and it must NOT have fetched the
-    // example.com HTML.
-    expect(toolMsg.content).not.toContain('exit=0');
-    expect(toolMsg.content).not.toContain('<title>Example Domain');
-  },
-  60_000,
-);
-
-test.if(HAS_DOCKER)(
   '/delete removes the sandbox container',
   async () => {
     script.length = 0;

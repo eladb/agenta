@@ -3,19 +3,14 @@ import { join } from 'node:path';
 import { log } from '../log';
 
 export const SANDBOX_IMAGE = 'agenta-sandbox:latest';
-// Internal network — Docker enforces no external connectivity at the netfilter
-// layer. Containers on this network reach loopback only; DNS for external
-// names also fails (Docker's embedded resolver has no upstream).
 export const SANDBOX_NETWORK = 'agenta-sandbox-net';
+const SANDBOX_PORT = 9000;
+const CONTAINER_PREFIX = 'agenta-';
 
-// Path to the Dockerfile, resolved relative to this source file so it works
-// regardless of cwd. sandbox/Dockerfile lives at repo root.
 const DOCKERFILE_DIR = join(import.meta.dir, '..', '..', 'sandbox');
 
-// Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*. thread_key
-// already contains only [a-z0-9_], so simply prefixing is safe.
 export function containerName(threadKey: string): string {
-  return `agenta-${threadKey}`;
+  return `${CONTAINER_PREFIX}${threadKey}`;
 }
 
 export type DockerResult = { stdout: string; stderr: string; exitCode: number };
@@ -80,10 +75,16 @@ export async function ensureNetwork(): Promise<void> {
     const inspect = await dockerSpawn(['network', 'inspect', SANDBOX_NETWORK]);
     if (inspect.exitCode === 0) return;
     log.info('sandbox', `creating internal network ${SANDBOX_NETWORK}…`);
+    // TODO(egress-block): we previously used `--internal` which blocks all
+    // external connectivity at the netfilter layer, but it also blocks port
+    // publishing — and the bot now reaches the in-container HTTP server via
+    // a published 127.0.0.1 port. Setting enable_ip_masquerade=false doesn't
+    // actually block egress on Docker Desktop (VPNkit NATs at a different
+    // layer). Re-add a real egress block via iptables OUTPUT rules inside
+    // the container (needs --cap-add NET_ADMIN) in a follow-up.
     const create = await dockerSpawn([
       'network',
       'create',
-      '--internal',
       '--driver',
       'bridge',
       SANDBOX_NETWORK,
@@ -100,22 +101,74 @@ export async function ensureNetwork(): Promise<void> {
   return p;
 }
 
-// Idempotent: starts an existing stopped container, or creates a fresh one
-// with an anonymous volume mounted at /workspace and the internal sandbox
-// network attached (no external connectivity).
+// In-memory map of which host port and bearer token to use to talk to each
+// thread's sandbox server. Populated by ensureContainer; cleared by
+// removeContainer / killAllSandboxContainers.
+type SandboxConn = { hostPort: number; token: string };
+const conns = new Map<string, SandboxConn>();
+
+function randomToken(): string {
+  return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+}
+
+// Wait for GET /health to return 200. The sandbox-server binds to :9000
+// inside the container; we poll the host-side mapped port until it answers.
+async function waitForHealth(hostPort: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${hostPort}/health`);
+      if (res.status === 200) return;
+      lastErr = `status ${res.status}`;
+    } catch (err) {
+      lastErr = err;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`sandbox-server not healthy after ${timeoutMs}ms: ${String(lastErr)}`);
+}
+
+async function readHostPort(name: string): Promise<number> {
+  const res = await dockerSpawn(['port', name, `${SANDBOX_PORT}/tcp`]);
+  if (res.exitCode !== 0) {
+    throw new Error(`docker port ${name} failed: ${res.stderr || res.stdout}`);
+  }
+  // Output is one or more lines like "0.0.0.0:54321" or "127.0.0.1:54321".
+  // Prefer the 127.0.0.1 line; fall back to the first.
+  const lines = res.stdout.trim().split('\n');
+  const preferred = lines.find((l) => l.startsWith('127.0.0.1:')) ?? lines[0];
+  if (!preferred) throw new Error(`docker port ${name} returned no mapping`);
+  const port = Number(preferred.split(':').pop());
+  if (!Number.isFinite(port) || port <= 0) {
+    throw new Error(`docker port ${name} parse error: ${preferred}`);
+  }
+  return port;
+}
+
+// Idempotent: creates a fresh container if missing (with a random Bearer
+// token in env and a random 127.0.0.1 host port mapped to the server's
+// :9000), then waits for the in-container server to be healthy.
 export async function ensureContainer(threadKey: string): Promise<void> {
   await Promise.all([ensureImage(), ensureNetwork()]);
   const name = containerName(threadKey);
-  const inspect = await dockerSpawn(['inspect', '-f', '{{.State.Status}}', name]);
-  if (inspect.exitCode === 0) {
-    const status = inspect.stdout.trim();
-    if (status === 'running') return;
-    const start = await dockerSpawn(['start', name]);
-    if (start.exitCode !== 0) {
-      throw new Error(`docker start ${name} failed: ${start.stderr || start.stdout}`);
-    }
-    return;
+
+  if (conns.has(threadKey)) {
+    // Verify the container is still running; if not, drop the cached conn
+    // and fall through to recreate.
+    const inspect = await dockerSpawn(['inspect', '-f', '{{.State.Status}}', name]);
+    if (inspect.exitCode === 0 && inspect.stdout.trim() === 'running') return;
+    conns.delete(threadKey);
   }
+
+  // If the container exists from before but we have no cached conn (e.g.
+  // partial state), remove it and recreate so we control the token.
+  const inspectStale = await dockerSpawn(['inspect', name]);
+  if (inspectStale.exitCode === 0) {
+    await dockerSpawn(['rm', '-fv', name]);
+  }
+
+  const token = randomToken();
   const run = await dockerSpawn([
     'run',
     '-d',
@@ -123,18 +176,71 @@ export async function ensureContainer(threadKey: string): Promise<void> {
     name,
     '--network',
     SANDBOX_NETWORK,
+    '-p',
+    `127.0.0.1::${SANDBOX_PORT}`,
+    '-e',
+    `SANDBOX_TOKEN=${token}`,
     '-w',
     '/workspace',
     '--mount',
     'type=volume,target=/workspace',
     SANDBOX_IMAGE,
-    'sleep',
-    'infinity',
   ]);
   if (run.exitCode !== 0) {
     throw new Error(`docker run ${name} failed: ${run.stderr || run.stdout}`);
   }
-  log.info('sandbox', `container ${name} created`);
+  const hostPort = await readHostPort(name);
+  await waitForHealth(hostPort);
+  conns.set(threadKey, { hostPort, token });
+  log.info('sandbox', `container ${name} ready on :${hostPort}`);
+}
+
+function connOrThrow(threadKey: string): SandboxConn {
+  const c = conns.get(threadKey);
+  if (!c) throw new Error(`sandbox not initialized for ${threadKey}`);
+  return c;
+}
+
+// Parse an SSE stream of `data: <json>\n\n` events emitted by /exec.
+// Exported for unit testing — every bash tool call goes through here, so a
+// regression here would silently corrupt all tool output.
+export async function consumeExecStream(
+  body: ReadableStream<Uint8Array>,
+): Promise<DockerResult> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let stdout = '';
+  let stderr = '';
+  let exitCode = -1;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sep = buffer.indexOf('\n\n');
+    while (sep >= 0) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+        try {
+          const evt = JSON.parse(payload) as {
+            kind: 'stdout' | 'stderr' | 'exit';
+            chunk?: string;
+            exitCode?: number;
+          };
+          if (evt.kind === 'stdout' && typeof evt.chunk === 'string') stdout += evt.chunk;
+          else if (evt.kind === 'stderr' && typeof evt.chunk === 'string') stderr += evt.chunk;
+          else if (evt.kind === 'exit' && typeof evt.exitCode === 'number') exitCode = evt.exitCode;
+        } catch {
+          // ignore malformed frames
+        }
+      }
+      sep = buffer.indexOf('\n\n');
+    }
+  }
+  return { stdout, stderr, exitCode };
 }
 
 export async function runBash(
@@ -142,8 +248,18 @@ export async function runBash(
   command: string,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  const name = containerName(threadKey);
-  return dockerSpawn(['exec', name, 'bash', '-lc', command], { signal });
+  const { hostPort, token } = connOrThrow(threadKey);
+  const res = await fetch(`http://127.0.0.1:${hostPort}/exec`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ command }),
+    signal,
+  });
+  if (!res.ok) {
+    return { stdout: '', stderr: `sandbox HTTP ${res.status}`, exitCode: -1 };
+  }
+  if (!res.body) throw new Error('sandbox /exec returned no body');
+  return consumeExecStream(res.body);
 }
 
 export async function readFile(
@@ -151,8 +267,17 @@ export async function readFile(
   path: string,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  const name = containerName(threadKey);
-  return dockerSpawn(['exec', '-w', '/workspace', name, 'cat', '--', path], { signal });
+  const { hostPort, token } = connOrThrow(threadKey);
+  const res = await fetch(`http://127.0.0.1:${hostPort}/read`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ path }),
+    signal,
+  });
+  if (!res.ok) {
+    return { stdout: '', stderr: `sandbox HTTP ${res.status}`, exitCode: -1 };
+  }
+  return (await res.json()) as DockerResult;
 }
 
 export async function writeFile(
@@ -161,22 +286,22 @@ export async function writeFile(
   content: string,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  const name = containerName(threadKey);
-  // `tee --` writes stdin to the file and also echoes to stdout. We redirect
-  // stdout to /dev/null inside a bash -lc wrapper so the tool output stays
-  // small. mkdir -p the parent directory first so writes to nested paths
-  // don't surprise the model with ENOENT.
-  const command = `mkdir -p "$(dirname -- "$1")" && tee -- "$1" >/dev/null`;
-  return dockerSpawn(['exec', '-i', '-w', '/workspace', name, 'bash', '-lc', command, '_', path], {
+  const { hostPort, token } = connOrThrow(threadKey);
+  const res = await fetch(`http://127.0.0.1:${hostPort}/write`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ path, content }),
     signal,
-    stdin: content,
   });
+  if (!res.ok) {
+    return { stdout: '', stderr: `sandbox HTTP ${res.status}`, exitCode: -1 };
+  }
+  return (await res.json()) as DockerResult;
 }
 
-// Removes the container *and* its anonymous volume (`-v`). Errors are
-// swallowed because /delete is a best-effort cleanup.
 export async function removeContainer(threadKey: string): Promise<void> {
   const name = containerName(threadKey);
+  conns.delete(threadKey);
   const res = await dockerSpawn(['rm', '-fv', name]);
   if (res.exitCode !== 0 && !/No such container/i.test(res.stderr)) {
     log.warn('sandbox', `docker rm ${name}: ${res.stderr.trim()}`);
@@ -185,8 +310,28 @@ export async function removeContainer(threadKey: string): Promise<void> {
   }
 }
 
+// Kill every agenta-* container. Called at bot startup so each run starts
+// from a clean slate (we don't try to recover state from prior processes).
+export async function killAllSandboxContainers(): Promise<void> {
+  const list = await dockerSpawn(['ps', '-aq', '--filter', `name=^${CONTAINER_PREFIX}`]);
+  if (list.exitCode !== 0) {
+    log.warn('sandbox', `killAllSandboxContainers: list failed: ${list.stderr.trim()}`);
+    return;
+  }
+  const ids = list.stdout.trim().split('\n').filter(Boolean);
+  if (ids.length === 0) return;
+  const rm = await dockerSpawn(['rm', '-fv', ...ids]);
+  conns.clear();
+  if (rm.exitCode !== 0) {
+    log.warn('sandbox', `killAllSandboxContainers: rm failed: ${rm.stderr.trim()}`);
+  } else {
+    log.info('sandbox', `killed ${ids.length} sandbox container(s)`);
+  }
+}
+
 // For tests.
 export function _resetImageReadyCache(): void {
   imageReady = undefined;
   networkReady = undefined;
+  conns.clear();
 }

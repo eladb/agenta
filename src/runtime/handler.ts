@@ -93,12 +93,16 @@ async function handleMessage(
     return;
   }
 
-  // Lazy-create the sandbox container on first mention. Idempotent; subsequent
-  // mentions are no-ops. Failures are logged but don't block the turn — bash
-  // calls will surface the error as a tool_result.
-  ensureContainer(tk).catch((err) => {
+  // Create the per-thread sandbox container on first mention. Idempotent
+  // (cheap after warmup). Awaiting matters because the turn may call bash —
+  // and bash needs the in-container HTTP server up. Failures are logged but
+  // don't block the turn; bash calls will surface a sandbox-not-initialized
+  // error as a tool_result.
+  try {
+    await ensureContainer(tk);
+  } catch (err) {
     log.warn('handler', `[${tk}] ensureContainer failed: ${(err as Error).message}`);
-  });
+  }
 
   await startOrQueue(web, callModel, systemPrompt, {
     channel: e.channel,
