@@ -13,7 +13,7 @@ type SlackFile = {
   url_private?: string;
 };
 
-function sanitize(name: string): string {
+export function sanitize(name: string): string {
   return name.replace(/[^\w.-]+/g, '_').slice(0, 120);
 }
 

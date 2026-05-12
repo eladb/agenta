@@ -1,4 +1,7 @@
+import { readFile as fsReadFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { log } from '../log';
+import { attachmentsDir } from '../persistence/store';
 import { containerName, dockerProvider } from './docker';
 import { flyProvider } from './fly';
 import type { SandboxEndpoint, SandboxProvider } from './provider';
@@ -34,9 +37,11 @@ export function isSandboxReady(threadKey: string): boolean {
   return provider.isReady(threadKey);
 }
 export async function removeContainer(threadKey: string): Promise<void> {
+  syncedAttachments.delete(threadKey);
   return provider.remove(threadKey);
 }
 export async function killAllSandboxContainers(): Promise<void> {
+  syncedAttachments.clear();
   return provider.killAll();
 }
 
@@ -202,4 +207,69 @@ export async function listDir(
   signal?: AbortSignal,
 ): Promise<DockerResult> {
   return postJson(threadKey, '/ls', path ? { path } : {}, signal);
+}
+
+export async function writeBinary(
+  threadKey: string,
+  path: string,
+  data: Buffer,
+  signal?: AbortSignal,
+): Promise<DockerResult> {
+  return postJson(
+    threadKey,
+    '/write_binary',
+    { path, content_b64: data.toString('base64') },
+    signal,
+  );
+}
+
+// Per-thread set of attachment basenames already pushed into the sandbox in
+// this process. Reset on container removal / killAll: a fresh sandbox needs a
+// fresh sync since /workspace is ephemeral. In-process only — restart is
+// fine because the new sandbox starts empty too.
+const syncedAttachments = new Map<string, Set<string>>();
+
+// Push every file under data/{threadKey}/attachments/ into the sandbox at
+// /workspace/attachments/<basename>, skipping files already synced in this
+// process. Called lazily on the first sandbox-touching tool call per turn
+// (after ensureContainer). Idempotent and safe to re-call.
+export async function syncAttachmentsToSandbox(threadKey: string): Promise<{ synced: number }> {
+  const dir = attachmentsDir(threadKey);
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    // No attachments dir → nothing to sync.
+    return { synced: 0 };
+  }
+  let done = syncedAttachments.get(threadKey);
+  if (!done) {
+    done = new Set<string>();
+    syncedAttachments.set(threadKey, done);
+  }
+  let count = 0;
+  for (const name of entries) {
+    if (done.has(name)) continue;
+    const localPath = join(dir, name);
+    let data: Buffer;
+    try {
+      data = await fsReadFile(localPath);
+    } catch (err) {
+      log.warn('sandbox', `syncAttachments: read ${localPath} failed`, err);
+      continue;
+    }
+    const res = await writeBinary(threadKey, `attachments/${name}`, data);
+    if (res.exitCode !== 0) {
+      log.warn('sandbox', `syncAttachments: write_binary ${name} failed: ${res.stderr}`);
+      continue;
+    }
+    done.add(name);
+    count += 1;
+  }
+  return { synced: count };
+}
+
+// For tests.
+export function _resetSyncedAttachments(): void {
+  syncedAttachments.clear();
 }
