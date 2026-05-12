@@ -20,7 +20,7 @@ export const shareFile: Tool = {
     function: {
       name: 'share_file',
       description:
-        'Upload a file from the sandbox to the Slack thread so the user can see / download it. Use this for images you generated (matplotlib charts, screenshots), PDFs you produced, or any other artifact the user needs to look at. Returns the Slack permalink + file id. Max 25 MB. Paths are sandbox-internal — anything readable from inside the container works.',
+        'Upload a file from the sandbox INTO the Slack thread so the user can actually see it. CALL THIS whenever the user asks you to "send me", "show me", or "share" an image, chart, PDF, archive, or any other artifact — writing a file to /workspace alone does NOT deliver it to the user; only share_file does. Do not invent URLs like sandbox:// or file:// — the user can\'t open those. Returns the Slack permalink + file id. Max 25 MB.',
       parameters: {
         type: 'object',
         properties: {

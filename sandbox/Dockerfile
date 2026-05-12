@@ -10,7 +10,9 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git iptables jq python3 ripgrep util-linux \
+      bash ca-certificates curl git iptables jq ripgrep util-linux \
+      python3 python3-pil python3-matplotlib python3-numpy python3-pandas \
+      imagemagick \
  && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged user for everything except the iptables setup in entrypoint.sh.
