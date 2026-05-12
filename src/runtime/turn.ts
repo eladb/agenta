@@ -104,15 +104,15 @@ export async function runTurn(
         let provisionError: string | undefined;
         if (tool?.requiresSandbox && !isSandboxReady(input.threadKey)) {
           const provIdx = lines.length;
-          lines.push('• 🛠️ provisioning workspace…');
+          lines.push('• provisioning workspace…');
           await updateChecklist();
           try {
             await ensureContainer(input.threadKey);
-            lines[provIdx] = '• ✅ workspace ready';
+            lines[provIdx] = '• workspace ready';
           } catch (err) {
             const msg = (err as Error).message;
             provisionError = msg;
-            lines[provIdx] = `• ❌ workspace provisioning failed: ${msg}`;
+            lines[provIdx] = `• workspace provisioning failed: ${msg}`;
           }
           await updateChecklist();
         }
