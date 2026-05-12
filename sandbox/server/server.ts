@@ -30,6 +30,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 const PORT = Number(process.env.SANDBOX_PORT ?? 9000);
 const TOKEN = process.env.SANDBOX_TOKEN;
 const WORKSPACE = '/workspace';
+// Hard cap on /exec runtime. Long-hanging commands (e.g. `curl` to a blocked
+// host waiting on TCP timeout) would otherwise block the model's turn
+// indefinitely. The model sees a clean error in stderr and can adjust.
+const EXEC_TIMEOUT_MS = Number(process.env.SANDBOX_EXEC_TIMEOUT_MS ?? 60_000);
 
 if (!TOKEN || TOKEN.length < 16) {
   console.error('SANDBOX_TOKEN env var is required (min 16 chars)');
@@ -114,7 +118,24 @@ async function handleExec(req: Request): Promise<Response> {
         child.kill('SIGTERM');
       };
       req.signal.addEventListener('abort', onAbort);
-      child.on('close', () => req.signal.removeEventListener('abort', onAbort));
+
+      // Timeout: send a clear stderr marker, SIGTERM, escalate to SIGKILL.
+      const timeoutTimer = setTimeout(() => {
+        send('stderr', { chunk: `\n[command timed out after ${EXEC_TIMEOUT_MS}ms]\n` });
+        child.kill('SIGTERM');
+        setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // already dead
+          }
+        }, 2000);
+      }, EXEC_TIMEOUT_MS);
+
+      child.on('close', () => {
+        clearTimeout(timeoutTimer);
+        req.signal.removeEventListener('abort', onAbort);
+      });
     },
     cancel() {
       child.kill('SIGTERM');

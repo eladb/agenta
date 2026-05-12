@@ -47,6 +47,9 @@ beforeAll(async () => {
   if (!HAS_DOCKER) return;
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
+  // Lower the in-container /exec timeout so the timeout test doesn't take 60s.
+  // docker.ts forwards this env to every container it launches.
+  process.env.SANDBOX_EXEC_TIMEOUT_MS = '5000';
   // Build/pull the sandbox image up front so the first mention doesn't time out.
   await ensureImage();
   [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
@@ -264,6 +267,52 @@ test.if(HAS_DOCKER)(
     expect(readResult.content).not.toContain('TODO');
   },
   120_000,
+);
+
+test.if(HAS_DOCKER)(
+  'bash command timeout: long-running command is killed and returns a clear marker',
+  async () => {
+    script.length = 0;
+    calls.length = 0;
+    // The container's exec timeout is set via SANDBOX_EXEC_TIMEOUT_MS in
+    // beforeAll (5s for tests).
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_sleep',
+          type: 'function',
+          function: {
+            name: 'bash',
+            arguments: JSON.stringify({ command: 'sleep 300' }),
+          },
+        },
+      ],
+    });
+    scriptReply({ role: 'assistant', content: 'slept' });
+
+    const threadTs = await mention(
+      tester,
+      agent.botUserId,
+      channel,
+      undefined,
+      `e2e-timeout-${Date.now()}`,
+    );
+    createdThreads.push(threadTs);
+
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'slept', {
+      timeoutMs: 45_000,
+    });
+    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 45_000 });
+
+    const second = calls[1];
+    if (!second) throw new Error('expected second call');
+    const toolMsg = second.find((m) => m.role === 'tool');
+    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
+    expect(toolMsg.content).toContain('timed out');
+  },
+  60_000,
 );
 
 test.if(HAS_DOCKER)(

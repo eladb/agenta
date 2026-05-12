@@ -182,6 +182,9 @@ export async function ensureContainer(threadKey: string): Promise<void> {
     `127.0.0.1::${SANDBOX_PORT}`,
     '-e',
     `SANDBOX_TOKEN=${token}`,
+    ...(process.env.SANDBOX_EXEC_TIMEOUT_MS
+      ? ['-e', `SANDBOX_EXEC_TIMEOUT_MS=${process.env.SANDBOX_EXEC_TIMEOUT_MS}`]
+      : []),
     '-w',
     '/workspace',
     '--mount',
