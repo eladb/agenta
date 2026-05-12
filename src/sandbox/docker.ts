@@ -162,6 +162,15 @@ export async function ensureContainer(threadKey: string): Promise<void> {
   }
 
   const token = randomToken();
+  // Sandbox hardening:
+  // - --cap-drop ALL drops every Linux capability...
+  // - ...then --cap-add NET_ADMIN puts back just one, so the entrypoint can
+  //   install iptables OUTPUT rules (defense-in-depth — a malicious shell
+  //   command could still flush them; a follow-up should move egress block
+  //   to a host-side DOCKER-USER chain).
+  // - --security-opt no-new-privileges blocks setuid escalation.
+  // - --pids-limit 256 contains fork bombs.
+  // - --memory / --cpus cap resource consumption per thread.
   const run = await dockerSpawn([
     'run',
     '-d',
@@ -177,6 +186,18 @@ export async function ensureContainer(threadKey: string): Promise<void> {
     '/workspace',
     '--mount',
     'type=volume,target=/workspace',
+    '--cap-drop',
+    'ALL',
+    '--cap-add',
+    'NET_ADMIN',
+    '--security-opt',
+    'no-new-privileges',
+    '--pids-limit',
+    '256',
+    '--memory',
+    '1g',
+    '--cpus',
+    '1.0',
     SANDBOX_IMAGE,
   ]);
   if (run.exitCode !== 0) {
