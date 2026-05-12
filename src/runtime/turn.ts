@@ -16,6 +16,15 @@ export type TurnInput = {
 const ARGS_PREVIEW_LEN = 80;
 const LIVE_PREVIEW_LEN = 150;
 const LIVE_EDIT_INTERVAL_MS = 800;
+const THINKING_LINE = '• thinking…';
+
+// Pop the trailing thinking… placeholder if present. The line is ephemeral:
+// shown while we wait for the model, removed as soon as the next concrete
+// step (tool bullet or final reply) lands. So the final checklist doesn't
+// accumulate "thinking" lines between iterations.
+function popThinking(lines: string[]): void {
+  if (lines[lines.length - 1] === THINKING_LINE) lines.pop();
+}
 
 function formatToolBullet(tc: ToolCall): string {
   // Prefer the tool's own describe() — short, human-readable, e.g. "$ ls -la"
@@ -49,17 +58,17 @@ export async function runTurn(
   input: TurnInput,
   signal?: AbortSignal,
 ): Promise<void> {
-  const checklistTs = await postInThread(web, input.channel, input.threadTs, 'thinking...');
-  const lines: string[] = ['• calling model'];
+  const checklistTs = await postInThread(web, input.channel, input.threadTs, THINKING_LINE);
+  const lines: string[] = [THINKING_LINE];
   const updateChecklist = (): Promise<void> =>
     editMessage(web, input.channel, checklistTs, lines.join('\n')).catch(() => {});
 
   try {
-    await updateChecklist();
     const messages: Message[] = await buildMessages(input.threadKey, systemPrompt);
 
     while (true) {
       const response = await callModel(messages, { tools: TOOL_DEFS, signal });
+      popThinking(lines);
 
       const assistantEventId = newEventId();
       const text = response.content ?? '';
@@ -164,7 +173,7 @@ export async function runTurn(
 
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
 
-      lines.push('• calling model');
+      lines.push(THINKING_LINE);
       await updateChecklist();
     }
   } catch (err) {

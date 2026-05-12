@@ -99,6 +99,55 @@ describe('runTurn with tools', () => {
     expect(tcs[0]?.payload.parent_event_id).toBe(firstAssistant?.event_id);
   });
 
+  test('thinking… line is ephemeral: gone before tool bullet, back between tools, gone in final reply', async () => {
+    const { web, edits, posts } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'final reply' };
+    };
+
+    await runTurn(web, callModel, 'sys', input);
+
+    // Initial post is the thinking line.
+    expect(posts[0]?.text).toContain('thinking');
+
+    // No "calling model" anywhere — that's the old text.
+    expect(edits.some((e) => e.text.includes('calling model'))).toBe(false);
+
+    // Right after the model returns tool_calls, the thinking line is popped
+    // and the tool bullet replaces it. So we expect at least one edit that
+    // has the tool bullet but NO thinking line.
+    expect(
+      edits.some((e) => e.text.includes('• get current time') && !e.text.includes('thinking')),
+    ).toBe(true);
+
+    // Between tools and the next model call, thinking is shown again, AFTER
+    // the tool bullet.
+    expect(
+      edits.some(
+        (e) => e.text.includes('• get current time') && e.text.endsWith('• thinking…'),
+      ),
+    ).toBe(true);
+
+    // Final edit is just the reply — no checklist artifacts.
+    const last = edits[edits.length - 1]?.text;
+    expect(last).toBe('final reply');
+  });
+
   test('multiple tool_calls in one response are executed in order', async () => {
     const { web } = makeWebStub();
     let n = 0;
