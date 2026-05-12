@@ -82,13 +82,7 @@ export async function ensureNetwork(): Promise<void> {
     // actually block egress on Docker Desktop (VPNkit NATs at a different
     // layer). Re-add a real egress block via iptables OUTPUT rules inside
     // the container (needs --cap-add NET_ADMIN) in a follow-up.
-    const create = await dockerSpawn([
-      'network',
-      'create',
-      '--driver',
-      'bridge',
-      SANDBOX_NETWORK,
-    ]);
+    const create = await dockerSpawn(['network', 'create', '--driver', 'bridge', SANDBOX_NETWORK]);
     if (create.exitCode !== 0) {
       throw new Error(`docker network create failed: ${create.stderr || create.stdout}`);
     }
@@ -207,9 +201,7 @@ async function getEndpoint(threadKey: string): Promise<{ baseUrl: string; token:
 // Parse an SSE stream of `data: <json>\n\n` events emitted by /exec.
 // Exported for unit testing — every bash tool call goes through here, so a
 // regression here would silently corrupt all tool output.
-export async function consumeExecStream(
-  body: ReadableStream<Uint8Array>,
-): Promise<DockerResult> {
+export async function consumeExecStream(body: ReadableStream<Uint8Array>): Promise<DockerResult> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -265,16 +257,17 @@ export async function runBash(
   return consumeExecStream(res.body);
 }
 
-export async function readFile(
+async function postJson(
   threadKey: string,
-  path: string,
+  endpoint: string,
+  body: object,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
   const { baseUrl, token } = await getEndpoint(threadKey);
-  const res = await fetch(`${baseUrl}/read`, {
+  const res = await fetch(`${baseUrl}${endpoint}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!res.ok) {
@@ -283,23 +276,63 @@ export async function readFile(
   return (await res.json()) as DockerResult;
 }
 
+export async function readFile(
+  threadKey: string,
+  path: string,
+  opts: { offset?: number; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<DockerResult> {
+  return postJson(threadKey, '/read', { path, ...opts }, signal);
+}
+
+export async function editFile(
+  threadKey: string,
+  path: string,
+  oldString: string,
+  newString: string,
+  signal?: AbortSignal,
+): Promise<DockerResult> {
+  return postJson(
+    threadKey,
+    '/edit',
+    { path, old_string: oldString, new_string: newString },
+    signal,
+  );
+}
+
+export async function grep(
+  threadKey: string,
+  pattern: string,
+  opts: { path?: string; glob?: string } = {},
+  signal?: AbortSignal,
+): Promise<DockerResult> {
+  return postJson(threadKey, '/grep', { pattern, ...opts }, signal);
+}
+
+export async function glob(
+  threadKey: string,
+  pattern: string,
+  opts: { path?: string } = {},
+  signal?: AbortSignal,
+): Promise<DockerResult> {
+  return postJson(threadKey, '/glob', { pattern, ...opts }, signal);
+}
+
+export async function listDir(
+  threadKey: string,
+  path: string | undefined,
+  signal?: AbortSignal,
+): Promise<DockerResult> {
+  return postJson(threadKey, '/ls', path ? { path } : {}, signal);
+}
+
 export async function writeFile(
   threadKey: string,
   path: string,
   content: string,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  const { baseUrl, token } = await getEndpoint(threadKey);
-  const res = await fetch(`${baseUrl}/write`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ path, content }),
-    signal,
-  });
-  if (!res.ok) {
-    return { stdout: '', stderr: `sandbox HTTP ${res.status}`, exitCode: -1 };
-  }
-  return (await res.json()) as DockerResult;
+  return postJson(threadKey, '/write', { path, content }, signal);
 }
 
 export async function removeContainer(threadKey: string): Promise<void> {

@@ -10,7 +10,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git jq python3 \
+      bash ca-certificates curl git jq python3 ripgrep \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/sandbox-server /usr/local/bin/sandbox-server

@@ -9,13 +9,21 @@ afterEach(() => {
 });
 
 describe('TOOL_DEFS', () => {
-  test('exposes get_current_time, fetch_url, bash, read_file, write_file', () => {
+  test('exposes the full coding-agent tool set', () => {
     const names = TOOL_DEFS.map((t) => t.function.name);
-    expect(names).toContain('get_current_time');
-    expect(names).toContain('fetch_url');
-    expect(names).toContain('bash');
-    expect(names).toContain('read_file');
-    expect(names).toContain('write_file');
+    for (const expected of [
+      'get_current_time',
+      'fetch_url',
+      'bash',
+      'read_file',
+      'write_file',
+      'edit_file',
+      'grep',
+      'glob',
+      'list_dir',
+    ]) {
+      expect(names).toContain(expected);
+    }
   });
 });
 
@@ -142,6 +150,50 @@ describe('invokeTool: read_file / write_file (arg validation)', () => {
     );
     expect(r.error).toBe(true);
     expect(r.content).toMatch(/exceeds .* limit/);
+  });
+});
+
+describe('invokeTool: edit_file / grep / glob (arg validation)', () => {
+  test('edit_file with missing path returns an error', async () => {
+    const r = await invokeTool(
+      'edit_file',
+      JSON.stringify({ old_string: 'a', new_string: 'b' }),
+      CTX,
+    );
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/missing or invalid path/);
+  });
+
+  test('edit_file with missing old_string returns an error', async () => {
+    const r = await invokeTool(
+      'edit_file',
+      JSON.stringify({ path: '/tmp/x', new_string: 'b' }),
+      CTX,
+    );
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/missing or invalid old_string/);
+  });
+
+  test('edit_file with missing new_string returns an error', async () => {
+    const r = await invokeTool(
+      'edit_file',
+      JSON.stringify({ path: '/tmp/x', old_string: 'a' }),
+      CTX,
+    );
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/missing or invalid new_string/);
+  });
+
+  test('grep with missing pattern returns an error', async () => {
+    const r = await invokeTool('grep', '{}', CTX);
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/missing or invalid pattern/);
+  });
+
+  test('glob with missing pattern returns an error', async () => {
+    const r = await invokeTool('glob', '{}', CTX);
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/missing or invalid pattern/);
   });
 });
 

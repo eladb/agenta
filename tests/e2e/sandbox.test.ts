@@ -166,6 +166,107 @@ test.if(HAS_DOCKER)(
 );
 
 test.if(HAS_DOCKER)(
+  'coding-agent toolchain: write_file -> grep -> edit_file -> read_file roundtrip',
+  async () => {
+    script.length = 0;
+    calls.length = 0;
+    const body = ['def greet(name):', '    # TODO: implement', '    pass', ''].join('\n');
+
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_write',
+          type: 'function',
+          function: {
+            name: 'write_file',
+            arguments: JSON.stringify({ path: 'app.py', content: body }),
+          },
+        },
+      ],
+    });
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_grep',
+          type: 'function',
+          function: {
+            name: 'grep',
+            arguments: JSON.stringify({ pattern: 'TODO', glob: '*.py' }),
+          },
+        },
+      ],
+    });
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_edit',
+          type: 'function',
+          function: {
+            name: 'edit_file',
+            arguments: JSON.stringify({
+              path: 'app.py',
+              old_string: '    # TODO: implement\n    pass',
+              new_string: '    return f"hello {name}"',
+            }),
+          },
+        },
+      ],
+    });
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_read',
+          type: 'function',
+          function: {
+            name: 'read_file',
+            arguments: JSON.stringify({ path: 'app.py', offset: 1, limit: 2 }),
+          },
+        },
+      ],
+    });
+    scriptReply({ role: 'assistant', content: 'toolchain done' });
+
+    const threadTs = await mention(
+      tester,
+      agent.botUserId,
+      channel,
+      undefined,
+      `e2e-toolchain-${Date.now()}`,
+    );
+    createdThreads.push(threadTs);
+
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'toolchain done');
+    await waitFor(() => calls.length === 5, { what: 'five model calls', timeoutMs: 30_000 });
+
+    // Inspect each tool's result in the messages array of the next call.
+    const grepResult = calls[2]?.find((m) => m.role === 'tool' && m.tool_call_id === 'call_grep');
+    if (grepResult?.role !== 'tool') throw new Error('expected grep tool msg');
+    expect(grepResult.content).toContain('app.py');
+    expect(grepResult.content).toContain('TODO');
+
+    const editResult = calls[3]?.find((m) => m.role === 'tool' && m.tool_call_id === 'call_edit');
+    if (editResult?.role !== 'tool') throw new Error('expected edit tool msg');
+    expect(editResult.content).toMatch(/edited app\.py/);
+
+    const readResult = calls[4]?.find((m) => m.role === 'tool' && m.tool_call_id === 'call_read');
+    if (readResult?.role !== 'tool') throw new Error('expected read tool msg');
+    // After edit + offset=1,limit=2: first two lines of the new file.
+    expect(readResult.content).toContain('def greet(name):');
+    expect(readResult.content).toContain('return f"hello {name}"');
+    expect(readResult.content).not.toContain('TODO');
+  },
+  120_000,
+);
+
+test.if(HAS_DOCKER)(
   '/delete removes the sandbox container',
   async () => {
     script.length = 0;
