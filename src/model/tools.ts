@@ -14,6 +14,10 @@ export type ToolContext = {
 export type Tool = {
   def: ToolDef;
   invoke: (args: unknown, ctx: ToolContext, signal?: AbortSignal) => Promise<string>;
+  // Optional human-readable one-liner for the Slack checklist. Receives the
+  // parsed JSON args (or {} if parsing failed). Should be short, safe to call
+  // on malformed input, and not throw.
+  describe?: (args: unknown) => string;
 };
 
 const FETCH_BODY_CAP = 8 * 1024;
@@ -25,6 +29,18 @@ const FILE_WRITE_CAP = 64 * 1024;
 function truncate(s: string, cap: number, label: string): string {
   if (s.length <= cap) return s;
   return `${s.slice(0, cap)}\n…[${label} truncated, ${s.length - cap} more chars]`;
+}
+
+// One-line truncation used by tool describers. Keeps the Slack checklist
+// readable without spilling onto multiple lines.
+function oneLine(s: string, max = 80): string {
+  const flat = s.replace(/[\r\n]+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function strArg(args: unknown, key: string): string | undefined {
+  const v = (args as Record<string, unknown> | null)?.[key];
+  return typeof v === 'string' ? v : undefined;
 }
 
 export function formatBashResult({
@@ -55,6 +71,7 @@ export const TOOLS: Record<string, Tool> = {
       },
     },
     invoke: async () => new Date().toISOString(),
+    describe: () => 'get current time',
   },
 
   fetch_url: {
@@ -70,6 +87,10 @@ export const TOOLS: Record<string, Tool> = {
           additionalProperties: false,
         },
       },
+    },
+    describe: (args) => {
+      const url = strArg(args, 'url');
+      return url ? `fetch ${oneLine(url, 60)}` : 'fetch (no url)';
     },
     invoke: async (args, _ctx, signal) => {
       const url = (args as { url?: unknown } | null)?.url;
@@ -122,6 +143,18 @@ export const TOOLS: Record<string, Tool> = {
         },
       },
     },
+    describe: (args) => {
+      const a = args as { path?: unknown; offset?: unknown; limit?: unknown } | null;
+      const path = typeof a?.path === 'string' ? a.path : '?';
+      const off = typeof a?.offset === 'number' ? a.offset : undefined;
+      const lim = typeof a?.limit === 'number' ? a.limit : undefined;
+      if (off !== undefined || lim !== undefined) {
+        const start = off ?? 1;
+        const end = lim !== undefined ? start + lim - 1 : '…';
+        return `read ${path}:${start}-${end}`;
+      }
+      return `read ${path}`;
+    },
     invoke: async (args, ctx, signal) => {
       const a = args as { path?: unknown; offset?: unknown; limit?: unknown } | null;
       const path = a?.path;
@@ -161,6 +194,7 @@ export const TOOLS: Record<string, Tool> = {
         },
       },
     },
+    describe: (args) => `edit ${strArg(args, 'path') ?? '?'}`,
     invoke: async (args, ctx, signal) => {
       const a = args as { path?: unknown; old_string?: unknown; new_string?: unknown } | null;
       if (typeof a?.path !== 'string' || a.path.length === 0) {
@@ -205,6 +239,13 @@ export const TOOLS: Record<string, Tool> = {
         },
       },
     },
+    describe: (args) => {
+      const pat = strArg(args, 'pattern') ?? '?';
+      const g = strArg(args, 'glob');
+      const p = strArg(args, 'path');
+      const where = g ? ` in ${g}` : p ? ` in ${p}` : '';
+      return oneLine(`grep "${pat}"${where}`);
+    },
     invoke: async (args, ctx, signal) => {
       const a = args as { pattern?: unknown; path?: unknown; glob?: unknown } | null;
       if (typeof a?.pattern !== 'string' || a.pattern.length === 0) {
@@ -242,6 +283,11 @@ export const TOOLS: Record<string, Tool> = {
         },
       },
     },
+    describe: (args) => {
+      const pat = strArg(args, 'pattern') ?? '?';
+      const p = strArg(args, 'path');
+      return oneLine(p ? `glob ${pat} in ${p}` : `glob ${pat}`);
+    },
     invoke: async (args, ctx, signal) => {
       const a = args as { pattern?: unknown; path?: unknown } | null;
       if (typeof a?.pattern !== 'string' || a.pattern.length === 0) {
@@ -276,6 +322,7 @@ export const TOOLS: Record<string, Tool> = {
         },
       },
     },
+    describe: (args) => `list ${strArg(args, 'path') ?? '/workspace'}`,
     invoke: async (args, ctx, signal) => {
       const a = args as { path?: unknown } | null;
       const path = typeof a?.path === 'string' && a.path.length > 0 ? a.path : undefined;
@@ -307,6 +354,12 @@ export const TOOLS: Record<string, Tool> = {
           additionalProperties: false,
         },
       },
+    },
+    describe: (args) => {
+      const a = args as { path?: unknown; content?: unknown } | null;
+      const path = typeof a?.path === 'string' ? a.path : '?';
+      const len = typeof a?.content === 'string' ? a.content.length : 0;
+      return `write ${path} (${len} chars)`;
     },
     invoke: async (args, ctx, signal) => {
       const path = (args as { path?: unknown } | null)?.path;
@@ -347,6 +400,10 @@ export const TOOLS: Record<string, Tool> = {
           additionalProperties: false,
         },
       },
+    },
+    describe: (args) => {
+      const cmd = strArg(args, 'command');
+      return cmd ? oneLine(`$ ${cmd}`) : '$ (missing command)';
     },
     invoke: async (args, ctx, signal) => {
       const command = (args as { command?: unknown } | null)?.command;

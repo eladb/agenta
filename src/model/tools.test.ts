@@ -97,6 +97,43 @@ describe('TOOLS registry', () => {
       expect(tool.def.function.name).toBe(key);
     }
   });
+
+  test('every tool has a describe()', () => {
+    for (const [name, tool] of Object.entries(TOOLS)) {
+      expect(typeof tool.describe).toBe('function');
+      // Must be safe on malformed input (model might emit bad JSON).
+      expect(() => tool.describe?.(null)).not.toThrow();
+      expect(() => tool.describe?.({})).not.toThrow();
+      const out = tool.describe?.({});
+      expect(typeof out).toBe('string');
+      expect((out ?? '').length).toBeGreaterThan(0);
+      // Should not span multiple lines.
+      expect((out ?? '').includes('\n')).toBe(false);
+      void name;
+    }
+  });
+
+  test('describers render meaningful lines for known arg shapes', () => {
+    expect(TOOLS.get_current_time?.describe?.({})).toBe('get current time');
+    expect(TOOLS.fetch_url?.describe?.({ url: 'https://example.com' })).toBe(
+      'fetch https://example.com',
+    );
+    expect(TOOLS.bash?.describe?.({ command: 'ls -la' })).toBe('$ ls -la');
+    expect(TOOLS.read_file?.describe?.({ path: 'app.py' })).toBe('read app.py');
+    expect(TOOLS.read_file?.describe?.({ path: 'app.py', offset: 5, limit: 10 })).toBe(
+      'read app.py:5-14',
+    );
+    expect(TOOLS.write_file?.describe?.({ path: 'app.py', content: 'hello' })).toBe(
+      'write app.py (5 chars)',
+    );
+    expect(TOOLS.edit_file?.describe?.({ path: 'app.py' })).toBe('edit app.py');
+    expect(TOOLS.grep?.describe?.({ pattern: 'TODO', glob: '*.py' })).toBe(
+      'grep "TODO" in *.py',
+    );
+    expect(TOOLS.glob?.describe?.({ pattern: '**/*.ts' })).toBe('glob **/*.ts');
+    expect(TOOLS.list_dir?.describe?.({ path: 'src' })).toBe('list src');
+    expect(TOOLS.list_dir?.describe?.({})).toBe('list /workspace');
+  });
 });
 
 describe('formatBashResult', () => {

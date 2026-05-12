@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import { log } from '../log';
 import { buildMessages } from '../model/context';
 import type { CallModel, Message, ToolCall } from '../model/gateway';
-import { invokeTool, TOOL_DEFS } from '../model/tools';
+import { invokeTool, TOOL_DEFS, TOOLS } from '../model/tools';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { editMessage, postInThread } from '../slack/post';
 import { redact } from './redact';
@@ -18,6 +18,19 @@ const LIVE_PREVIEW_LEN = 150;
 const LIVE_EDIT_INTERVAL_MS = 800;
 
 function formatToolBullet(tc: ToolCall): string {
+  // Prefer the tool's own describe() — short, human-readable, e.g. "$ ls -la"
+  // instead of `bash({"command":"ls -la"})`. Falls back to the raw JSON when
+  // no describer is registered or it throws on weird args.
+  const tool = TOOLS[tc.function.name];
+  if (tool?.describe) {
+    try {
+      const parsed = tc.function.arguments.length > 0 ? JSON.parse(tc.function.arguments) : {};
+      const desc = tool.describe(parsed);
+      if (desc) return `• ${desc}`;
+    } catch {
+      // fall through to raw
+    }
+  }
   const a = tc.function.arguments;
   const args = a.length > ARGS_PREVIEW_LEN ? `${a.slice(0, ARGS_PREVIEW_LEN - 1)}…` : a;
   return `• tool: ${tc.function.name}(${args})`;

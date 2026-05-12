@@ -75,8 +75,8 @@ describe('runTurn with tools', () => {
     expect(n).toBe(2);
     // Final edit should be the reply text.
     expect(edits[edits.length - 1]?.text).toBe('the time is now');
-    // At least one intermediate edit contains the tool bullet.
-    expect(edits.some((e) => e.text.includes('• tool: get_current_time'))).toBe(true);
+    // At least one intermediate edit contains the tool's describe() bullet.
+    expect(edits.some((e) => e.text.includes('• get current time'))).toBe(true);
 
     const events = await readEvents<{
       source: string;
