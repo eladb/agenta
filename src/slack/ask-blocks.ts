@@ -26,11 +26,14 @@ export function buildAskBlocks(
   };
   switch (kind) {
     case 'buttons': {
-      const buttons = options.slice(0, 25).map((opt) => ({
+      // Slack requires action_id to be unique per block element. We use the
+      // shared prefix ASK_ACTION_BUTTON so the dispatcher can match all
+      // option buttons with a single startsWith() check; the index disambiguates.
+      const buttons = options.slice(0, 25).map((opt, i) => ({
         type: 'button',
         text: { type: 'plain_text', text: shortOpt(opt) },
         value: opt,
-        action_id: ASK_ACTION_BUTTON,
+        action_id: `${ASK_ACTION_BUTTON}.${i}`,
       }));
       return [header, { type: 'actions', elements: buttons }];
     }

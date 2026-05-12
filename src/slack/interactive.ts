@@ -56,12 +56,15 @@ export function listenInteractive(socket: SocketModeClient): void {
 
 function dispatch(ask: ReturnType<typeof getPendingAskByTs>, action: Action): void {
   if (!ask) return;
-  switch (action.action_id) {
-    case ASK_ACTION_BUTTON: {
-      const v = action.value;
-      if (typeof v === 'string') ask.resolve(v);
-      return;
-    }
+  const id = action.action_id ?? '';
+  // Buttons use a per-option suffix (ASK_ACTION_BUTTON.<index>) because
+  // Slack requires unique action_ids; the chosen value is in action.value.
+  if (id.startsWith(`${ASK_ACTION_BUTTON}.`) || id === ASK_ACTION_BUTTON) {
+    const v = action.value;
+    if (typeof v === 'string') ask.resolve(v);
+    return;
+  }
+  switch (id) {
     case ASK_ACTION_SELECT: {
       const v = action.selected_option?.value;
       if (typeof v === 'string') ask.resolve(v);
@@ -84,6 +87,6 @@ function dispatch(ask: ReturnType<typeof getPendingAskByTs>, action: Action): vo
       return;
     }
     default:
-      log.warn('interactive', `unknown action_id: ${action.action_id}`);
+      log.warn('interactive', `unknown action_id: ${id}`);
   }
 }

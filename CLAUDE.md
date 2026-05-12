@@ -9,6 +9,7 @@ This file is your context for a new session. Read it in full before starting wor
 - Don't introduce interfaces / "provider" types unless a second concrete implementation actually exists. Single implementation = single concrete function.
 - **Stop and ask before non-trivial decisions or implementing.** Surface forks via `AskUserQuestion` (library choice, module layout, scope of the next phase, persistence strategy, etc.) and confirm direction before writing code. Don't bundle "while I'm here" cleanup or scope expansion.
 - Honest is better than enthusiastic. When something is hard or impossible (Slack reCAPTCHA, App-Level token API gap, Anthropic image size limits), say so plainly and offer the realistic options instead of grinding.
+- **Never instruct manual Slack UI operations.** All app-configuration changes (scopes, event subscriptions, interactivity, etc.) must go through `apps.manifest.update` so the manifest file in this repo stays the single source of truth. If the `SLACK_CONFIG_ACCESS_TOKEN` is expired or missing, ask the user to generate a fresh one — don't fall back to "go to the UI and toggle this."
 
 ## Project: agenta
 
