@@ -76,7 +76,12 @@ if (!exists) {
 //    Fly's remote builder and pushes to registry.fly.io/<app>:latest. Does
 //    NOT create any machines.
 console.log(`\ndeploying image from ${SANDBOX_DIR}…`);
-const deploy = fly(['deploy', '-a', APP, '--build-only', '--push'], { cwd: SANDBOX_DIR });
+// --image-label latest pins the registry tag to `latest` so the bot can
+// reference registry.fly.io/<app>:latest unambiguously. Default would be
+// deployment-<timestamp>, which we'd then have to track.
+const deploy = fly(['deploy', '-a', APP, '--build-only', '--push', '--image-label', 'latest'], {
+  cwd: SANDBOX_DIR,
+});
 if (!deploy.ok) die('fly deploy failed (see output above)');
 
 console.log(`\n✓ image pushed: registry.fly.io/${APP}:latest`);
