@@ -82,7 +82,12 @@ export async function runTurn(
           },
         });
 
-        const result = await invokeTool(tc.function.name, tc.function.arguments, signal);
+        const result = await invokeTool(
+          tc.function.name,
+          tc.function.arguments,
+          { threadKey: input.threadKey },
+          signal,
+        );
 
         await record({
           event_id: newEventId(),

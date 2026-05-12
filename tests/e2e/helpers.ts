@@ -5,6 +5,8 @@ import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
 import type { CallModel, Message } from '../../src/model/gateway';
 import { makeEventHandler } from '../../src/runtime/handler';
+import { threadKey as makeThreadKey } from '../../src/runtime/thread';
+import { removeContainer } from '../../src/sandbox/docker';
 import { connect } from '../../src/slack/connect';
 import { listen } from '../../src/slack/events';
 
@@ -186,6 +188,9 @@ export async function deleteThread(
   } catch {
     // ignore
   }
+  // Also remove the sandbox container created on first mention (best-effort —
+  // a no-op if docker isn't running or the container was never created).
+  await removeContainer(makeThreadKey(channel, threadTs)).catch(() => {});
 }
 
 export async function shutdown(agent: Agent, tester: Tester): Promise<void> {

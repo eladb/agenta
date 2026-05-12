@@ -5,6 +5,7 @@ import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attac
 import { backfillIfNew } from '../persistence/backfill';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { deleteThreadData } from '../persistence/store';
+import { ensureContainer, removeContainer } from '../sandbox/docker';
 import type { DeleteMessage, EditMessage, IncomingEvent, NormalMessage } from '../slack/events';
 import { postInThread } from '../slack/post';
 import { parseCommand } from './commands';
@@ -87,10 +88,17 @@ async function handleMessage(
 
   if (cmd === 'delete') {
     await postInThread(web, e.channel, e.threadTs, 'deleted (stub)').catch(() => {});
-    await deleteThreadData(tk);
+    await Promise.all([deleteThreadData(tk), removeContainer(tk)]);
     log.info('handler', `[${tk}] /delete done`);
     return;
   }
+
+  // Lazy-create the sandbox container on first mention. Idempotent; subsequent
+  // mentions are no-ops. Failures are logged but don't block the turn — bash
+  // calls will surface the error as a tool_result.
+  ensureContainer(tk).catch((err) => {
+    log.warn('handler', `[${tk}] ensureContainer failed: ${(err as Error).message}`);
+  });
 
   await startOrQueue(web, callModel, systemPrompt, {
     channel: e.channel,
