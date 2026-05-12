@@ -99,6 +99,93 @@ describe('runTurn with tools', () => {
     expect(tcs[0]?.payload.parent_event_id).toBe(firstAssistant?.event_id);
   });
 
+  test('multiple tool_calls in one response are executed in order', async () => {
+    const { web } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async (messages) => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_a',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+            {
+              id: 'call_b',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      // Second call must see BOTH tool messages, in order.
+      const toolMsgs = messages.filter((m) => m.role === 'tool');
+      expect(toolMsgs).toHaveLength(2);
+      if (toolMsgs[0]?.role !== 'tool' || toolMsgs[1]?.role !== 'tool') throw new Error('not tool');
+      expect(toolMsgs[0].tool_call_id).toBe('call_a');
+      expect(toolMsgs[1].tool_call_id).toBe('call_b');
+      return { role: 'assistant', content: 'done' };
+    };
+
+    await runTurn(web, callModel, 'sys', input);
+
+    const events = await readEvents<{ type: string; payload: Record<string, unknown> }>('k1');
+    const tcs = events.filter((e) => e.type === 'tool_call');
+    const trs = events.filter((e) => e.type === 'tool_result');
+    expect(tcs).toHaveLength(2);
+    expect(trs).toHaveLength(2);
+    // Order in JSONL: call_a's tool_call, call_a's tool_result, call_b's tool_call, call_b's tool_result.
+    const seq = events
+      .filter((e) => e.type === 'tool_call' || e.type === 'tool_result')
+      .map((e) => `${e.type}:${e.payload.tool_call_id}`);
+    expect(seq).toEqual([
+      'tool_call:call_a',
+      'tool_result:call_a',
+      'tool_call:call_b',
+      'tool_result:call_b',
+    ]);
+  });
+
+  test('tool execution error is recorded and the loop recovers', async () => {
+    const { web, edits } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async (messages) => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_err',
+              type: 'function',
+              // Unknown tool -> invokeTool returns an error result.
+              function: { name: 'does_not_exist', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      const toolMsg = messages.find((m) => m.role === 'tool');
+      if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
+      expect(toolMsg.content).toMatch(/unknown tool/);
+      return { role: 'assistant', content: 'I cannot do that, sorry' };
+    };
+
+    await runTurn(web, callModel, 'sys', input);
+
+    expect(edits[edits.length - 1]?.text).toBe('I cannot do that, sorry');
+
+    const events = await readEvents<{ type: string; payload: Record<string, unknown> }>('k1');
+    const trs = events.filter((e) => e.type === 'tool_result');
+    expect(trs).toHaveLength(1);
+    expect(trs[0]?.payload.error).toBe(true);
+    expect(trs[0]?.payload.content).toMatch(/unknown tool/);
+  });
+
   test('abort signal during second model call edits checklist to "stopped"', async () => {
     const { web, edits } = makeWebStub();
     const controller = new AbortController();

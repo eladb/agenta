@@ -40,6 +40,19 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
     }
   }
 
+  // tool_result events keyed by tool_call_id — used both to skip emitting
+  // duplicate role:tool messages from the main loop and to detect orphan
+  // tool_calls (recorded request, no matching result — happens if a turn
+  // crashed mid-execution). Orphans get a synthetic error tool message so
+  // the assistant tool_calls -> tool message invariant the model API
+  // requires is never violated on reconstruction.
+  const toolResultIds = new Set<string>();
+  for (const e of events) {
+    if (e.source === 'assistant' && e.type === 'tool_result') {
+      toolResultIds.add(e.payload.tool_call_id);
+    }
+  }
+
   const messages: Message[] = [{ role: 'system', content: systemPrompt }];
   for (const e of events) {
     if (e.source === 'slack' && e.type === 'message') {
@@ -66,6 +79,19 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
       messages.push(
         tool_calls ? { role: 'assistant', content, tool_calls } : { role: 'assistant', content },
       );
+      // Synthesize a tool message for any tool_call that never got a recorded
+      // tool_result, immediately after its parent assistant message.
+      if (tcs) {
+        for (const tc of tcs) {
+          if (!toolResultIds.has(tc.payload.tool_call_id)) {
+            messages.push({
+              role: 'tool',
+              tool_call_id: tc.payload.tool_call_id,
+              content: 'error: tool result not recorded',
+            });
+          }
+        }
+      }
     } else if (e.source === 'assistant' && e.type === 'tool_result') {
       messages.push({
         role: 'tool',

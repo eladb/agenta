@@ -154,6 +154,72 @@ test('model can call get_current_time and the bot posts the final reply', async 
   expect(trs[0]?.payload.tool_call_id).toBe('call_t1');
 });
 
+test('tool_call + tool_result from a prior turn are replayed in the next turn', async () => {
+  script.length = 0;
+  calls.length = 0;
+
+  // Turn 1: tool_call -> tool_result -> final reply.
+  scriptReply({
+    role: 'assistant',
+    content: null,
+    tool_calls: [
+      {
+        id: 'call_replay',
+        type: 'function',
+        function: { name: 'get_current_time', arguments: '{}' },
+      },
+    ],
+  });
+  scriptReply({ role: 'assistant', content: 'turn1 done' });
+
+  const threadTs = await mention(
+    tester,
+    agent.botUserId,
+    channel,
+    undefined,
+    `e2e-tool-replay-${Date.now()}`,
+  );
+  createdThreads.push(threadTs);
+
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'turn1 done');
+  await waitFor(() => calls.length === 2, { what: 'turn 1: model called twice' });
+
+  // Turn 2: a single model call; should see turn 1's tool history.
+  scriptReply({ role: 'assistant', content: 'turn2 reply' });
+  await mention(tester, agent.botUserId, channel, threadTs, 'follow-up question');
+
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'turn2 reply');
+  await waitFor(() => calls.length === 3, { what: 'turn 2 model called' });
+
+  const turn2Messages = calls[2];
+  if (!turn2Messages) throw new Error('expected turn 2 messages');
+  // Assistant message with tool_calls from turn 1 must be present.
+  const assistantWithCalls = turn2Messages.find(
+    (m) => m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
+  );
+  expect(assistantWithCalls).toBeDefined();
+  if (assistantWithCalls?.role !== 'assistant') throw new Error('not assistant');
+  expect(assistantWithCalls.tool_calls?.[0]?.id).toBe('call_replay');
+  // Matching tool message with the get_current_time result.
+  const toolMsg = turn2Messages.find((m) => m.role === 'tool' && m.tool_call_id === 'call_replay');
+  expect(toolMsg).toBeDefined();
+  if (toolMsg?.role !== 'tool') throw new Error('not tool');
+  expect(toolMsg.content).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  // Assistant final reply from turn 1.
+  expect(turn2Messages.some((m) => m.role === 'assistant' && m.content === 'turn1 done')).toBe(
+    true,
+  );
+  // New user message.
+  expect(
+    turn2Messages.some(
+      (m) =>
+        m.role === 'user' &&
+        typeof m.content === 'string' &&
+        m.content.includes('follow-up question'),
+    ),
+  ).toBe(true);
+});
+
 test('/stop during the tool loop edits checklist to "stopped"', async () => {
   script.length = 0;
   calls.length = 0;

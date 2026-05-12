@@ -223,6 +223,45 @@ describe('buildMessages', () => {
     expect(m[1]?.content).toBe('just text');
   });
 
+  it('synthesizes a stub tool message for orphan tool_calls (no recorded tool_result)', async () => {
+    // Simulates a turn that crashed after recording the assistant + tool_call
+    // but before invokeTool / tool_result were persisted. The assistant
+    // tool_calls -> tool message invariant the model API requires must still
+    // hold on reconstruction; otherwise the next turn's request is rejected.
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: 'time?' },
+    });
+    await appendEvent('t', {
+      event_id: 'a_orphan',
+      source: 'assistant',
+      type: 'message',
+      payload: { slack_ts: '1.1', text: '' },
+    });
+    await appendEvent('t', {
+      source: 'assistant',
+      type: 'tool_call',
+      payload: {
+        parent_event_id: 'a_orphan',
+        tool_call_id: 'call_orphan',
+        name: 'get_current_time',
+        arguments_json: '{}',
+      },
+    });
+    // No tool_result event for call_orphan.
+
+    const m = await buildMessages('t', 'sys');
+    expect(m).toHaveLength(4);
+    const a = m[2];
+    if (a?.role !== 'assistant') throw new Error('expected assistant');
+    expect(a.tool_calls).toHaveLength(1);
+    const stub = m[3];
+    if (stub?.role !== 'tool') throw new Error('expected synthesized tool msg');
+    expect(stub.tool_call_id).toBe('call_orphan');
+    expect(stub.content).toMatch(/not recorded/);
+  });
+
   it('reattaches tool_calls to their parent assistant message and emits role:tool messages', async () => {
     await appendEvent('t', {
       source: 'slack',
