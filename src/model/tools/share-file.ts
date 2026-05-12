@@ -20,7 +20,7 @@ export const shareFile: Tool = {
     function: {
       name: 'share_file',
       description:
-        'Upload a file from the sandbox INTO the Slack thread so the user can actually see it. CALL THIS whenever the user asks you to "send me", "show me", or "share" an image, chart, PDF, archive, or any other artifact — writing a file to /workspace alone does NOT deliver it to the user; only share_file does. Do not invent URLs like sandbox:// or file:// — the user can\'t open those. Returns the Slack permalink + file id. Max 25 MB.',
+        'Upload a file from the sandbox INTO the Slack thread so the user can actually see it. CALL THIS whenever the user asks you to "send me", "show me", or "share" an image, chart, PDF, archive, or any other artifact — writing a file to /workspace alone does NOT deliver it to the user; only share_file does. Do not invent URLs like sandbox:// or file:// — the user can\'t open those. Use the optional `comment` to caption the file. After this tool succeeds, the file appears in the thread inline; your final assistant reply should NOT restate the filename, paste a URL, or otherwise re-announce the file — the user already sees it. Max 25 MB.',
       parameters: {
         type: 'object',
         properties: {
@@ -120,7 +120,12 @@ export const shareFile: Tool = {
       },
     });
 
-    const linkPart = permalink ? ` — ${permalink}` : '';
-    return `shared ${filename} (${data.byteLength} bytes, file_id=${fileId})${linkPart}`;
+    // Intentionally NOT returning the permalink: when the model has a URL in
+    // its tool_result it tends to paste it into its final reply, producing a
+    // duplicate of the file message Slack already rendered inline. file_id
+    // is enough for the model to reference the upload conversationally
+    // ("the chart I just shared") without giving it a URL to repeat.
+    void permalink;
+    return `shared ${filename} (${data.byteLength} bytes, file_id=${fileId})`;
   },
 };
