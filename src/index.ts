@@ -7,14 +7,18 @@ import { listen } from './slack/events';
 
 const appToken = process.env.SLACK_APP_TOKEN;
 const botToken = process.env.SLACK_BOT_TOKEN;
-const modelApiKey = process.env.ANTHROPIC_API_KEY;
+// Prefer the generic name; fall back to ANTHROPIC_API_KEY so existing setups
+// don't break. The gateway speaks the OpenAI-compatible wire format, so this
+// same key can point at OpenRouter, Anthropic's compat endpoint, or any other
+// OpenAI-compat host via MODEL_BASE_URL.
+const modelApiKey = process.env.MODEL_API_KEY ?? process.env.ANTHROPIC_API_KEY;
 
 if (!appToken || !botToken) {
   log.error('boot', 'SLACK_APP_TOKEN and SLACK_BOT_TOKEN required (see .env.example)');
   process.exit(1);
 }
 if (!modelApiKey) {
-  log.error('boot', 'ANTHROPIC_API_KEY required (see .env.example)');
+  log.error('boot', 'MODEL_API_KEY (or ANTHROPIC_API_KEY) required (see .env.example)');
   process.exit(1);
 }
 

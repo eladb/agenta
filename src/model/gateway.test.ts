@@ -38,6 +38,8 @@ describe('createCallModel', () => {
     const headers = lastCall?.init?.headers as Record<string, string>;
     expect(headers?.Authorization).toBe('Bearer k123');
     expect(headers?.['Content-Type']).toBe('application/json');
+    expect(headers?.['HTTP-Referer']).toBeDefined();
+    expect(headers?.['X-Title']).toBe('agenta');
     const body = JSON.parse(lastCall?.init?.body as string);
     expect(body.model).toBe('m');
     expect(body.messages).toEqual([{ role: 'user', content: 'hi' }]);

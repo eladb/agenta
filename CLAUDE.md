@@ -104,7 +104,7 @@ If you change scopes via `apps.manifest.update`, `permissions_updated: true` in 
 Runtime (required for `bun start`):
 - `SLACK_APP_TOKEN` (xapp-) — agent Socket Mode
 - `SLACK_BOT_TOKEN` (xoxb-) — agent bot
-- `ANTHROPIC_API_KEY` (sk-ant-)
+- `MODEL_API_KEY` — the model gateway API key. Falls back to `ANTHROPIC_API_KEY` if unset. Same key works against Anthropic's OpenAI-compat endpoint, OpenRouter, or any OpenAI-compat host (set `MODEL_BASE_URL` accordingly).
 
 E2E (required for `bun run e2e`):
 - All runtime vars (the test starts the agent in-process)
@@ -113,7 +113,7 @@ E2E (required for `bun run e2e`):
 Optional:
 - `AGENTA_DATA_DIR` — overrides `./data` (tests use a mkdtemp dir)
 - `MODEL_NAME` — defaults to `claude-sonnet-4-6`
-- `MODEL_BASE_URL` — defaults to `https://api.anthropic.com/v1`
+- `MODEL_BASE_URL` — defaults to `https://api.anthropic.com/v1`. For OpenRouter set `https://openrouter.ai/api/v1` and choose a tool-supporting model (e.g. `google/gemini-2.0-flash-exp:free`). Tool calling reliability varies wildly by model — many free models don't support `tool_calls` and the agent regresses to chat-only.
 - `SYSTEM_PROMPT` — has a sensible default
 
 For the setup script only (rotates every 12h):

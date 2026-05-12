@@ -47,11 +47,15 @@ export function createCallModel(config: ModelConfig): CallModel {
       max_tokens: config.maxTokens ?? 4096,
     };
     if (opts?.tools && opts.tools.length > 0) body.tools = opts.tools;
+    // OpenRouter recommends these headers (used for ranking/rate-limiting on
+    // their free tier). Harmless against Anthropic's native compat endpoint.
     const res = await fetch(`${config.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,
+        'HTTP-Referer': 'https://github.com/eladb/agenta',
+        'X-Title': 'agenta',
       },
       body: JSON.stringify(body),
       signal: opts?.signal,
