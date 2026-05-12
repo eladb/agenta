@@ -107,6 +107,114 @@ test.if(HAS_DOCKER)(
 );
 
 test.if(HAS_DOCKER)(
+  'write_file then read_file: round-trips a text file in the sandbox',
+  async () => {
+    script.length = 0;
+    calls.length = 0;
+    const payload = `hello fs world ${Date.now()}`;
+
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_write',
+          type: 'function',
+          function: {
+            name: 'write_file',
+            arguments: JSON.stringify({ path: 'note.txt', content: payload }),
+          },
+        },
+      ],
+    });
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_read',
+          type: 'function',
+          function: { name: 'read_file', arguments: JSON.stringify({ path: 'note.txt' }) },
+        },
+      ],
+    });
+    scriptReply({ role: 'assistant', content: 'roundtrip done' });
+
+    const threadTs = await mention(
+      tester,
+      agent.botUserId,
+      channel,
+      undefined,
+      `e2e-fs-${Date.now()}`,
+    );
+    createdThreads.push(threadTs);
+
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'roundtrip done');
+    await waitFor(() => calls.length === 3, { what: 'three model calls', timeoutMs: 30_000 });
+
+    const third = calls[2];
+    if (!third) throw new Error('expected third call');
+    const readToolMsg = third.find((m) => m.role === 'tool' && m.tool_call_id === 'call_read');
+    if (readToolMsg?.role !== 'tool') throw new Error('expected read tool msg');
+    expect(readToolMsg.content).toBe(payload);
+
+    const writeToolMsg = third.find((m) => m.role === 'tool' && m.tool_call_id === 'call_write');
+    if (writeToolMsg?.role !== 'tool') throw new Error('expected write tool msg');
+    expect(writeToolMsg.content).toMatch(/wrote \d+ chars/);
+  },
+  90_000,
+);
+
+test.if(HAS_DOCKER)(
+  'egress is blocked: curl to external host fails inside the sandbox',
+  async () => {
+    script.length = 0;
+    calls.length = 0;
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_curl',
+          type: 'function',
+          function: {
+            name: 'bash',
+            arguments: JSON.stringify({
+              command: 'curl --max-time 3 -sS https://example.com; echo "exit=$?"',
+            }),
+          },
+        },
+      ],
+    });
+    scriptReply({ role: 'assistant', content: 'curl attempted' });
+
+    const threadTs = await mention(
+      tester,
+      agent.botUserId,
+      channel,
+      undefined,
+      `e2e-egress-${Date.now()}`,
+    );
+    createdThreads.push(threadTs);
+
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'curl attempted');
+    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
+
+    const second = calls[1];
+    if (!second) throw new Error('expected second call');
+    const toolMsg = second.find((m) => m.role === 'tool');
+    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
+    // The bash command always exits 0 because we append "echo exit=$?". The
+    // *curl* exit should be non-zero (DNS or connect failure), so the tool
+    // output must NOT contain "exit=0" — and it must NOT have fetched the
+    // example.com HTML.
+    expect(toolMsg.content).not.toContain('exit=0');
+    expect(toolMsg.content).not.toContain('<title>Example Domain');
+  },
+  60_000,
+);
+
+test.if(HAS_DOCKER)(
   '/delete removes the sandbox container',
   async () => {
     script.length = 0;

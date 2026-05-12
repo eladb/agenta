@@ -1,4 +1,4 @@
-import { runBash } from '../sandbox/docker';
+import { readFile, runBash, writeFile } from '../sandbox/docker';
 import type { ToolDef } from './gateway';
 
 // Context passed to every tool invocation. Tools that don't need it (e.g.
@@ -14,6 +14,8 @@ export type Tool = {
 const FETCH_BODY_CAP = 8 * 1024;
 const FETCH_TIMEOUT_MS = 10_000;
 const BASH_OUTPUT_CAP = 16 * 1024;
+const FILE_READ_CAP = 16 * 1024;
+const FILE_WRITE_CAP = 64 * 1024;
 
 function truncate(s: string, cap: number, label: string): string {
   if (s.length <= cap) return s;
@@ -85,6 +87,77 @@ export const TOOLS: Record<string, Tool> = {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
       }
+    },
+  },
+
+  read_file: {
+    def: {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description:
+          'Read a text file from the sandbox. Paths are resolved relative to /workspace. Output is truncated at 16 KB.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Path to the file (absolute or relative).' },
+          },
+          required: ['path'],
+          additionalProperties: false,
+        },
+      },
+    },
+    invoke: async (args, ctx, signal) => {
+      const path = (args as { path?: unknown } | null)?.path;
+      if (typeof path !== 'string' || path.length === 0) {
+        throw new Error('read_file: missing or invalid path');
+      }
+      const res = await readFile(ctx.threadKey, path, signal);
+      if (res.exitCode !== 0) {
+        throw new Error((res.stderr || res.stdout).trim() || `cat exited ${res.exitCode}`);
+      }
+      return truncate(res.stdout, FILE_READ_CAP, 'file');
+    },
+  },
+
+  write_file: {
+    def: {
+      type: 'function',
+      function: {
+        name: 'write_file',
+        description:
+          'Write a text file in the sandbox, overwriting if it exists. Parent directories are created automatically. Maximum content size is 64 KB.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: 'Path to write (absolute or relative to /workspace).',
+            },
+            content: { type: 'string', description: 'Text content to write.' },
+          },
+          required: ['path', 'content'],
+          additionalProperties: false,
+        },
+      },
+    },
+    invoke: async (args, ctx, signal) => {
+      const path = (args as { path?: unknown } | null)?.path;
+      const content = (args as { content?: unknown } | null)?.content;
+      if (typeof path !== 'string' || path.length === 0) {
+        throw new Error('write_file: missing or invalid path');
+      }
+      if (typeof content !== 'string') {
+        throw new Error('write_file: missing or invalid content');
+      }
+      if (content.length > FILE_WRITE_CAP) {
+        throw new Error(`write_file: content exceeds ${FILE_WRITE_CAP} char limit`);
+      }
+      const res = await writeFile(ctx.threadKey, path, content, signal);
+      if (res.exitCode !== 0) {
+        throw new Error((res.stderr || res.stdout).trim() || `write exited ${res.exitCode}`);
+      }
+      return `wrote ${content.length} chars to ${path}`;
     },
   },
 

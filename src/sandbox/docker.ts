@@ -3,6 +3,10 @@ import { join } from 'node:path';
 import { log } from '../log';
 
 export const SANDBOX_IMAGE = 'agenta-sandbox:latest';
+// Internal network — Docker enforces no external connectivity at the netfilter
+// layer. Containers on this network reach loopback only; DNS for external
+// names also fails (Docker's embedded resolver has no upstream).
+export const SANDBOX_NETWORK = 'agenta-sandbox-net';
 
 // Path to the Dockerfile, resolved relative to this source file so it works
 // regardless of cwd. sandbox/Dockerfile lives at repo root.
@@ -16,32 +20,40 @@ export function containerName(threadKey: string): string {
 
 export type DockerResult = { stdout: string; stderr: string; exitCode: number };
 
-function dockerSpawn(args: string[], signal?: AbortSignal): Promise<DockerResult> {
+type DockerSpawnOpts = { signal?: AbortSignal; stdin?: string };
+
+function dockerSpawn(args: string[], opts: DockerSpawnOpts = {}): Promise<DockerResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdinSpec = opts.stdin !== undefined ? 'pipe' : 'ignore';
+    const proc = spawn('docker', args, { stdio: [stdinSpec, 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', (d: Buffer) => {
+    proc.stdout?.on('data', (d: Buffer) => {
       stdout += d.toString('utf8');
     });
-    proc.stderr.on('data', (d: Buffer) => {
+    proc.stderr?.on('data', (d: Buffer) => {
       stderr += d.toString('utf8');
     });
     proc.on('error', reject);
     proc.on('close', (code) => {
       resolve({ stdout, stderr, exitCode: code ?? -1 });
     });
-    if (signal) {
+    if (opts.signal) {
+      const sig = opts.signal;
       const onAbort = (): void => {
         proc.kill('SIGTERM');
       };
-      signal.addEventListener('abort', onAbort);
-      proc.on('close', () => signal.removeEventListener('abort', onAbort));
+      sig.addEventListener('abort', onAbort);
+      proc.on('close', () => sig.removeEventListener('abort', onAbort));
+    }
+    if (opts.stdin !== undefined && proc.stdin) {
+      proc.stdin.end(opts.stdin);
     }
   });
 }
 
 let imageReady: Promise<void> | undefined;
+let networkReady: Promise<void> | undefined;
 
 export async function ensureImage(): Promise<void> {
   if (imageReady) return imageReady;
@@ -55,8 +67,6 @@ export async function ensureImage(): Promise<void> {
     }
     log.info('sandbox', `image ${SANDBOX_IMAGE} ready`);
   })();
-  // Clear the cache on failure so the next call can retry (e.g. user starts
-  // Docker Desktop after an initial failure).
   p.catch(() => {
     if (imageReady === p) imageReady = undefined;
   });
@@ -64,11 +74,37 @@ export async function ensureImage(): Promise<void> {
   return p;
 }
 
+export async function ensureNetwork(): Promise<void> {
+  if (networkReady) return networkReady;
+  const p = (async (): Promise<void> => {
+    const inspect = await dockerSpawn(['network', 'inspect', SANDBOX_NETWORK]);
+    if (inspect.exitCode === 0) return;
+    log.info('sandbox', `creating internal network ${SANDBOX_NETWORK}…`);
+    const create = await dockerSpawn([
+      'network',
+      'create',
+      '--internal',
+      '--driver',
+      'bridge',
+      SANDBOX_NETWORK,
+    ]);
+    if (create.exitCode !== 0) {
+      throw new Error(`docker network create failed: ${create.stderr || create.stdout}`);
+    }
+    log.info('sandbox', `network ${SANDBOX_NETWORK} ready`);
+  })();
+  p.catch(() => {
+    if (networkReady === p) networkReady = undefined;
+  });
+  networkReady = p;
+  return p;
+}
+
 // Idempotent: starts an existing stopped container, or creates a fresh one
-// with an anonymous volume mounted at /workspace. Container is named
-// containerName(threadKey).
+// with an anonymous volume mounted at /workspace and the internal sandbox
+// network attached (no external connectivity).
 export async function ensureContainer(threadKey: string): Promise<void> {
-  await ensureImage();
+  await Promise.all([ensureImage(), ensureNetwork()]);
   const name = containerName(threadKey);
   const inspect = await dockerSpawn(['inspect', '-f', '{{.State.Status}}', name]);
   if (inspect.exitCode === 0) {
@@ -85,6 +121,8 @@ export async function ensureContainer(threadKey: string): Promise<void> {
     '-d',
     '--name',
     name,
+    '--network',
+    SANDBOX_NETWORK,
     '-w',
     '/workspace',
     '--mount',
@@ -105,7 +143,34 @@ export async function runBash(
   signal?: AbortSignal,
 ): Promise<DockerResult> {
   const name = containerName(threadKey);
-  return dockerSpawn(['exec', name, 'bash', '-lc', command], signal);
+  return dockerSpawn(['exec', name, 'bash', '-lc', command], { signal });
+}
+
+export async function readFile(
+  threadKey: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<DockerResult> {
+  const name = containerName(threadKey);
+  return dockerSpawn(['exec', '-w', '/workspace', name, 'cat', '--', path], { signal });
+}
+
+export async function writeFile(
+  threadKey: string,
+  path: string,
+  content: string,
+  signal?: AbortSignal,
+): Promise<DockerResult> {
+  const name = containerName(threadKey);
+  // `tee --` writes stdin to the file and also echoes to stdout. We redirect
+  // stdout to /dev/null inside a bash -lc wrapper so the tool output stays
+  // small. mkdir -p the parent directory first so writes to nested paths
+  // don't surprise the model with ENOENT.
+  const command = `mkdir -p "$(dirname -- "$1")" && tee -- "$1" >/dev/null`;
+  return dockerSpawn(['exec', '-i', '-w', '/workspace', name, 'bash', '-lc', command, '_', path], {
+    signal,
+    stdin: content,
+  });
 }
 
 // Removes the container *and* its anonymous volume (`-v`). Errors are
@@ -123,4 +188,5 @@ export async function removeContainer(threadKey: string): Promise<void> {
 // For tests.
 export function _resetImageReadyCache(): void {
   imageReady = undefined;
+  networkReady = undefined;
 }

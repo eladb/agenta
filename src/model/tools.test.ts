@@ -9,11 +9,13 @@ afterEach(() => {
 });
 
 describe('TOOL_DEFS', () => {
-  test('exposes get_current_time, fetch_url, bash', () => {
+  test('exposes get_current_time, fetch_url, bash, read_file, write_file', () => {
     const names = TOOL_DEFS.map((t) => t.function.name);
     expect(names).toContain('get_current_time');
     expect(names).toContain('fetch_url');
     expect(names).toContain('bash');
+    expect(names).toContain('read_file');
+    expect(names).toContain('write_file');
   });
 });
 
@@ -109,6 +111,37 @@ describe('formatBashResult', () => {
     const out = formatBashResult({ stdout: big, stderr: '', exitCode: 0 });
     expect(out).toContain('[stdout truncated');
     expect(out.length).toBeLessThan(big.length);
+  });
+});
+
+describe('invokeTool: read_file / write_file (arg validation)', () => {
+  test('read_file with missing path returns an error', async () => {
+    const r = await invokeTool('read_file', '{}', CTX);
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/missing or invalid path/);
+  });
+
+  test('write_file with missing path returns an error', async () => {
+    const r = await invokeTool('write_file', JSON.stringify({ content: 'x' }), CTX);
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/missing or invalid path/);
+  });
+
+  test('write_file with missing content returns an error', async () => {
+    const r = await invokeTool('write_file', JSON.stringify({ path: '/tmp/a' }), CTX);
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/missing or invalid content/);
+  });
+
+  test('write_file rejects content over the size cap', async () => {
+    const huge = 'x'.repeat(64 * 1024 + 1);
+    const r = await invokeTool(
+      'write_file',
+      JSON.stringify({ path: '/tmp/a', content: huge }),
+      CTX,
+    );
+    expect(r.error).toBe(true);
+    expect(r.content).toMatch(/exceeds .* limit/);
   });
 });
 
