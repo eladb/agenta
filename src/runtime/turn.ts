@@ -140,7 +140,13 @@ export async function runTurn(
         const result = await invokeTool(
           tc.function.name,
           tc.function.arguments,
-          { threadKey: input.threadKey, onProgress },
+          {
+            threadKey: input.threadKey,
+            onProgress,
+            web,
+            channel: input.channel,
+            threadTs: input.threadTs,
+          },
           signal,
         );
 

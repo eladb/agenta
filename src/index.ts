@@ -5,6 +5,7 @@ import { recoverInterruptedSessions } from './runtime/recovery';
 import { killAllSandboxContainers } from './sandbox/docker';
 import { connect } from './slack/connect';
 import { listen } from './slack/events';
+import { listenInteractive } from './slack/interactive';
 
 const appToken = process.env.SLACK_APP_TOKEN;
 const botToken = process.env.SLACK_BOT_TOKEN;
@@ -50,3 +51,4 @@ await recoverInterruptedSessions(web).catch((err) => {
 });
 
 listen(socket, botUserId, makeEventHandler(web, botToken, botUserId, callModel, systemPrompt));
+listenInteractive(socket);

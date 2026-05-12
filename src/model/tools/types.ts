@@ -1,0 +1,25 @@
+import type { WebClient } from '@slack/web-api';
+import type { ToolDef } from '../gateway';
+
+export type ToolProgressChunk = { kind: 'stdout' | 'stderr'; text: string };
+
+// Context passed to every tool invocation. Tools take what they need and
+// ignore the rest. threadKey is the only field every tool can rely on.
+export type ToolContext = {
+  threadKey: string;
+  onProgress?: (chunk: ToolProgressChunk) => void;
+  // Slack hooks — only set during real Slack-backed turns; e2e tests that
+  // exercise non-Slack tools (sandbox, fs, time) can omit them.
+  web?: WebClient;
+  channel?: string;
+  threadTs?: string;
+};
+
+export type Tool = {
+  def: ToolDef;
+  invoke: (args: unknown, ctx: ToolContext, signal?: AbortSignal) => Promise<string>;
+  // Optional human-readable one-liner for the Slack checklist. Receives the
+  // parsed JSON args (or {} if parsing failed). Must be short, safe to call
+  // on malformed input, and not throw.
+  describe?: (args: unknown) => string;
+};

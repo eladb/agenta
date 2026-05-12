@@ -26,56 +26,86 @@ Implementation of `SPEC.md` (v1) in this repo — a Slack thread-backed agentic 
 
 Phases completed (in order):
 
-1. **Slack adapter (thin)** — Socket Mode connect, event normalization, dedupe, command parsing (`/stop`, `/delete`), `thread_key`, basic checklist UI (post `thinking…` then edit).
-2. **Persistence + attachments + real `/delete`** — JSONL event store, ingest mentions + non-mention thread messages + edits + deletes, eager attachment download, `/delete` rm's the thread dir. Backfill on first mention only.
-3. **Model gateway + agent loop** — pluggable `CallModel` function, per-thread mutex, `runTurn` wraps post → edit → callModel → edit → record-assistant. Replaces the echo flow.
-3.x **Attachments → model** — byte-based MIME detection, multipart `content` in OpenAI-compat messages: images + PDFs as `image_url` data URIs, text inlined with 20KB cap, anything else as a `[attached: name (mime) — not passed to model]` placeholder. JSONL stays clean (metadata + `local_path` only; base64 is in-memory only at model-call time).
+1. **Slack adapter (thin)** — Socket Mode connect, event normalization, dedupe, command parsing (`/stop`, `/delete`), `thread_key`, ephemeral `• thinking…` checklist UI.
+2. **Persistence + attachments + real `/delete`** — JSONL event store under `data/{thread_key}/`, ingest mentions + non-mention thread messages + edits + deletes, eager attachment download, `/delete` rm's the thread dir + sandbox container. Backfill on first mention only.
+3. **Model gateway + agent loop** — pluggable `CallModel` against any OpenAI-compatible endpoint, `runTurn` posts checklist → buildMessages → callModel → tools loop → final reply.
+3.x **Attachments → model** — byte-based MIME detection, multipart `content` in OpenAI-compat messages.
+4. **Session state machine** — per-thread `idle`/`running`/`stopping`, real `/stop` via `AbortController`, mention batching during a turn (queues, runs one extra turn after current). `runtime.json` checkpoint per thread; on boot, `recoverInterruptedSessions(web)` posts an "agent restarted" notice and clears the entry.
+5. **Tool calling** — multi-iteration loop. Built-in tools registered in `src/model/tools/` (one file per tool). Tool events (`tool_call`, `tool_result`) recorded to JSONL; `context.ts` reattaches them on reconstruction. Includes orphan-tool_call guard (synthetic stub if no result was persisted).
+6. **Sandbox** — Docker container per thread (image `agenta-sandbox:latest`, built from `sandbox/Dockerfile`). All bot↔sandbox traffic goes through an in-container **Bun HTTP server** (`sandbox/server/server.ts`, compiled to a static binary) over a random `127.0.0.1:<port>` with a per-container Bearer token. Endpoints: `/exec` (SSE-streamed bash), `/read`, `/write`, `/edit`, `/grep`, `/glob`, `/ls`, `/health`. Hardening: runs as **uid 1000 `sandbox`**, `--cap-drop ALL` + `--cap-add NET_ADMIN/SETUID/SETGID/SETPCAP` (entrypoint uses them then `setpriv`s them away), `--security-opt no-new-privileges`, `--pids-limit 256`, `--memory 1g`, `--cpus 1.0`, egress blocked via in-container iptables OUTPUT rules. Per-thread anonymous volume at `/workspace`.
+7. **Live-streamed bash** — `consumeExecStream` fires `onChunk` per SSE event; `runTurn` shows a debounced (800ms) live preview line under the bash bullet, replaces it with a one-line `→ exit: N` summary on completion.
+8. **Interactive Slack asks** — `ask_user` tool posts block-kit messages (buttons / static_select / multi_static_select / text-via-thread-reply). The tool's `invoke()` registers a deferred in `src/runtime/asks.ts` and awaits. `src/slack/interactive.ts` dispatches `block_actions` payloads to the registry. 10-min timeout, `/stop`-cancellable, text reply in the same thread auto-resolves the ask.
 
 ### Not yet implemented (deferred from spec)
 
-- **Session state machine** (`idle` / `running` / `stopping` / `deleting`, mention batching during a run, real `/stop` cancellation, runtime.json checkpoint, restart recovery). `/stop` currently posts `stopped (stub)` and no-ops; the in-thread mutex is the only concurrency control.
-- **Sandbox** (Docker per session, mTLS bot↔sandbox API, kernel-enforced egress block, SSH bash/fs tools). Nothing started.
-- **Context window trimming** (spec §11: 50% sliding window, atomic tool-block trim). Currently we send the full history. No tokenizer.
-- **Edits/deletes projected into model context.** Persisted in JSONL but not flattened into the messages array.
-- **Tool calls** (function calling / tool use). Once added, will need atomic-trim and `causal_parent_ids` linkage.
+- **Edits/deletes projected into model context.** Persisted in JSONL but not flattened into the messages array. Spec §11.
+- **Context window trimming** (spec §11: 50% sliding window, atomic tool-block trim). We send the full history.
+- **Host-side egress block.** The in-container iptables block is defense-in-depth, but the container retains NET_ADMIN at runtime so a deliberately malicious shell could flush it. Real fix is host-side `DOCKER-USER` rules tied to container IPs.
+- **Persisted dedupe + pending-mention queue** across restarts. In-memory only; Slack redelivery on bot restart can re-process events.
 
 ## Repo layout
 
 ```
 src/
-  index.ts                 entry: env → connect → listen → handler
+  index.ts                 entry: env → killAllSandboxContainers → connect → recoverInterruptedSessions → listen
   log.ts                   tiny console logger with scope + level
   slack/
     connect.ts             SocketModeClient + WebClient + auth.test
-    events.ts              message → IncomingEvent (message | edit | delete); filters agent's own user_id; allows file_share + thread_broadcast subtypes
-    post.ts                postInThread, editMessage
+    events.ts              message → IncomingEvent (message | edit | delete)
+    post.ts                postInThread, editMessage, postBlocksInThread, editBlocksMessage
+    interactive.ts         listenInteractive — dispatches block_actions to asks registry
+    ask-blocks.ts          block-kit builders for the ask_user tool (buttons/select/multi_select/text)
   runtime/
-    handler.ts             dedupe → persist → backfill-if-first-mention → command or runTurn under withLock
+    handler.ts             dedupe → text-override resolveByThreadText → persist → backfill-if-first → command or startOrQueue
     commands.ts            parseCommand: exact "/stop" or "/delete" only
     dedupe.ts              dedupeKey + createDedupe (LRU-ish set, eventId first)
-    thread.ts              threadKey: `${channel}__${ts.replace(/\./g,'_')}`
-    mutex.ts               withLock(key, fn): chained-promise queue per key
+    thread.ts              threadKey + decodeThreadKey (inverse, for recovery)
     redact.ts              best-effort secret scrubber for error messages
-    turn.ts                runTurn: post checklist → buildMessages → callModel → edit final → record assistant
+    session.ts             per-thread state machine (idle / running / stopping); writes runtime.json on transitions
+    runtime-store.ts       atomic temp+rename runtime.json per thread; idle = no file
+    recovery.ts            recoverInterruptedSessions: on boot, post "agent restarted" notice + clear stale runtime.json
+    asks.ts                pending ask_user registry; at most one per thread; resolveByThreadText for text-override
+    turn.ts                runTurn: ephemeral thinking… → callModel → tool loop with live bash preview → final reply
   persistence/
-    store.ts               data/{thread_key}/messages.jsonl + attachments/; AGENTA_DATA_DIR env override
-    events.ts              discriminated AgentaEvent union (slack/assistant × message/edit/delete) + record()
+    store.ts               data/{thread_key}/{messages.jsonl, attachments/, runtime.json}; AGENTA_DATA_DIR override
+    events.ts              AgentaEvent union (slack × {message,edit,delete}; assistant × {message,tool_call,tool_result}) + record()
     mime.ts                detectMime(buf): file-type first, UTF-8 plaintext fallback, else octet-stream
-    attachments.ts         downloadFiles via url_private_download with bot token; overrides Slack mime; deleteAttachmentsForSlackTs
+    attachments.ts         downloadFiles via url_private_download; mime detected from bytes; deleteAttachmentsForSlackTs
     backfill.ts            on new thread + mention: conversations.replies → record each, excluding the triggering ts
   model/
-    gateway.ts             createCallModel: fetch /chat/completions, Bearer auth. Message.content is `string | ContentPart[]` (TextPart | ImageUrlPart)
-    context.ts             buildMessages: JSONL → OpenAI messages. files → image_url (images/PDF) | text (text/*, json/xml/yaml) | placeholder
+    gateway.ts             createCallModel: fetch /chat/completions; Message = system | user | assistant | tool; tool_calls in response; OpenRouter-friendly headers
+    context.ts             buildMessages: JSONL → OpenAI messages; reattaches tool_calls to parent assistant; emits role:tool; synthesizes orphan-tool_call stubs
+    tools/
+      types.ts             Tool, ToolContext (threadKey + onProgress + web/channel/threadTs), ToolProgressChunk
+      helpers.ts           truncate / oneLine / strArg
+      index.ts             TOOLS registry + TOOL_DEFS + invokeTool
+      get-current-time.ts  trivial UTC ISO
+      fetch_url.ts         host-side HTTP GET, 8 KB cap, 10s timeout
+      bash.ts              wraps runBash, formatBashResult, streams onProgress chunks
+      read-file.ts         offset/limit slice, 16 KB cap
+      write-file.ts        64 KB cap, auto-mkdir
+      edit-file.ts         unique-match string replace (Claude Code semantics)
+      grep.ts              ripgrep + line numbers
+      glob.ts              ripgrep --files
+      list-dir.ts          structured ls
+      ask-user.ts          interactive Slack ask (buttons/select/multi_select/text) — uses asks.ts registry
+  sandbox/
+    docker.ts              ensureImage / ensureNetwork / ensureContainer / removeContainer / killAllSandboxContainers; getEndpoint() re-reads host port every call (Docker Desktop auto-restarts containers and reassigns ports); HTTP clients runBash/readFile/writeFile/editFile/grep/glob/listDir; consumeExecStream parses /exec SSE
+sandbox/
+  Dockerfile               multi-stage: oven/bun:1-slim builds the server binary → ubuntu:24.04 runtime + iptables/ripgrep/git/curl/jq/python3, sandbox user uid 1000
+  entrypoint.sh            installs iptables OUTPUT rules (root + NET_ADMIN), then `setpriv` to sandbox user with bounding/inheritable/ambient caps wiped, then exec the server
+  server/
+    server.ts              Bun HTTP API. Endpoints (Bearer auth except /health): /exec (SSE), /read, /write, /edit, /grep, /glob, /ls, /health. Spawned bash inherits cwd=/workspace. 60s default exec timeout (SANDBOX_EXEC_TIMEOUT_MS).
 scripts/
   setup-slack-apps.ts      interactive creator via apps.manifest.create (needs config tokens)
   manual-test-image.ts     quick uploader for the agent: posts a PNG with a mention via the tester
 slack-manifests/
-  agent.json               scopes: app_mentions:read, chat:write, channels:history, files:read; events: message.channels
+  agent.json               scopes: app_mentions:read, chat:write, channels:history, files:read; events: message.channels; interactivity enabled
   tester.json              scopes: app_mentions:read, chat:write, channels:history, files:write; events: message.channels
 tests/e2e/
-  helpers.ts               startAgent (in-process), startTester, mention, uploadFile, waitForReply (polls conversations.replies w/ thread_not_found tolerance), waitFor (predicate), stubCalls/recordingStub, cleanup
+  helpers.ts               startAgent (in-process), startTester, mention, uploadFile, waitForReply, waitFor, deleteThread (also removeContainer), stubCalls/recordingStub
   fixtures.ts              inline PNG/PDF/text/binary byte fixtures
-  echo.test.ts, commands.test.ts, persistence.test.ts, edits.test.ts, attachments.test.ts
+  *.test.ts                echo, commands, persistence, edits, attachments, session, tools, sandbox
 ```
 
 ## Key invariants / gotchas
@@ -89,6 +119,34 @@ tests/e2e/
 - **Anthropic images have a minimum size** (~8×8 px). A 1×1 PNG is rejected with `Could not process image`. Use fixtures from `tests/e2e/fixtures.ts` for tests; for ad-hoc manual tests, use real images.
 - **App-Level (`xapp-`) tokens** are UI-only — no Slack API can generate them. The setup script handles bot tokens via OAuth install but pauses for the user to click "Generate Token and Scopes" for the App-Level token.
 - **`gh repo create agenta` already exists** on account `eladb`. The repo is private. Don't try to create it again — push to the existing remote.
+
+### Tools layout
+
+- **One file per tool** in `src/model/tools/<name>.ts`. Each file owns: the OpenAI tool `def`, `describe(args)` for the Slack checklist, and `invoke(args, ctx, signal)` with all arg validation + the actual implementation. Helpers shared across tools live in `helpers.ts`. Adding a new tool = create the file, export the `Tool` const, register it in `index.ts:TOOLS`.
+- **Tool tests are co-located**: `<name>.test.ts` next to each tool. Registry-wide contracts (every tool has a non-throwing `describe`, names match keys, etc.) live in `_registry.test.ts`.
+- **`ToolContext` is permissive on purpose** — Slack hooks (`web`, `channel`, `threadTs`) are optional so tools that don't need Slack can be unit-tested without a stub. Tools that *do* need Slack (currently only `ask_user`) throw a clear error when those fields aren't set.
+
+### Session + recovery semantics
+
+- **`runtime.json` per thread** records non-idle session state (`running` or `stopping`). Idle = no file. Written atomically (temp + rename) on every transition. `signalStop` writes `stopping` **before** firing `abort.abort()` — otherwise the abort cascade lets the turn's `finally { clearRuntime }` race ahead and leave a stale `stopping` entry on disk.
+- **On boot**, `recoverInterruptedSessions(web)` scans `data/*/runtime.json`, posts an "agent restarted — previous turn was interrupted" notice per non-idle entry, then clears the entry. Bad threadKeys and Slack errors don't abort the whole recovery; entries always clear (we don't re-announce on every boot).
+- **`/delete` removes the whole thread dir** including `runtime.json` and the sandbox container — no special cleanup logic.
+
+### Sandbox quirks
+
+- **Re-read the host port every call.** Docker Desktop auto-restarts containers when the main process exits and reassigns a new random host port. `getEndpoint()` always calls `docker port`; the bot caches only the Bearer token (which survives restart in container env).
+- **`--cap-drop ALL` strips `CAP_CHOWN`** even from root inside the container, so `entrypoint.sh` must NOT try to `chown /workspace`. The image creates `/workspace` owned by uid 1000 in the Dockerfile; Docker preserves that on the anonymous volume mount.
+- **`setpriv` needs `SETUID + SETGID + SETPCAP`** (the last is for the bounding-set wipe). All three are also added with `--cap-add` and dropped from the bounding set after the privilege drop. Net effect: server runs as uid 1000 with `CapEff = 0000000000000000`.
+- **Ubuntu 24.04 base ships with a default `ubuntu` user at uid 1000.** The Dockerfile `userdel`s it first so we can claim that uid for the sandbox user.
+- **In-container egress block is in-container.** A deliberately malicious shell command could `iptables -F OUTPUT` since the container retains NET_ADMIN, but with our non-root user the shell can't reach iptables (perm denied). True defense-in-depth requires host-side `DOCKER-USER` rules — deferred.
+- **The sandbox image is built lazily** by `ensureImage()`. First mention pays the build cost (~minutes); subsequent runs hit the layer cache. CI / cold starts should pre-pull or pre-build.
+
+### Interactive asks
+
+- **At most one pending `ask_user` per thread.** `registerAsk` throws `AskInUseError` otherwise. The model issues tool calls serially so this matches reality.
+- **Text reply in the same thread resolves the pending ask.** `handler.ts` checks `resolveByThreadText(tk, text)` before the normal ingestion path for non-mention text. Mention text takes the normal mention path (so the user can still ask follow-ups while declining to answer).
+- **`block_actions` payloads arrive via the `interactive` Socket Mode event** (separate from `message`). `src/slack/interactive.ts` is wired in `index.ts` alongside `listen()`.
+- **Multi-select accumulates picks on the in-memory ask entry** (`multiSelected: string[]`); the Submit button click resolves the ask with `JSON.stringify(multiSelected)`. Cancel button rejects with `"cancelled"`. 10-min timeout. `/stop` rejects the deferred via `abortSignal`.
 
 ## Slack apps + IDs (workspace `agentalabs` / T0B304AJPUZ)
 
@@ -150,6 +208,7 @@ bun run setup    # interactive Slack app creation
 
 ## Open questions for the next session
 
-- Which phase to do next: state machine, sandbox, or model context-window trimming. Spec is independent on all three; user picked model+attachments last, so most likely next is state machine or sandbox.
-- The dedupe is in-process only; on restart, we re-process events Slack replays. Will need persistence-backed dedupe with the state machine.
-- `runtime.json` checkpoint file is not yet written. The state machine phase will introduce it.
+- **Edits/deletes into model context** — events are persisted in JSONL but `buildMessages` ignores them. Spec §11.
+- **Context-window trimming** — spec §11 sliding window with atomic tool-block trim. Will need a tokenizer.
+- **Host-side egress block** — replace in-container iptables with `DOCKER-USER` rules tied to container IPs so a malicious shell can't undo them. Needs root on the host + per-container teardown.
+- **Persisted dedupe + pending-mention queue** across restarts. In-memory only today; Slack redelivery on bot restart can re-process events.

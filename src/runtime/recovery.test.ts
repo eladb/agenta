@@ -19,7 +19,10 @@ afterEach(() => {
 });
 
 // biome-ignore lint/suspicious/noExplicitAny: stub mimics WebClient surface used by recovery
-function makeWebStub(): { web: any; posts: Array<{ channel: string; thread_ts?: string; text: string }> } {
+function makeWebStub(): {
+  web: any;
+  posts: Array<{ channel: string; thread_ts?: string; text: string }>;
+} {
   const posts: Array<{ channel: string; thread_ts?: string; text: string }> = [];
   const web = {
     chat: {

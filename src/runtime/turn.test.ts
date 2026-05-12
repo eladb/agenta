@@ -138,9 +138,7 @@ describe('runTurn with tools', () => {
     // Between tools and the next model call, thinking is shown again, AFTER
     // the tool bullet.
     expect(
-      edits.some(
-        (e) => e.text.includes('• get current time') && e.text.endsWith('• thinking…'),
-      ),
+      edits.some((e) => e.text.includes('• get current time') && e.text.endsWith('• thinking…')),
     ).toBe(true);
 
     // Final edit is just the reply — no checklist artifacts.

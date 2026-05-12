@@ -1,5 +1,8 @@
 import type { WebClient } from '@slack/web-api';
 
+// biome-ignore lint/suspicious/noExplicitAny: slack web-api types blocks as `any`
+type Blocks = any;
+
 export async function postInThread(
   web: WebClient,
   channel: string,
@@ -18,4 +21,28 @@ export async function editMessage(
   text: string,
 ): Promise<void> {
   await web.chat.update({ channel, ts, text });
+}
+
+export async function postBlocksInThread(
+  web: WebClient,
+  channel: string,
+  threadTs: string,
+  text: string,
+  blocks: Blocks,
+): Promise<string> {
+  // `text` is a fallback for notifications / accessibility — Slack requires it
+  // even when blocks carry the visible content.
+  const res = await web.chat.postMessage({ channel, thread_ts: threadTs, text, blocks });
+  if (!res.ts) throw new Error('chat.postMessage returned no ts');
+  return res.ts;
+}
+
+export async function editBlocksMessage(
+  web: WebClient,
+  channel: string,
+  ts: string,
+  text: string,
+  blocks: Blocks,
+): Promise<void> {
+  await web.chat.update({ channel, ts, text, blocks });
 }

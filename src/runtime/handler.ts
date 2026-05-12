@@ -8,6 +8,7 @@ import { deleteThreadData } from '../persistence/store';
 import { ensureContainer, removeContainer } from '../sandbox/docker';
 import type { DeleteMessage, EditMessage, IncomingEvent, NormalMessage } from '../slack/events';
 import { postInThread } from '../slack/post';
+import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
 import { signalStop, startOrQueue } from './session';
@@ -53,6 +54,14 @@ async function handleMessage(
   }
 
   const tk = threadKey(e.channel, e.threadTs);
+
+  // Text-override: if a non-mention reply in this thread can resolve a
+  // pending ask_user, do that first. The pending ask consumes the text as
+  // its tool_result, so we don't also enqueue this as a new mention.
+  if (!e.isMention && resolveByThreadText(tk, e.text)) {
+    log.info('handler', `[${tk}] resolved pending ask via text reply`);
+    return;
+  }
 
   if (e.isMention) {
     await backfillIfNew(web, botToken, e.channel, e.threadTs, tk, botUserId, e.ts);
