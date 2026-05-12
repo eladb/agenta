@@ -223,9 +223,14 @@ async function getEndpoint(threadKey: string): Promise<{ baseUrl: string; token:
 }
 
 // Parse an SSE stream of `data: <json>\n\n` events emitted by /exec.
+// onChunk, if provided, fires per stdout/stderr event so callers can stream
+// the output somewhere (e.g. the Slack checklist) while the command runs.
 // Exported for unit testing — every bash tool call goes through here, so a
 // regression here would silently corrupt all tool output.
-export async function consumeExecStream(body: ReadableStream<Uint8Array>): Promise<DockerResult> {
+export async function consumeExecStream(
+  body: ReadableStream<Uint8Array>,
+  onChunk?: (kind: 'stdout' | 'stderr', chunk: string) => void,
+): Promise<DockerResult> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -249,9 +254,15 @@ export async function consumeExecStream(body: ReadableStream<Uint8Array>): Promi
             chunk?: string;
             exitCode?: number;
           };
-          if (evt.kind === 'stdout' && typeof evt.chunk === 'string') stdout += evt.chunk;
-          else if (evt.kind === 'stderr' && typeof evt.chunk === 'string') stderr += evt.chunk;
-          else if (evt.kind === 'exit' && typeof evt.exitCode === 'number') exitCode = evt.exitCode;
+          if (evt.kind === 'stdout' && typeof evt.chunk === 'string') {
+            stdout += evt.chunk;
+            onChunk?.('stdout', evt.chunk);
+          } else if (evt.kind === 'stderr' && typeof evt.chunk === 'string') {
+            stderr += evt.chunk;
+            onChunk?.('stderr', evt.chunk);
+          } else if (evt.kind === 'exit' && typeof evt.exitCode === 'number') {
+            exitCode = evt.exitCode;
+          }
         } catch {
           // ignore malformed frames
         }
@@ -266,6 +277,7 @@ export async function runBash(
   threadKey: string,
   command: string,
   signal?: AbortSignal,
+  onChunk?: (kind: 'stdout' | 'stderr', chunk: string) => void,
 ): Promise<DockerResult> {
   const { baseUrl, token } = await getEndpoint(threadKey);
   const res = await fetch(`${baseUrl}/exec`, {
@@ -278,7 +290,7 @@ export async function runBash(
     return { stdout: '', stderr: `sandbox HTTP ${res.status}`, exitCode: -1 };
   }
   if (!res.body) throw new Error('sandbox /exec returned no body');
-  return consumeExecStream(res.body);
+  return consumeExecStream(res.body, onChunk);
 }
 
 async function postJson(

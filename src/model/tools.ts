@@ -3,8 +3,13 @@ import type { ToolDef } from './gateway';
 
 // Context passed to every tool invocation. Tools that don't need it (e.g.
 // get_current_time) just ignore it. The bash tool needs threadKey to pick
-// the right per-thread sandbox container.
-export type ToolContext = { threadKey: string };
+// the right per-thread sandbox container, and uses onProgress (when set) to
+// stream stdout/stderr chunks to the caller as they arrive.
+export type ToolProgressChunk = { kind: 'stdout' | 'stderr'; text: string };
+export type ToolContext = {
+  threadKey: string;
+  onProgress?: (chunk: ToolProgressChunk) => void;
+};
 
 export type Tool = {
   def: ToolDef;
@@ -348,7 +353,11 @@ export const TOOLS: Record<string, Tool> = {
       if (typeof command !== 'string' || command.length === 0) {
         throw new Error('bash: missing or invalid command');
       }
-      const result = await runBash(ctx.threadKey, command, signal);
+      const onChunk = ctx.onProgress
+        ? (kind: 'stdout' | 'stderr', chunk: string): void =>
+            ctx.onProgress?.({ kind, text: chunk })
+        : undefined;
+      const result = await runBash(ctx.threadKey, command, signal, onChunk);
       return formatBashResult(result);
     },
   },

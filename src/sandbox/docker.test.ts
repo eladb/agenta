@@ -56,6 +56,24 @@ describe('consumeExecStream', () => {
     expect(r.stdout).toBe('x');
   });
 
+  test('fires onChunk per stdout/stderr event', async () => {
+    const seen: Array<[string, string]> = [];
+    await consumeExecStream(
+      streamOf([
+        'data: {"kind":"stdout","chunk":"a"}\n\n',
+        'data: {"kind":"stderr","chunk":"b"}\n\n',
+        'data: {"kind":"stdout","chunk":"c"}\n\n',
+        'data: {"kind":"exit","exitCode":0}\n\n',
+      ]),
+      (kind, chunk) => seen.push([kind, chunk]),
+    );
+    expect(seen).toEqual([
+      ['stdout', 'a'],
+      ['stderr', 'b'],
+      ['stdout', 'c'],
+    ]);
+  });
+
   test('ignores non-data lines and malformed JSON', async () => {
     const r = await consumeExecStream(
       streamOf([

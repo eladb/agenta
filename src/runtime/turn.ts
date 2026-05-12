@@ -14,11 +14,19 @@ export type TurnInput = {
 };
 
 const ARGS_PREVIEW_LEN = 80;
+const LIVE_PREVIEW_LEN = 150;
+const LIVE_EDIT_INTERVAL_MS = 800;
 
 function formatToolBullet(tc: ToolCall): string {
   const a = tc.function.arguments;
   const args = a.length > ARGS_PREVIEW_LEN ? `${a.slice(0, ARGS_PREVIEW_LEN - 1)}…` : a;
   return `• tool: ${tc.function.name}(${args})`;
+}
+
+function liveLine(preview: string): string {
+  // Collapse newlines so the checklist stays single-line per tool.
+  const flat = preview.replace(/[\r\n]+/g, ' ⏎ ').slice(-LIVE_PREVIEW_LEN);
+  return `   ${flat}`;
 }
 
 export async function runTurn(
@@ -67,6 +75,31 @@ export async function runTurn(
         lines.push(formatToolBullet(tc));
         await updateChecklist();
 
+        // Live-preview slot for bash. Other tools complete fast enough that
+        // streaming doesn't help; they don't add a preview line.
+        const isBash = tc.function.name === 'bash';
+        const liveIdx = isBash ? lines.length : -1;
+        if (liveIdx >= 0) {
+          lines.push('   …');
+          await updateChecklist();
+        }
+        let liveBuffer = '';
+        let flushTimer: ReturnType<typeof setTimeout> | undefined;
+        const scheduleFlush = (): void => {
+          if (flushTimer || liveIdx < 0) return;
+          flushTimer = setTimeout(() => {
+            flushTimer = undefined;
+            lines[liveIdx] = liveLine(liveBuffer);
+            void updateChecklist();
+          }, LIVE_EDIT_INTERVAL_MS);
+        };
+        const onProgress = isBash
+          ? (chunk: { kind: 'stdout' | 'stderr'; text: string }): void => {
+              liveBuffer = (liveBuffer + chunk.text).slice(-1024);
+              scheduleFlush();
+            }
+          : undefined;
+
         await record({
           event_id: newEventId(),
           thread_key: input.threadKey,
@@ -85,9 +118,19 @@ export async function runTurn(
         const result = await invokeTool(
           tc.function.name,
           tc.function.arguments,
-          { threadKey: input.threadKey },
+          { threadKey: input.threadKey, onProgress },
           signal,
         );
+
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = undefined;
+        }
+        if (liveIdx >= 0) {
+          // Replace the live preview with a one-line summary (e.g. "→ exit: 0").
+          const firstLine = result.content.split('\n')[0] ?? '';
+          lines[liveIdx] = `   → ${firstLine}`;
+        }
 
         await record({
           event_id: newEventId(),
