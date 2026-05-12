@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { consumeExecStream, containerName } from './docker';
+import { consumeExecStream, containerName } from './index';
 
 describe('containerName', () => {
   test('prefixes threadKey with agenta-', () => {

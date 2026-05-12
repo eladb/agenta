@@ -1,4 +1,4 @@
-import { glob as globDocker } from '../../sandbox/docker';
+import { glob as globDocker } from '../../sandbox';
 import { oneLine, strArg, truncate } from './helpers';
 import type { Tool } from './types';
 

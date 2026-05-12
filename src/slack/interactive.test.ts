@@ -71,9 +71,7 @@ describe('listenInteractive — block_actions dispatch', () => {
       onSettle: () => {},
     });
     await send(
-      block_actions('t2', [
-        { action_id: ASK_ACTION_SELECT, selected_option: { value: 'mysql' } },
-      ]),
+      block_actions('t2', [{ action_id: ASK_ACTION_SELECT, selected_option: { value: 'mysql' } }]),
     );
     expect(await promise).toBe('mysql');
   });

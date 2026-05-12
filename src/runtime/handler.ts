@@ -5,7 +5,7 @@ import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attac
 import { backfillIfNew } from '../persistence/backfill';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { deleteThreadData } from '../persistence/store';
-import { ensureContainer, removeContainer } from '../sandbox/docker';
+import { ensureContainer, removeContainer } from '../sandbox';
 import type { DeleteMessage, EditMessage, IncomingEvent, NormalMessage } from '../slack/events';
 import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';

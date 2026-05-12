@@ -1,4 +1,4 @@
-import { listDir } from '../../sandbox/docker';
+import { listDir } from '../../sandbox';
 import { strArg } from './helpers';
 import type { Tool } from './types';
 

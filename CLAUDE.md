@@ -91,14 +91,19 @@ src/
       list-dir.ts          structured ls
       ask-user.ts          interactive Slack ask (buttons/select/multi_select/text) — uses asks.ts registry
   sandbox/
-    docker.ts              ensureImage / ensureNetwork / ensureContainer / removeContainer / killAllSandboxContainers; getEndpoint() re-reads host port every call (Docker Desktop auto-restarts containers and reassigns ports); HTTP clients runBash/readFile/writeFile/editFile/grep/glob/listDir; consumeExecStream parses /exec SSE
+    provider.ts            SandboxProvider interface (ensure / getEndpoint / remove / killAll) + SandboxEndpoint {baseUrl, headers}
+    docker.ts              dockerProvider — local Docker container. ensureImage / ensureNetwork / dockerSpawn + lifecycle.
+    fly.ts                 flyProvider — per-thread Fly machine via the Fly Machines REST API. fly-force-instance-id header routes requests to the specific machine over the shared <app>.fly.dev URL.
+    index.ts               provider selector (SANDBOX_PROVIDER=docker|fly), provider-agnostic HTTP client: runBash/readFile/readBinary/writeFile/editFile/grep/glob/listDir, consumeExecStream (SSE parser). Re-exports containerName for tests.
 sandbox/
-  Dockerfile               multi-stage: oven/bun:1-slim builds the server binary → ubuntu:24.04 runtime + iptables/ripgrep/git/curl/jq/python3, sandbox user uid 1000
+  Dockerfile               multi-stage: oven/bun:1-slim builds the server binary → ubuntu:24.04 runtime + iptables/ripgrep/git/curl/jq/python3/python3-pil/matplotlib/numpy/pandas/imagemagick, sandbox user uid 1000
   entrypoint.sh            installs iptables OUTPUT rules (root + NET_ADMIN), then `setpriv` to sandbox user with bounding/inheritable/ambient caps wiped, then exec the server
+  fly.toml                 minimal Fly app config — `app = "agenta-sandbox"` + Dockerfile pointer. No services here; the bot creates per-thread machines on demand.
   server/
-    server.ts              Bun HTTP API. Endpoints (Bearer auth except /health): /exec (SSE), /read, /write, /edit, /grep, /glob, /ls, /health. Spawned bash inherits cwd=/workspace. 60s default exec timeout (SANDBOX_EXEC_TIMEOUT_MS).
+    server.ts              Bun HTTP API. Endpoints (Bearer auth except /health): /exec (SSE), /read, /read_binary, /write, /edit, /grep, /glob, /ls, /health. Spawned bash inherits cwd=/workspace. 60s default exec timeout (SANDBOX_EXEC_TIMEOUT_MS).
 scripts/
   setup-slack-apps.ts      interactive creator via apps.manifest.create (needs config tokens)
+  deploy-sandbox-fly.ts    one-shot Fly provisioning + image push (`bun scripts/deploy-sandbox-fly.ts`)
   manual-test-image.ts     quick uploader for the agent: posts a PNG with a mention via the tester
 slack-manifests/
   agent.json               scopes: app_mentions:read, chat:write, channels:history, files:read; events: message.channels; interactivity enabled
@@ -174,6 +179,9 @@ Optional:
 - `MODEL_NAME` — defaults to `claude-sonnet-4-6`
 - `MODEL_BASE_URL` — defaults to `https://api.anthropic.com/v1`. For OpenRouter set `https://openrouter.ai/api/v1` and choose a tool-supporting model (e.g. `google/gemini-2.0-flash-exp:free`). Tool calling reliability varies wildly by model — many free models don't support `tool_calls` and the agent regresses to chat-only.
 - `SYSTEM_PROMPT` — has a sensible default
+- `SANDBOX_PROVIDER` — `docker` (default) or `fly`. Picks where per-thread sandboxes live.
+- `FLY_APP_NAME` + `FLY_API_TOKEN` — required when `SANDBOX_PROVIDER=fly`. Provision the app once via `bun scripts/deploy-sandbox-fly.ts`, then generate a token: `flyctl tokens create deploy -a <app>`.
+- `SANDBOX_EXEC_TIMEOUT_MS` — bash command wall-clock cap inside the sandbox. Default 60s. Tests set it lower.
 
 For the setup script only (rotates every 12h):
 - `SLACK_CONFIG_ACCESS_TOKEN`, `SLACK_CONFIG_REFRESH_TOKEN`

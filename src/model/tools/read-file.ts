@@ -1,4 +1,4 @@
-import { readFile } from '../../sandbox/docker';
+import { readFile } from '../../sandbox';
 import { truncate } from './helpers';
 import type { Tool } from './types';
 

@@ -1,4 +1,4 @@
-import { writeFile } from '../../sandbox/docker';
+import { writeFile } from '../../sandbox';
 import type { Tool } from './types';
 
 const WRITE_CAP = 64 * 1024;

@@ -2,7 +2,7 @@ import { log } from './log';
 import { createCallModel } from './model/gateway';
 import { makeEventHandler } from './runtime/handler';
 import { recoverInterruptedSessions } from './runtime/recovery';
-import { killAllSandboxContainers } from './sandbox/docker';
+import { killAllSandboxContainers } from './sandbox';
 import { connect } from './slack/connect';
 import { listen } from './slack/events';
 import { listenInteractive } from './slack/interactive';

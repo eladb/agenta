@@ -130,7 +130,9 @@ test.if(HAS_DOCKER)(
     // The Slack thread now contains a message with an attached file.
     const replies = await tester.web.conversations.replies({ channel, ts: threadTs });
     const fileMsg = (replies.messages ?? []).find(
-      (m) => Array.isArray((m as { files?: unknown[] }).files) && (m as { files: unknown[] }).files.length > 0,
+      (m) =>
+        Array.isArray((m as { files?: unknown[] }).files) &&
+        (m as { files: unknown[] }).files.length > 0,
     );
     expect(fileMsg).toBeDefined();
     const fileInfo = (fileMsg as { files: Array<{ name?: string; mimetype?: string }> }).files[0];
@@ -142,11 +144,14 @@ test.if(HAS_DOCKER)(
     const lines = readFileSync(jsonlPath, 'utf8')
       .split('\n')
       .filter((l) => l.length > 0)
-      .map((l) => JSON.parse(l) as {
-        source: string;
-        type: string;
-        payload: { text?: string; files?: Array<{ name: string; local_path: string }> };
-      });
+      .map(
+        (l) =>
+          JSON.parse(l) as {
+            source: string;
+            type: string;
+            payload: { text?: string; files?: Array<{ name: string; local_path: string }> };
+          },
+      );
     const shared = lines.find(
       (e) => e.source === 'assistant' && e.type === 'message' && (e.payload.files?.length ?? 0) > 0,
     );

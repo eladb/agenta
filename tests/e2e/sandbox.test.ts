@@ -2,7 +2,8 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
 import { threadKey } from '../../src/runtime/thread';
-import { containerName, ensureImage } from '../../src/sandbox/docker';
+import { containerName } from '../../src/sandbox';
+import { ensureImage } from '../../src/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,

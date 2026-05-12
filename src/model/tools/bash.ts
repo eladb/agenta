@@ -1,4 +1,4 @@
-import { runBash } from '../../sandbox/docker';
+import { runBash } from '../../sandbox';
 import { oneLine, strArg, truncate } from './helpers';
 import type { Tool } from './types';
 

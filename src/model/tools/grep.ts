@@ -1,4 +1,4 @@
-import { grep as grepDocker } from '../../sandbox/docker';
+import { grep as grepDocker } from '../../sandbox';
 import { oneLine, strArg, truncate } from './helpers';
 import type { Tool } from './types';
 

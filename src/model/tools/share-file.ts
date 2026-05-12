@@ -4,7 +4,7 @@ import { log } from '../../log';
 import { newEventId, nowIso, record } from '../../persistence/events';
 import { detectMime } from '../../persistence/mime';
 import { attachmentsDir } from '../../persistence/store';
-import { readBinary } from '../../sandbox/docker';
+import { readBinary } from '../../sandbox';
 import { strArg } from './helpers';
 import type { Tool } from './types';
 
@@ -26,7 +26,8 @@ export const shareFile: Tool = {
         properties: {
           path: {
             type: 'string',
-            description: 'Path to the file inside the sandbox (relative to /workspace or absolute).',
+            description:
+              'Path to the file inside the sandbox (relative to /workspace or absolute).',
           },
         },
         required: ['path'],
@@ -44,9 +45,7 @@ export const shareFile: Tool = {
 
     const data = await readBinary(ctx.threadKey, path);
     if (data.byteLength > MAX_BYTES) {
-      throw new Error(
-        `share_file: file is ${data.byteLength} bytes, max is ${MAX_BYTES} (25 MB)`,
-      );
+      throw new Error(`share_file: file is ${data.byteLength} bytes, max is ${MAX_BYTES} (25 MB)`);
     }
     const filename = safeFilename(basename(path));
     const mimetype = await detectMime(data);
@@ -69,8 +68,9 @@ export const shareFile: Tool = {
     try {
       const info = await ctx.web.files.info({ file: fileId });
       permalink = (info.file as { permalink?: string } | undefined)?.permalink;
-      const shares = (info.file as { shares?: { public?: Record<string, Array<{ ts?: string }>> } } | undefined)
-        ?.shares?.public;
+      const shares = (
+        info.file as { shares?: { public?: Record<string, Array<{ ts?: string }>> } } | undefined
+      )?.shares?.public;
       if (shares) {
         for (const arr of Object.values(shares)) {
           const ts = arr?.[0]?.ts;
@@ -89,10 +89,7 @@ export const shareFile: Tool = {
     // user attachments are stored).
     const localPath = `attachments/${fileId}-${filename}`;
     await mkdir(attachmentsDir(ctx.threadKey), { recursive: true });
-    await fsWriteFile(
-      join(attachmentsDir(ctx.threadKey), `${fileId}-${filename}`),
-      data,
-    );
+    await fsWriteFile(join(attachmentsDir(ctx.threadKey), `${fileId}-${filename}`), data);
 
     // Record an assistant `message` event mirroring how user-sent files are
     // ingested. buildMessages currently doesn't project the file back to the

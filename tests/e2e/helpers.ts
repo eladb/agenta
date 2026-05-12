@@ -6,7 +6,7 @@ import { WebClient } from '@slack/web-api';
 import type { CallModel, Message } from '../../src/model/gateway';
 import { makeEventHandler } from '../../src/runtime/handler';
 import { threadKey as makeThreadKey } from '../../src/runtime/thread';
-import { removeContainer } from '../../src/sandbox/docker';
+import { removeContainer } from '../../src/sandbox';
 import { connect } from '../../src/slack/connect';
 import { listen } from '../../src/slack/events';
 

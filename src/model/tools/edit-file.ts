@@ -1,4 +1,4 @@
-import { editFile } from '../../sandbox/docker';
+import { editFile } from '../../sandbox';
 import { strArg } from './helpers';
 import type { Tool } from './types';
 
