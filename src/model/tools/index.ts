@@ -8,6 +8,7 @@ import { glob } from './glob';
 import { grep } from './grep';
 import { listDirTool } from './list-dir';
 import { readFileTool } from './read-file';
+import { shareFile } from './share-file';
 import type { Tool, ToolContext, ToolProgressChunk } from './types';
 import { writeFileTool } from './write-file';
 
@@ -29,6 +30,7 @@ export const TOOLS: Record<string, Tool> = {
   glob,
   list_dir: listDirTool,
   ask_user: askUser,
+  share_file: shareFile,
 };
 
 export const TOOL_DEFS: ToolDef[] = Object.values(TOOLS).map((t) => t.def);

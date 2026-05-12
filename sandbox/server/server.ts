@@ -4,14 +4,15 @@
 // eventually talk to a sandbox on a remote machine. Endpoints — all require
 // `Authorization: Bearer $SANDBOX_TOKEN`:
 //
-//   POST /exec   { command }                      -> SSE stream
-//   POST /read   { path, offset?, limit? }        -> JSON DockerResult
-//   POST /write  { path, content }                -> JSON DockerResult
-//   POST /edit   { path, old_string, new_string } -> JSON DockerResult
-//   POST /grep   { pattern, path?, glob? }        -> JSON DockerResult
-//   POST /glob   { pattern, path? }               -> JSON DockerResult
-//   POST /ls     { path? }                        -> JSON DockerResult
-//   GET  /health                                  -> 200 "ok"
+//   POST /exec        { command }                      -> SSE stream
+//   POST /read        { path, offset?, limit? }        -> JSON DockerResult
+//   POST /read_binary { path }                         -> JSON DockerResult (stdout = base64)
+//   POST /write       { path, content }                -> JSON DockerResult
+//   POST /edit        { path, old_string, new_string } -> JSON DockerResult
+//   POST /grep        { pattern, path?, glob? }        -> JSON DockerResult
+//   POST /glob        { pattern, path? }               -> JSON DockerResult
+//   POST /ls          { path? }                        -> JSON DockerResult
+//   GET  /health                                       -> 200 "ok"
 //
 // On /exec disconnect, the spawned child is SIGTERM'd. uncaughtException is
 // caught so a per-request bug doesn't kill the whole process (which would
@@ -166,6 +167,20 @@ async function handleRead(req: Request): Promise<Response> {
     const start = offset - 1;
     const end = limit === undefined ? lines.length : Math.min(lines.length, start + limit);
     return ok(lines.slice(start, end).join('\n'));
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+}
+
+async function handleReadBinary(req: Request): Promise<Response> {
+  const body = (await req.json()) as { path?: unknown };
+  if (typeof body.path !== 'string' || body.path.length === 0) {
+    return new Response('missing path', { status: 400 });
+  }
+  const full = resolveWorkspacePath(body.path);
+  try {
+    const buf = await fsReadFile(full);
+    return Response.json({ exitCode: 0, stdout: buf.toString('base64'), stderr: '' });
   } catch (err) {
     return fail((err as Error).message);
   }
@@ -327,6 +342,8 @@ Bun.serve({
           return handleExec(req);
         case '/read':
           return handleRead(req);
+        case '/read_binary':
+          return handleReadBinary(req);
         case '/write':
           return handleWrite(req);
         case '/edit':

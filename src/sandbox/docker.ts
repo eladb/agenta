@@ -331,6 +331,21 @@ export async function readFile(
   return postJson(threadKey, '/read', { path, ...opts }, signal);
 }
 
+// Read a file from the sandbox as raw bytes. The sandbox server returns the
+// content as base64 in `stdout`; this helper decodes it. Throws if the
+// container returns a non-zero exit (missing file / permission denied / …).
+export async function readBinary(
+  threadKey: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const res = await postJson(threadKey, '/read_binary', { path }, signal);
+  if (res.exitCode !== 0) {
+    throw new Error(res.stderr || res.stdout || `read_binary exited ${res.exitCode}`);
+  }
+  return Buffer.from(res.stdout, 'base64');
+}
+
 export async function editFile(
   threadKey: string,
   path: string,

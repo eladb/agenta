@@ -46,7 +46,17 @@ export type SlackDeleteEvent = Base & {
 export type AssistantMessageEvent = Base & {
   source: 'assistant';
   type: 'message';
-  payload: { slack_ts: string; text: string };
+  payload: {
+    slack_ts: string;
+    text: string;
+    // Files the assistant uploaded via the share_file tool. Mirrors the
+    // SlackMessageEvent.files shape so the JSONL stays consistent. Note:
+    // OpenAI/Anthropic compat doesn't allow image content on assistant
+    // messages, so buildMessages currently doesn't project these back into
+    // the model's context — they're for archival + future re-injection as
+    // synthetic user content if we ever need it.
+    files?: AttachmentRef[];
+  };
 };
 
 // Recorded when the model requests a tool. Linked back to the assistant
