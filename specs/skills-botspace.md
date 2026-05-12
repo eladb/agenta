@@ -20,7 +20,7 @@ const string in `src/index.ts`.
 
 ```
 sandbox/botspace/
-  BOT.md                       canonical "bot prompt" — identity, persona, rules
+  README.md                       canonical "bot prompt" — identity, persona, rules
   skills/
     <skill-slug>/
       SKILL.md                 YAML frontmatter + freeform body
@@ -31,7 +31,7 @@ sandbox/botspace/
 - `sandbox/Dockerfile` gets a new line that copies `botspace/` into
   `/workspace/` so a fresh sandbox starts with the bot's files in place.
   The copy preserves the layout: the model reads a skill from
-  `/workspace/skills/<slug>/SKILL.md` and `/workspace/BOT.md`.
+  `/workspace/skills/<slug>/SKILL.md` and `/workspace/README.md`.
 - The Dockerfile already creates `/workspace` owned by uid 1000 in an earlier
   layer. The COPY must apply that ownership (`COPY --chown=sandbox:sandbox`).
   Verify with a fresh `docker run` test that `ls -la /workspace` shows uid 1000
@@ -83,7 +83,7 @@ fail prompt construction. A single bad skill must not crash all threads.
 
 ```
 [SYSTEM_PROMPT env, if set, separated by a blank line]
-[BOT.md verbatim]
+[README.md verbatim]
 
 # Available skills
 
@@ -95,7 +95,7 @@ instructions are loaded into context.
 ```
 
 The "Available skills" header and instruction block are emitted by the prompt
-builder, not by BOT.md — so BOT.md stays purely about identity/rules and the
+builder, not by README.md — so README.md stays purely about identity/rules and the
 skills mechanism is operationally consistent across bots.
 
 If there are zero skills, omit the entire "Available skills" section (don't
@@ -159,13 +159,13 @@ receives it and passes it through to each transition.
 ### Migration
 
 - Move the multi-line default prompt (currently in `src/index.ts:33-44`)
-  verbatim into `sandbox/botspace/BOT.md`. Keep the wording identical
+  verbatim into `sandbox/botspace/README.md`. Keep the wording identical
   including the "File handling rules (strict)" block — small models depend on
   it.
 - `src/index.ts` no longer builds a system prompt. It passes no prompt
   parameter to `makeEventHandler` (or passes `undefined` if cleaner). The
   handler owns prompt resolution per thread.
-- `SYSTEM_PROMPT` env var changes semantics: it now **prepends** to BOT.md
+- `SYSTEM_PROMPT` env var changes semantics: it now **prepends** to README.md
   rather than **replacing** the default. Note this in CLAUDE.md.
 
 ### Ship one example skill
@@ -193,7 +193,7 @@ to be long or perfect — its job is to be a load-target for tests.
   the final string per the spec above. Pure (no Slack/sandbox deps), unit
   testable.
 - `src/prompt.test.ts` — unit tests.
-- `sandbox/botspace/BOT.md` — migrated default prompt.
+- `sandbox/botspace/README.md` — migrated default prompt.
 - `sandbox/botspace/skills/python-charts/SKILL.md` — example skill.
 
 ### Modified
@@ -231,14 +231,14 @@ to be long or perfect — its job is to be a load-target for tests.
 
 ### Unit (`src/prompt.test.ts`)
 
-- BOT.md alone (no skills dir) → output = BOT.md verbatim.
-- BOT.md + 2 skills with valid frontmatter → output contains BOT.md, the
+- README.md alone (no skills dir) → output = README.md verbatim.
+- README.md + 2 skills with valid frontmatter → output contains README.md, the
   "Available skills" header, and a JSON array with 2 entries sorted by path.
 - Skill with malformed frontmatter (e.g. no `name` key) → logged warning,
   skill skipped, other skills still emitted, no exception.
 - Skill with extra frontmatter fields → those fields appear in the JSON entry.
 - `SYSTEM_PROMPT` env (passed explicitly as arg) → prepended with a blank
-  line separator, BOT.md follows.
+  line separator, README.md follows.
 - Skills with zero entries → no "Available skills" section in output.
 
 Use a `mkdtempSync` botspace dir per test; clean up in afterEach. No
@@ -254,11 +254,11 @@ filesystem touches outside the temp dir.
 ### E2E (`tests/e2e/skills.test.ts`)
 
 Two mentions, same thread, model stubbed: the recorded `messages[0]` (the
-system message) must be byte-identical across both calls. Edit BOT.md between
+system message) must be byte-identical across both calls. Edit README.md between
 the two mentions and assert the system prompt has NOT changed for that thread
 (frozen).
 
-New thread after the edit: system prompt reflects the new BOT.md.
+New thread after the edit: system prompt reflects the new README.md.
 
 E2E (HAS_DOCKER-gated): start a turn that calls `read_file('skills/python-charts/SKILL.md')`
 via a stubbed model script and assert the file content comes back. Skip this
@@ -312,10 +312,10 @@ Subagent should:
 - [ ] All tests pass (`bun run test`, `bun run e2e`).
 - [ ] `bun run lint` clean.
 - [ ] Typecheck clean.
-- [ ] BOT.md content is byte-identical to the old default in `src/index.ts`
+- [ ] README.md content is byte-identical to the old default in `src/index.ts`
   (the migration is meant to be behavior-preserving for skill-less bots).
 - [ ] `SYSTEM_PROMPT` env semantics documented in CLAUDE.md.
-- [ ] A fresh sandbox container shows `/workspace/BOT.md` and
+- [ ] A fresh sandbox container shows `/workspace/README.md` and
   `/workspace/skills/python-charts/SKILL.md` owned by uid 1000.
 - [ ] Two mentions in one thread produce byte-identical system messages in
   the stubbed model calls (frozen-per-thread invariant verified).
