@@ -13,6 +13,11 @@ export type ToolContext = {
   web?: WebClient;
   channel?: string;
   threadTs?: string;
+  // ts of the running checklist message. ask_user renders its interactive
+  // blocks onto this message rather than posting a new one, so the question
+  // appears inline with the turn's progress instead of out-of-order below
+  // the final reply.
+  checklistTs?: string;
 };
 
 export type Tool = {

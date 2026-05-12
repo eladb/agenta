@@ -20,7 +20,11 @@ export async function editMessage(
   ts: string,
   text: string,
 ): Promise<void> {
-  await web.chat.update({ channel, ts, text });
+  // Always pass blocks: [] so a previous chat.update that set blocks (e.g.
+  // ask_user rendering interactive elements on the checklist message) gets
+  // cleared when we switch back to plain text. Without this, Slack keeps
+  // the old blocks and the buttons stay visible after the ask resolved.
+  await web.chat.update({ channel, ts, text, blocks: [] });
 }
 
 export async function postBlocksInThread(

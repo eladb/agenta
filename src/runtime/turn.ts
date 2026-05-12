@@ -94,6 +94,7 @@ export async function runTurn(
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
 
       for (const tc of toolCalls) {
+        const bulletIdx = lines.length;
         lines.push(formatToolBullet(tc));
         await updateChecklist();
 
@@ -146,9 +147,16 @@ export async function runTurn(
             web,
             channel: input.channel,
             threadTs: input.threadTs,
+            checklistTs,
           },
           signal,
         );
+
+        // Show the user's answer inline on the ask_user bullet so the
+        // resolved choice stays visible after the ask blocks are cleared.
+        if (tc.function.name === 'ask_user' && !result.error) {
+          lines[bulletIdx] = `${lines[bulletIdx]} → ${result.content}`;
+        }
 
         if (flushTimer) {
           clearTimeout(flushTimer);

@@ -46,6 +46,6 @@ describe('ask_user', () => {
       CTX,
     );
     expect(r.error).toBe(true);
-    expect(r.content).toMatch(/Slack context unavailable/);
+    expect(r.content).toMatch(/Slack\/checklist context unavailable/);
   });
 });

@@ -1,6 +1,6 @@
 import { AskInUseError, type AskKind, getPendingAskByTs, registerAsk } from '../../runtime/asks';
-import { buildAskBlocks, buildSettledBlocks } from '../../slack/ask-blocks';
-import { editBlocksMessage, postBlocksInThread } from '../../slack/post';
+import { buildAskBlocks } from '../../slack/ask-blocks';
+import { editBlocksMessage } from '../../slack/post';
 import { oneLine, strArg } from './helpers';
 import type { Tool } from './types';
 
@@ -67,42 +67,26 @@ export const askUser: Tool = {
     ) {
       throw new Error(`ask_user: kind=${kind} requires a non-empty options array`);
     }
-    if (!ctx.web || !ctx.channel || !ctx.threadTs) {
-      throw new Error('ask_user: Slack context unavailable in this run');
+    if (!ctx.web || !ctx.channel || !ctx.threadTs || !ctx.checklistTs) {
+      throw new Error('ask_user: Slack/checklist context unavailable in this run');
     }
     const web = ctx.web;
     const channel = ctx.channel;
+    const messageTs = ctx.checklistTs;
     const placeholder = typeof a.placeholder === 'string' ? a.placeholder : undefined;
     const question = a.question;
-    const blocks = buildAskBlocks(kind as AskKind, question, options, placeholder);
-    const messageTs = await postBlocksInThread(web, channel, ctx.threadTs, question, blocks);
 
-    // onSettle edits the Slack message in place so the thread is left with a
-    // tidy "Q / A" record instead of stale buttons.
-    const settle = async (
-      settledKind: 'answer' | 'timeout' | 'cancel',
-      detail: string,
-    ): Promise<void> => {
-      const answerLine =
-        settledKind === 'timeout'
-          ? '_(timed out)_'
-          : settledKind === 'cancel'
-            ? '_(cancelled)_'
-            : detail.length > 0
-              ? detail
-              : '_(no answer)_';
-      try {
-        await editBlocksMessage(
-          web,
-          channel,
-          messageTs,
-          `${question} — ${answerLine}`,
-          buildSettledBlocks(question, answerLine),
-        );
-      } catch {
-        // Slack edit failures are best-effort.
-      }
-    };
+    // Render the ask blocks onto the running checklist message instead of
+    // posting a new one. The blocks replace the checklist text while the
+    // ask is pending; once it settles, turn.ts's next updateChecklist call
+    // edits the message back to plain text (and editMessage clears the
+    // blocks so the buttons disappear).
+    const blocks = buildAskBlocks(kind as AskKind, question, options, placeholder);
+    try {
+      await editBlocksMessage(web, channel, messageTs, question, blocks);
+    } catch (err) {
+      throw new Error(`ask_user: could not render blocks: ${(err as Error).message}`);
+    }
 
     let registered: Promise<string>;
     try {
@@ -111,7 +95,11 @@ export const askUser: Tool = {
         threadKey: ctx.threadKey,
         kind: kind as AskKind,
         timeoutMs: TIMEOUT_MS,
-        onSettle: settle,
+        // No Slack-side settle handler needed: turn.ts will rewrite the
+        // checklist on its next updateChecklist call, which clears the
+        // blocks. The resolved answer is appended to the ask bullet in
+        // turn.ts so the user still sees what they picked.
+        onSettle: () => {},
       });
     } catch (err) {
       if (err instanceof AskInUseError) {
