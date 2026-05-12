@@ -189,10 +189,20 @@ export async function ensureContainer(threadKey: string): Promise<void> {
     '/workspace',
     '--mount',
     'type=volume,target=/workspace',
+    // entrypoint.sh runs as root to install iptables (NET_ADMIN), then drop
+    // to the `sandbox` user via setpriv (SETUID + SETGID for the uid/gid
+    // change, SETPCAP to wipe the bounding/inheritable/ambient sets). After
+    // the drop, no capability is reachable from the unprivileged process.
     '--cap-drop',
     'ALL',
     '--cap-add',
     'NET_ADMIN',
+    '--cap-add',
+    'SETUID',
+    '--cap-add',
+    'SETGID',
+    '--cap-add',
+    'SETPCAP',
     '--security-opt',
     'no-new-privileges',
     '--pids-limit',

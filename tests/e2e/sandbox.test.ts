@@ -270,6 +270,52 @@ test.if(HAS_DOCKER)(
 );
 
 test.if(HAS_DOCKER)(
+  'bash runs as the unprivileged sandbox user (uid 1000), no caps',
+  async () => {
+    script.length = 0;
+    calls.length = 0;
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_whoami',
+          type: 'function',
+          function: {
+            name: 'bash',
+            arguments: JSON.stringify({
+              command:
+                'echo user=$(whoami) uid=$(id -u); echo "caps=$(cat /proc/self/status | grep CapEff | awk \'{print $2}\')"',
+            }),
+          },
+        },
+      ],
+    });
+    scriptReply({ role: 'assistant', content: 'identity checked' });
+
+    const threadTs = await mention(
+      tester,
+      agent.botUserId,
+      channel,
+      undefined,
+      `e2e-nonroot-${Date.now()}`,
+    );
+    createdThreads.push(threadTs);
+
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'identity checked');
+    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
+
+    const toolMsg = calls[1]?.find((m) => m.role === 'tool');
+    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
+    expect(toolMsg.content).toContain('user=sandbox');
+    expect(toolMsg.content).toContain('uid=1000');
+    // CapEff = 0000000000000000 means "no effective capabilities".
+    expect(toolMsg.content).toMatch(/caps=0+/);
+  },
+  60_000,
+);
+
+test.if(HAS_DOCKER)(
   'bash live-streams stdout into the Slack checklist while running',
   async () => {
     script.length = 0;
