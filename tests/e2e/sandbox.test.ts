@@ -49,7 +49,7 @@ beforeAll(async () => {
   channel = requireEnv('TEST_CHANNEL_ID');
   // Lower the in-container /exec timeout so the timeout test doesn't take 60s.
   // docker.ts forwards this env to every container it launches.
-  process.env.SANDBOX_EXEC_TIMEOUT_MS = '5000';
+  process.env.SANDBOX_EXEC_TIMEOUT_MS = '8000';
   // Build/pull the sandbox image up front so the first mention doesn't time out.
   await ensureImage();
   [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
@@ -267,6 +267,78 @@ test.if(HAS_DOCKER)(
     expect(readResult.content).not.toContain('TODO');
   },
   120_000,
+);
+
+test.if(HAS_DOCKER)(
+  'bash live-streams stdout into the Slack checklist while running',
+  async () => {
+    script.length = 0;
+    calls.length = 0;
+    // Bash command runs ~4s, printing a line every second. Long enough for
+    // the 800ms debounce to fire multiple checklist edits, short enough to
+    // stay under the 5s SANDBOX_EXEC_TIMEOUT_MS this test file sets.
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_stream',
+          type: 'function',
+          function: {
+            name: 'bash',
+            arguments: JSON.stringify({
+              command: 'for i in 1 2 3 4; do echo step $i; sleep 1; done',
+            }),
+          },
+        },
+      ],
+    });
+    scriptReply({ role: 'assistant', content: 'stream done' });
+
+    const threadTs = await mention(
+      tester,
+      agent.botUserId,
+      channel,
+      undefined,
+      `e2e-stream-${Date.now()}`,
+    );
+    createdThreads.push(threadTs);
+
+    // Poll the checklist message until we see the live preview prefix on its
+    // own line. The preview line starts with three spaces (see liveLine() in
+    // turn.ts). Bail with a clear error if the command finishes before we
+    // catch a streaming sample.
+    let sawLivePreview = false;
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const res = await tester.web.conversations.replies({ channel, ts: threadTs });
+      const botMsg = (res.messages ?? []).find((m) => m.user === agent.botUserId);
+      const text = botMsg?.text ?? '';
+      // Look for a line that contains streamed step content but NOT the final
+      // exit summary (which replaces the preview with "→ exit: 0").
+      if (text.includes('step ') && !text.includes('→ exit')) {
+        sawLivePreview = true;
+        break;
+      }
+      if (text.startsWith('stream done')) break; // tool already done
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(sawLivePreview).toBe(true);
+
+    // Now wait for the final model reply.
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'stream done', {
+      timeoutMs: 30_000,
+    });
+
+    // And verify the recorded tool_result contains all the streamed lines.
+    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
+    const toolMsg = calls[1]?.find((m) => m.role === 'tool');
+    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
+    for (const n of [1, 2, 3, 4]) {
+      expect(toolMsg.content).toContain(`step ${n}`);
+    }
+  },
+  60_000,
 );
 
 test.if(HAS_DOCKER)(
