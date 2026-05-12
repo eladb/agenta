@@ -25,17 +25,21 @@ if (!TOKEN || TOKEN.length < 16) {
   process.exit(1);
 }
 
+// Don't let any per-request bug take down the whole server (Docker would
+// auto-restart it on a new host port, breaking the bot's cached endpoint).
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException:', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('unhandledRejection:', err);
+});
+
 function authorized(req: Request): boolean {
   return req.headers.get('authorization') === `Bearer ${TOKEN}`;
 }
 
-// Resolve a user-supplied path relative to /workspace if it's relative, and
-// reject any traversal that escapes /workspace.
 function resolveWorkspacePath(p: string): string {
-  const abs = isAbsolute(p) ? p : resolve(WORKSPACE, p);
-  // Allow paths inside /workspace OR anywhere else absolute — the container
-  // itself is the security boundary. We do NOT try to jail to /workspace.
-  return abs;
+  return isAbsolute(p) ? p : resolve(WORKSPACE, p);
 }
 
 async function handleExec(req: Request): Promise<Response> {
@@ -53,8 +57,23 @@ async function handleExec(req: Request): Promise<Response> {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const enc = new TextEncoder();
+      let closed = false;
       const send = (kind: string, payload: object): void => {
-        controller.enqueue(enc.encode(`data: ${JSON.stringify({ kind, ...payload })}\n\n`));
+        if (closed) return;
+        try {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify({ kind, ...payload })}\n\n`));
+        } catch {
+          closed = true;
+        }
+      };
+      const finish = (): void => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // already closed
+        }
       };
 
       child.stdout?.on('data', (chunk: Buffer) =>
@@ -65,11 +84,11 @@ async function handleExec(req: Request): Promise<Response> {
       );
       child.on('error', (err) => {
         send('exit', { exitCode: -1, error: err.message });
-        controller.close();
+        finish();
       });
       child.on('close', (code) => {
         send('exit', { exitCode: code ?? -1 });
-        controller.close();
+        finish();
       });
 
       const onAbort = (): void => {
@@ -127,15 +146,19 @@ async function handleWrite(req: Request): Promise<Response> {
 Bun.serve({
   port: PORT,
   hostname: '0.0.0.0',
-  idleTimeout: 0,
   async fetch(req): Promise<Response> {
-    const url = new URL(req.url);
-    if (url.pathname === '/health') return new Response('ok');
-    if (!authorized(req)) return new Response('unauthorized', { status: 401 });
-    if (url.pathname === '/exec' && req.method === 'POST') return handleExec(req);
-    if (url.pathname === '/read' && req.method === 'POST') return handleRead(req);
-    if (url.pathname === '/write' && req.method === 'POST') return handleWrite(req);
-    return new Response('not found', { status: 404 });
+    try {
+      const url = new URL(req.url);
+      if (url.pathname === '/health') return new Response('ok');
+      if (!authorized(req)) return new Response('unauthorized', { status: 401 });
+      if (url.pathname === '/exec' && req.method === 'POST') return handleExec(req);
+      if (url.pathname === '/read' && req.method === 'POST') return handleRead(req);
+      if (url.pathname === '/write' && req.method === 'POST') return handleWrite(req);
+      return new Response('not found', { status: 404 });
+    } catch (err) {
+      console.error('handler error:', err);
+      return new Response((err as Error).message ?? 'internal error', { status: 500 });
+    }
   },
 });
 

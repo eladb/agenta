@@ -101,11 +101,12 @@ export async function ensureNetwork(): Promise<void> {
   return p;
 }
 
-// In-memory map of which host port and bearer token to use to talk to each
-// thread's sandbox server. Populated by ensureContainer; cleared by
-// removeContainer / killAllSandboxContainers.
-type SandboxConn = { hostPort: number; token: string };
-const conns = new Map<string, SandboxConn>();
+// Bearer token per thread. Set by ensureContainer at create time; cleared by
+// removeContainer / killAllSandboxContainers. The host port is NOT cached —
+// Docker Desktop auto-restarts containers behind our back when their main
+// process exits, and reassigns a new random host port on each restart. So we
+// look up the live port via `docker port` on every call (~50ms).
+const tokens = new Map<string, string>();
 
 function randomToken(): string {
   return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
@@ -153,15 +154,13 @@ export async function ensureContainer(threadKey: string): Promise<void> {
   await Promise.all([ensureImage(), ensureNetwork()]);
   const name = containerName(threadKey);
 
-  if (conns.has(threadKey)) {
-    // Verify the container is still running; if not, drop the cached conn
-    // and fall through to recreate.
+  if (tokens.has(threadKey)) {
     const inspect = await dockerSpawn(['inspect', '-f', '{{.State.Status}}', name]);
     if (inspect.exitCode === 0 && inspect.stdout.trim() === 'running') return;
-    conns.delete(threadKey);
+    tokens.delete(threadKey);
   }
 
-  // If the container exists from before but we have no cached conn (e.g.
+  // If the container exists from before but we have no cached token (e.g.
   // partial state), remove it and recreate so we control the token.
   const inspectStale = await dockerSpawn(['inspect', name]);
   if (inspectStale.exitCode === 0) {
@@ -191,14 +190,18 @@ export async function ensureContainer(threadKey: string): Promise<void> {
   }
   const hostPort = await readHostPort(name);
   await waitForHealth(hostPort);
-  conns.set(threadKey, { hostPort, token });
+  tokens.set(threadKey, token);
   log.info('sandbox', `container ${name} ready on :${hostPort}`);
 }
 
-function connOrThrow(threadKey: string): SandboxConn {
-  const c = conns.get(threadKey);
-  if (!c) throw new Error(`sandbox not initialized for ${threadKey}`);
-  return c;
+// Returns the live HTTP base URL + token to reach a thread's sandbox server.
+// Re-reads the host port every call (Docker Desktop may have restarted the
+// container behind us and reassigned it).
+async function getEndpoint(threadKey: string): Promise<{ baseUrl: string; token: string }> {
+  const token = tokens.get(threadKey);
+  if (!token) throw new Error(`sandbox not initialized for ${threadKey}`);
+  const port = await readHostPort(containerName(threadKey));
+  return { baseUrl: `http://127.0.0.1:${port}`, token };
 }
 
 // Parse an SSE stream of `data: <json>\n\n` events emitted by /exec.
@@ -248,8 +251,8 @@ export async function runBash(
   command: string,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  const { hostPort, token } = connOrThrow(threadKey);
-  const res = await fetch(`http://127.0.0.1:${hostPort}/exec`, {
+  const { baseUrl, token } = await getEndpoint(threadKey);
+  const res = await fetch(`${baseUrl}/exec`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify({ command }),
@@ -267,8 +270,8 @@ export async function readFile(
   path: string,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  const { hostPort, token } = connOrThrow(threadKey);
-  const res = await fetch(`http://127.0.0.1:${hostPort}/read`, {
+  const { baseUrl, token } = await getEndpoint(threadKey);
+  const res = await fetch(`${baseUrl}/read`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify({ path }),
@@ -286,8 +289,8 @@ export async function writeFile(
   content: string,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  const { hostPort, token } = connOrThrow(threadKey);
-  const res = await fetch(`http://127.0.0.1:${hostPort}/write`, {
+  const { baseUrl, token } = await getEndpoint(threadKey);
+  const res = await fetch(`${baseUrl}/write`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify({ path, content }),
@@ -301,7 +304,7 @@ export async function writeFile(
 
 export async function removeContainer(threadKey: string): Promise<void> {
   const name = containerName(threadKey);
-  conns.delete(threadKey);
+  tokens.delete(threadKey);
   const res = await dockerSpawn(['rm', '-fv', name]);
   if (res.exitCode !== 0 && !/No such container/i.test(res.stderr)) {
     log.warn('sandbox', `docker rm ${name}: ${res.stderr.trim()}`);
@@ -321,7 +324,7 @@ export async function killAllSandboxContainers(): Promise<void> {
   const ids = list.stdout.trim().split('\n').filter(Boolean);
   if (ids.length === 0) return;
   const rm = await dockerSpawn(['rm', '-fv', ...ids]);
-  conns.clear();
+  tokens.clear();
   if (rm.exitCode !== 0) {
     log.warn('sandbox', `killAllSandboxContainers: rm failed: ${rm.stderr.trim()}`);
   } else {
@@ -333,5 +336,5 @@ export async function killAllSandboxContainers(): Promise<void> {
 export function _resetImageReadyCache(): void {
   imageReady = undefined;
   networkReady = undefined;
-  conns.clear();
+  tokens.clear();
 }
