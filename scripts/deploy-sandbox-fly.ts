@@ -85,6 +85,37 @@ const deploy = fly(['deploy', '-a', APP, '--build-only', '--push', '--image-labe
 if (!deploy.ok) die('fly deploy failed (see output above)');
 
 console.log(`\n✓ image pushed: registry.fly.io/${APP}:latest`);
+
+// 5. Allocate public IPs so the app's <app>.fly.dev hostname actually
+//    resolves. Fly apps don't get IPs by default; without these the bot
+//    can't reach the per-thread machines we'll create. Shared IPv4 is free
+//    and good enough for our HTTPS-only traffic.
+const ips = fly(['ips', 'list', '-a', APP, '--json'], { capture: true });
+let hasV4 = false;
+let hasV6 = false;
+if (ips.ok) {
+  try {
+    const list = JSON.parse(ips.stdout) as Array<{ Type?: string }>;
+    hasV4 = list.some((ip) => ip.Type === 'shared_v4' || ip.Type === 'v4');
+    hasV6 = list.some((ip) => ip.Type === 'v6' || ip.Type === 'private_v6');
+  } catch {
+    // ignore parse errors, just (re-)allocate
+  }
+}
+if (!hasV4) {
+  console.log('\nallocating shared IPv4 for the app…');
+  const v4 = fly(['ips', 'allocate-v4', '-a', APP, '--shared', '-y']);
+  if (!v4.ok) die('fly ips allocate-v4 failed');
+} else {
+  console.log(`✓ shared IPv4 already allocated`);
+}
+if (!hasV6) {
+  console.log('allocating IPv6 for the app…');
+  const v6 = fly(['ips', 'allocate-v6', '-a', APP]);
+  if (!v6.ok) die('fly ips allocate-v6 failed');
+} else {
+  console.log(`✓ IPv6 already allocated`);
+}
 console.log('');
 console.log('Next steps:');
 console.log(`  1. Generate an API token (one-time):`);
