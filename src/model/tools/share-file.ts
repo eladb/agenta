@@ -20,18 +20,13 @@ export const shareFile: Tool = {
     function: {
       name: 'share_file',
       description:
-        'Upload a file from the sandbox INTO the Slack thread so the user can actually see it. CALL THIS whenever the user asks you to "send me", "show me", or "share" an image, chart, PDF, archive, or any other artifact — writing a file to /workspace alone does NOT deliver it to the user; only share_file does. Do not invent URLs like sandbox:// or file:// — the user can\'t open those. Use the optional `comment` to caption the file. After this tool succeeds, the file appears in the thread inline; your final assistant reply should NOT restate the filename, paste a URL, or otherwise re-announce the file — the user already sees it. Max 25 MB.',
+        'Upload a file from the sandbox INTO the Slack thread so the user can actually see it. CALL THIS whenever the user asks you to "send me", "show me", or "share" an image, chart, PDF, archive, or any other artifact — writing a file to /workspace alone does NOT deliver it to the user; only share_file does. Do not invent URLs like sandbox:// or file:// — the user can\'t open those. The file appears bare in the thread; whatever surrounding prose you want the user to see (caption, explanation, summary) goes in your final assistant reply, NOT here. Max 25 MB.',
       parameters: {
         type: 'object',
         properties: {
           path: {
             type: 'string',
             description: 'Path to the file inside the sandbox (relative to /workspace or absolute).',
-          },
-          comment: {
-            type: 'string',
-            description:
-              'Optional message to post alongside the file (e.g. "here\'s the chart you asked for").',
           },
         },
         required: ['path'],
@@ -43,7 +38,6 @@ export const shareFile: Tool = {
   invoke: async (args, ctx, _signal) => {
     const path = strArg(args, 'path');
     if (!path) throw new Error('share_file: missing or invalid path');
-    const comment = strArg(args, 'comment');
     if (!ctx.web || !ctx.channel || !ctx.threadTs) {
       throw new Error('share_file: Slack context unavailable in this run');
     }
@@ -64,7 +58,6 @@ export const shareFile: Tool = {
       thread_ts: ctx.threadTs,
       file: data,
       filename,
-      ...(comment ? { initial_comment: comment } : {}),
     })) as { files?: Array<{ id?: string; files?: Array<{ id?: string }> }> };
     const top = upload.files?.[0];
     const fileId = top?.files?.[0]?.id ?? top?.id;
@@ -115,7 +108,7 @@ export const shareFile: Tool = {
       ingested_at: nowIso(),
       payload: {
         slack_ts: slackTs ?? '',
-        text: comment ? `[shared ${filename}] ${comment}` : `[shared ${filename}]`,
+        text: `[shared ${filename}]`,
         files: [{ file_id: fileId, name: filename, mimetype, local_path: localPath }],
       },
     });

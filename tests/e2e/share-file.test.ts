@@ -97,7 +97,7 @@ test.if(HAS_DOCKER)(
           type: 'function',
           function: {
             name: 'share_file',
-            arguments: JSON.stringify({ path: 'note.txt', comment: 'here you go' }),
+            arguments: JSON.stringify({ path: 'note.txt' }),
           },
         },
       ],
@@ -152,7 +152,7 @@ test.if(HAS_DOCKER)(
     );
     expect(shared).toBeDefined();
     expect(shared?.payload.files?.[0]?.name).toBe('note.txt');
-    expect(shared?.payload.text).toContain('here you go');
+    expect(shared?.payload.text).toContain('[shared note.txt]');
     const local = join(
       getDataDir(),
       threadKey(channel, threadTs),
