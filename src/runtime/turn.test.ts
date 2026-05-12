@@ -233,6 +233,46 @@ describe('runTurn with tools', () => {
     expect(trs[0]?.payload.content).toMatch(/unknown tool/);
   });
 
+  test('no "provisioning workspace…" line for tools that do not require the sandbox', async () => {
+    const { web, edits } = makeWebStub();
+    const callModel: CallModel = async () => ({
+      role: 'assistant',
+      content: 'done',
+    });
+    await runTurn(web, callModel, 'sys', input);
+    // The model returned a final reply with no tool_calls, so we never even
+    // reach the per-tool loop. Sanity check: no provisioning bullet anywhere.
+    expect(edits.some((e) => e.text.includes('provisioning workspace'))).toBe(false);
+  });
+
+  test('non-sandbox tools (get_current_time) skip the sandbox-provisioning UI', async () => {
+    const { web, edits } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'time is now' };
+    };
+
+    await runTurn(web, callModel, 'sys', input);
+    // get_current_time has no `requiresSandbox` flag, so the turn must not
+    // surface a workspace status line at any point.
+    expect(edits.some((e) => e.text.includes('provisioning workspace'))).toBe(false);
+    expect(edits.some((e) => e.text.includes('workspace ready'))).toBe(false);
+  });
+
   test('abort signal during second model call edits checklist to "stopped"', async () => {
     const { web, edits } = makeWebStub();
     const controller = new AbortController();

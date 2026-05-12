@@ -237,9 +237,14 @@ async function killAll(): Promise<void> {
   }
 }
 
+function isReady(threadKey: string): boolean {
+  return tokens.has(threadKey);
+}
+
 export const dockerProvider: SandboxProvider = {
   name: 'docker',
   ensure: ensureContainer,
+  isReady,
   getEndpoint,
   remove,
   killAll,

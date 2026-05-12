@@ -24,6 +24,7 @@ export const editFileTool: Tool = {
       },
     },
   },
+  requiresSandbox: true,
   describe: (args) => `edit ${strArg(args, 'path') ?? '?'}`,
   invoke: async (args, ctx, signal) => {
     const a = args as { path?: unknown; old_string?: unknown; new_string?: unknown } | null;

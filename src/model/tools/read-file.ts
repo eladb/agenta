@@ -31,6 +31,7 @@ export const readFileTool: Tool = {
       },
     },
   },
+  requiresSandbox: true,
   describe: (args) => {
     const a = args as { path?: unknown; offset?: unknown; limit?: unknown } | null;
     const path = typeof a?.path === 'string' ? a.path : '?';

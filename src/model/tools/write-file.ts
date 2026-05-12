@@ -24,6 +24,7 @@ export const writeFileTool: Tool = {
       },
     },
   },
+  requiresSandbox: true,
   describe: (args) => {
     const a = args as { path?: unknown; content?: unknown } | null;
     const path = typeof a?.path === 'string' ? a.path : '?';

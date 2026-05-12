@@ -20,6 +20,11 @@ export type SandboxProvider = {
   // Idempotent: ensures the thread has a running sandbox ready for HTTP
   // calls. Blocks until /health responds.
   ensure(threadKey: string): Promise<void>;
+  // Synchronous, cheap. True iff `ensure` has succeeded in this process for
+  // this thread (and removeContainer hasn't been called since). Used by the
+  // turn loop to decide whether to show the "provisioning workspace…" UI
+  // before a sandbox-touching tool runs.
+  isReady(threadKey: string): boolean;
   // Returns baseUrl + auth/routing headers for the thread's sandbox. Called
   // before every HTTP request — providers may re-resolve underlying details
   // (e.g. docker re-reads the host port because Docker Desktop can restart

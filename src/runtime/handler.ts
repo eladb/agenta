@@ -5,7 +5,7 @@ import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attac
 import { backfillIfNew } from '../persistence/backfill';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { deleteThreadData } from '../persistence/store';
-import { ensureContainer, removeContainer } from '../sandbox';
+import { removeContainer } from '../sandbox';
 import type { DeleteMessage, EditMessage, IncomingEvent, NormalMessage } from '../slack/events';
 import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';
@@ -102,16 +102,11 @@ async function handleMessage(
     return;
   }
 
-  // Create the per-thread sandbox container on first mention. Idempotent
-  // (cheap after warmup). Awaiting matters because the turn may call bash —
-  // and bash needs the in-container HTTP server up. Failures are logged but
-  // don't block the turn; bash calls will surface a sandbox-not-initialized
-  // error as a tool_result.
-  try {
-    await ensureContainer(tk);
-  } catch (err) {
-    log.warn('handler', `[${tk}] ensureContainer failed: ${(err as Error).message}`);
-  }
+  // Sandbox provisioning is deferred — see turn.ts. The first tool that
+  // sets requiresSandbox triggers `ensureContainer` and surfaces a
+  // "🛠️ provisioning workspace…" line in the checklist. Mentions that
+  // never use a sandbox-touching tool (just chat, time, fetch_url, ask_user)
+  // pay nothing.
 
   await startOrQueue(web, callModel, systemPrompt, {
     channel: e.channel,

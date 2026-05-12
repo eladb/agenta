@@ -18,6 +18,7 @@ export const listDirTool: Tool = {
       },
     },
   },
+  requiresSandbox: true,
   describe: (args) => `list ${strArg(args, 'path') ?? '/workspace'}`,
   invoke: async (args, ctx, signal) => {
     const a = args as { path?: unknown } | null;

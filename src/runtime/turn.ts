@@ -3,6 +3,7 @@ import { log } from '../log';
 import { buildMessages } from '../model/context';
 import type { CallModel, Message, ToolCall } from '../model/gateway';
 import { invokeTool, TOOL_DEFS, TOOLS } from '../model/tools';
+import { ensureContainer, isSandboxReady } from '../sandbox';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { editMessage, postInThread } from '../slack/post';
 import { redact } from './redact';
@@ -94,6 +95,28 @@ export async function runTurn(
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
 
       for (const tc of toolCalls) {
+        // Lazy sandbox provisioning. If this tool touches the sandbox and we
+        // haven't provisioned yet in this process, surface a status line
+        // BEFORE the tool bullet so the chronology in the thread matches
+        // what actually happened. The line stays as a record after
+        // resolution — mutates to ✅ ready or ❌ failed.
+        const tool = TOOLS[tc.function.name];
+        let provisionError: string | undefined;
+        if (tool?.requiresSandbox && !isSandboxReady(input.threadKey)) {
+          const provIdx = lines.length;
+          lines.push('• 🛠️ provisioning workspace…');
+          await updateChecklist();
+          try {
+            await ensureContainer(input.threadKey);
+            lines[provIdx] = '• ✅ workspace ready';
+          } catch (err) {
+            const msg = (err as Error).message;
+            provisionError = msg;
+            lines[provIdx] = `• ❌ workspace provisioning failed: ${msg}`;
+          }
+          await updateChecklist();
+        }
+
         const bulletIdx = lines.length;
         lines.push(formatToolBullet(tc));
         await updateChecklist();
@@ -138,19 +161,24 @@ export async function runTurn(
           },
         });
 
-        const result = await invokeTool(
-          tc.function.name,
-          tc.function.arguments,
-          {
-            threadKey: input.threadKey,
-            onProgress,
-            web,
-            channel: input.channel,
-            threadTs: input.threadTs,
-            checklistTs,
-          },
-          signal,
-        );
+        const result: { content: string; error: boolean } = provisionError
+          ? {
+              content: `error: workspace not available: ${provisionError}`,
+              error: true,
+            }
+          : await invokeTool(
+              tc.function.name,
+              tc.function.arguments,
+              {
+                threadKey: input.threadKey,
+                onProgress,
+                web,
+                channel: input.channel,
+                threadTs: input.threadTs,
+                checklistTs,
+              },
+              signal,
+            );
 
         // Show the user's answer inline on the ask_user bullet so the
         // resolved choice stays visible after the ask blocks are cleared.

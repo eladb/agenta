@@ -27,4 +27,10 @@ export type Tool = {
   // parsed JSON args (or {} if parsing failed). Must be short, safe to call
   // on malformed input, and not throw.
   describe?: (args: unknown) => string;
+  // True if this tool touches the per-thread sandbox (bash, fs, share_file,
+  // …). Used by the turn loop to lazy-provision the sandbox on first such
+  // tool call and surface a "🛠️ provisioning workspace…" line. Tools that
+  // never call into the sandbox (get_current_time, fetch_url, ask_user)
+  // leave this unset.
+  requiresSandbox?: boolean;
 };

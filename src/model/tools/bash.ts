@@ -39,6 +39,7 @@ export const bash: Tool = {
       },
     },
   },
+  requiresSandbox: true,
   describe: (args) => {
     const cmd = strArg(args, 'command');
     return cmd ? oneLine(`$ ${cmd}`) : '$ (missing command)';

@@ -157,9 +157,14 @@ async function killAll(): Promise<void> {
   if (ours.length > 0) log.info('sandbox', `fly: destroyed ${ours.length} machine(s)`);
 }
 
+function isReady(threadKey: string): boolean {
+  return state.has(threadKey);
+}
+
 export const flyProvider: SandboxProvider = {
   name: 'fly',
   ensure,
+  isReady,
   getEndpoint,
   remove,
   killAll,

@@ -30,6 +30,9 @@ log.info('sandbox', `provider: ${provider.name}`);
 export async function ensureContainer(threadKey: string): Promise<void> {
   return provider.ensure(threadKey);
 }
+export function isSandboxReady(threadKey: string): boolean {
+  return provider.isReady(threadKey);
+}
 export async function removeContainer(threadKey: string): Promise<void> {
   return provider.remove(threadKey);
 }

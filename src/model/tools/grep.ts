@@ -23,6 +23,7 @@ export const grep: Tool = {
       },
     },
   },
+  requiresSandbox: true,
   describe: (args) => {
     const pat = strArg(args, 'pattern') ?? '?';
     const g = strArg(args, 'glob');

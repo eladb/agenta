@@ -22,6 +22,7 @@ export const glob: Tool = {
       },
     },
   },
+  requiresSandbox: true,
   describe: (args) => {
     const pat = strArg(args, 'pattern') ?? '?';
     const p = strArg(args, 'path');

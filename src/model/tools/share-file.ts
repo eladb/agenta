@@ -35,6 +35,7 @@ export const shareFile: Tool = {
       },
     },
   },
+  requiresSandbox: true,
   describe: (args) => `share ${strArg(args, 'path') ?? '?'}`,
   invoke: async (args, ctx, _signal) => {
     const path = strArg(args, 'path');
