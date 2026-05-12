@@ -105,7 +105,10 @@ describe('buildMessages', () => {
       image_url?: { url: string };
     }>;
     expect(parts).toHaveLength(2);
-    expect(parts[0]).toEqual({ type: 'text', text: 'what is this' });
+    expect(parts[0]).toEqual({
+      type: 'text',
+      text: 'what is this\n[attached: attachments/F1-shot.png]',
+    });
     expect(parts[1]?.type).toBe('image_url');
     const url = parts[1]?.image_url?.url ?? '';
     expect(url.startsWith('data:image/png;base64,')).toBe(true);
@@ -130,10 +133,17 @@ describe('buildMessages', () => {
       },
     });
     const m = await buildMessages('t', 'sys');
-    const parts = m[1]?.content as Array<{ type: string; image_url?: { url: string } }>;
-    expect(parts).toHaveLength(1); // no text part when text is empty
-    expect(parts[0]?.type).toBe('image_url');
-    expect(parts[0]?.image_url?.url.startsWith('data:application/pdf;base64,')).toBe(true);
+    const parts = m[1]?.content as Array<{
+      type: string;
+      text?: string;
+      image_url?: { url: string };
+    }>;
+    // Suffix-only text part is emitted even when the user posted no prose,
+    // so the model sees the sandbox path hint for non-vision models too.
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toEqual({ type: 'text', text: '[attached: attachments/F2-doc.pdf]' });
+    expect(parts[1]?.type).toBe('image_url');
+    expect(parts[1]?.image_url?.url.startsWith('data:application/pdf;base64,')).toBe(true);
   });
 
   it('inlines a small text file as a text content part', async () => {
@@ -156,7 +166,10 @@ describe('buildMessages', () => {
     });
     const m = await buildMessages('t', 'sys');
     const parts = m[1]?.content as Array<{ type: string; text?: string }>;
-    expect(parts[0]).toEqual({ type: 'text', text: 'look at this' });
+    expect(parts[0]).toEqual({
+      type: 'text',
+      text: 'look at this\n[attached: attachments/F3-notes.txt]',
+    });
     expect(parts[1]?.type).toBe('text');
     expect(parts[1]?.text).toContain('[attached file: notes.txt]');
     expect(parts[1]?.text).toContain('hello from a text file');
@@ -183,8 +196,11 @@ describe('buildMessages', () => {
     });
     const m = await buildMessages('t', 'sys');
     const parts = m[1]?.content as Array<{ type: string; text?: string }>;
-    expect(parts[0]?.text).toContain('…[truncated');
-    expect(parts[0]?.text?.length).toBeLessThan(big.length);
+    // parts[0] is the suffix-only text (no user prose). parts[1] is the
+    // inlined truncated file body.
+    expect(parts[0]?.text).toBe('[attached: attachments/F4-big.txt]');
+    expect(parts[1]?.text).toContain('…[truncated');
+    expect(parts[1]?.text?.length).toBeLessThan(big.length);
   });
 
   it('emits a placeholder for unknown / unsupported types', async () => {
@@ -207,10 +223,72 @@ describe('buildMessages', () => {
     });
     const m = await buildMessages('t', 'sys');
     const parts = m[1]?.content as Array<{ type: string; text?: string }>;
-    expect(parts[0]).toEqual({
+    expect(parts[0]).toEqual({ type: 'text', text: '[attached: attachments/F5-blob.bin]' });
+    expect(parts[1]).toEqual({
       type: 'text',
       text: '[attached: blob.bin (application/octet-stream) — not passed to model]',
     });
+  });
+
+  it('appends one [attached: …] line per file to the user message text', async () => {
+    writeAttachment('t', 'F10-a.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+    writeAttachment('t', 'F11-b.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: {
+        slack_ts: '1',
+        text: 'two files for you',
+        files: [
+          {
+            file_id: 'F10',
+            name: 'a.png',
+            mimetype: 'image/png',
+            local_path: 'attachments/F10-a.png',
+          },
+          {
+            file_id: 'F11',
+            name: 'b.png',
+            mimetype: 'image/png',
+            local_path: 'attachments/F11-b.png',
+          },
+        ],
+      },
+    });
+    const m = await buildMessages('t', 'sys');
+    const parts = m[1]?.content as Array<{ type: string; text?: string }>;
+    // Single text part with both [attached: …] lines folded into the user
+    // prose — not two separate text parts and not a new top-level part.
+    const textPart = parts[0];
+    expect(textPart?.type).toBe('text');
+    expect(textPart?.text).toBe(
+      'two files for you\n[attached: attachments/F10-a.png]\n[attached: attachments/F11-b.png]',
+    );
+  });
+
+  it('sanitizes weird filenames in the [attached: …] hint', async () => {
+    // Mirrors attachments.ts:sanitize which strips non-\w.- chars. Spaces and
+    // slashes collapse to underscores so the path is a single safe segment.
+    writeAttachment('t', 'F12-my_weird_name_1_.txt', 'hi');
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: {
+        slack_ts: '1',
+        text: 'weird name',
+        files: [
+          {
+            file_id: 'F12',
+            name: 'my weird/name (1).txt',
+            mimetype: 'text/plain',
+            local_path: 'attachments/F12-my_weird_name_1_.txt',
+          },
+        ],
+      },
+    });
+    const m = await buildMessages('t', 'sys');
+    const parts = m[1]?.content as Array<{ type: string; text?: string }>;
+    expect(parts[0]?.text).toContain('[attached: attachments/F12-my_weird_name_1_.txt]');
   });
 
   it('keeps string content (not array) for messages with no files', async () => {

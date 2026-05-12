@@ -3,8 +3,8 @@ import { log } from '../log';
 import { buildMessages } from '../model/context';
 import type { CallModel, Message, ToolCall } from '../model/gateway';
 import { invokeTool, TOOL_DEFS, TOOLS } from '../model/tools';
-import { ensureContainer, isSandboxReady } from '../sandbox';
 import { newEventId, nowIso, record } from '../persistence/events';
+import { ensureContainer, isSandboxReady, syncAttachmentsToSandbox } from '../sandbox';
 import { editMessage, postInThread } from '../slack/post';
 import { redact } from './redact';
 
@@ -115,6 +115,22 @@ export async function runTurn(
             lines[provIdx] = `• workspace provisioning failed: ${msg}`;
           }
           await updateChecklist();
+        }
+
+        // Once the sandbox is ready, push any ingested Slack attachments into
+        // /workspace/attachments/ so the model's tools can read them. The
+        // sync helper is idempotent + per-process-cached, so re-calling on
+        // every sandbox tool call is cheap after the first run of the turn.
+        if (tool?.requiresSandbox && !provisionError) {
+          try {
+            const { synced } = await syncAttachmentsToSandbox(input.threadKey);
+            if (synced > 0) {
+              lines.push(`• synced ${synced} attachment(s) to workspace`);
+              await updateChecklist();
+            }
+          } catch (err) {
+            log.warn('turn', `[${input.threadKey}] attachment sync failed`, err);
+          }
         }
 
         const bulletIdx = lines.length;

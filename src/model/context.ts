@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { sanitize } from '../persistence/attachments';
 import type { AgentaEvent, AttachmentRef, ToolCallEvent } from '../persistence/events';
 import { readEvents, threadDir } from '../persistence/store';
 import type { ContentPart, Message, ToolCall } from './gateway';
@@ -58,11 +59,21 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
     if (e.source === 'slack' && e.type === 'message') {
       const text = e.payload.text;
       const files = e.payload.files ?? [];
+      // Hint the model where the synced files live inside the sandbox. The
+      // bot's lazy-sync pushes data/{tk}/attachments/<file_id>-<safeName>
+      // into /workspace/attachments/<file_id>-<safeName> so the model can
+      // read_file / bash over it without re-uploading.
+      const attachedSuffix = buildAttachedSuffix(files);
       if (files.length === 0) {
         messages.push({ role: 'user', content: text });
       } else {
         const parts: ContentPart[] = [];
-        if (text.length > 0) parts.push({ type: 'text', text });
+        // Always prepend a text part when files exist: either the original
+        // text + suffix, or just the suffix on its own if the user posted
+        // attachments without prose. That way every file has a visible
+        // path hint regardless of whether the model is vision-capable.
+        const textWithSuffix = appendSuffix(text, attachedSuffix);
+        parts.push({ type: 'text', text: textWithSuffix });
         for (const f of files) {
           parts.push(await fileToContentPart(threadKey, f));
         }
@@ -102,6 +113,21 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
     // tool_call events are folded into their parent assistant message above.
   }
   return messages;
+}
+
+function buildAttachedSuffix(files: AttachmentRef[]): string {
+  if (files.length === 0) return '';
+  const lines: string[] = [];
+  for (const f of files) {
+    const safeName = sanitize(f.name ?? f.file_id);
+    lines.push(`[attached: attachments/${f.file_id}-${safeName}]`);
+  }
+  return lines.join('\n');
+}
+
+function appendSuffix(text: string, suffix: string): string {
+  if (suffix.length === 0) return text;
+  return text.length > 0 ? `${text}\n${suffix}` : suffix;
 }
 
 async function fileToContentPart(threadKey: string, f: AttachmentRef): Promise<ContentPart> {

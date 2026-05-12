@@ -4,15 +4,16 @@
 // eventually talk to a sandbox on a remote machine. Endpoints — all require
 // `Authorization: Bearer $SANDBOX_TOKEN`:
 //
-//   POST /exec        { command }                      -> SSE stream
-//   POST /read        { path, offset?, limit? }        -> JSON DockerResult
-//   POST /read_binary { path }                         -> JSON DockerResult (stdout = base64)
-//   POST /write       { path, content }                -> JSON DockerResult
-//   POST /edit        { path, old_string, new_string } -> JSON DockerResult
-//   POST /grep        { pattern, path?, glob? }        -> JSON DockerResult
-//   POST /glob        { pattern, path? }               -> JSON DockerResult
-//   POST /ls          { path? }                        -> JSON DockerResult
-//   GET  /health                                       -> 200 "ok"
+//   POST /exec         { command }                      -> SSE stream
+//   POST /read         { path, offset?, limit? }        -> JSON DockerResult
+//   POST /read_binary  { path }                         -> JSON DockerResult (stdout = base64)
+//   POST /write        { path, content }                -> JSON DockerResult
+//   POST /write_binary { path, content_b64 }            -> JSON DockerResult
+//   POST /edit         { path, old_string, new_string } -> JSON DockerResult
+//   POST /grep         { pattern, path?, glob? }        -> JSON DockerResult
+//   POST /glob         { pattern, path? }               -> JSON DockerResult
+//   POST /ls           { path? }                        -> JSON DockerResult
+//   GET  /health                                        -> 200 "ok"
 //
 // On /exec disconnect, the spawned child is SIGTERM'd. uncaughtException is
 // caught so a per-request bug doesn't kill the whole process (which would
@@ -20,11 +21,11 @@
 
 import { spawn } from 'node:child_process';
 import {
-  mkdir,
   readFile as fsReadFile,
+  writeFile as fsWriteFile,
+  mkdir,
   readdir,
   stat,
-  writeFile as fsWriteFile,
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
@@ -204,6 +205,25 @@ async function handleWrite(req: Request): Promise<Response> {
   }
 }
 
+async function handleWriteBinary(req: Request): Promise<Response> {
+  const body = (await req.json()) as { path?: unknown; content_b64?: unknown };
+  if (typeof body.path !== 'string' || body.path.length === 0) {
+    return new Response('missing path', { status: 400 });
+  }
+  if (typeof body.content_b64 !== 'string') {
+    return new Response('missing content_b64', { status: 400 });
+  }
+  const full = resolveWorkspacePath(body.path);
+  try {
+    const buf = Buffer.from(body.content_b64, 'base64');
+    await mkdir(dirname(full), { recursive: true });
+    await fsWriteFile(full, buf);
+    return ok();
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+}
+
 async function handleEdit(req: Request): Promise<Response> {
   const body = (await req.json()) as {
     path?: unknown;
@@ -346,6 +366,8 @@ Bun.serve({
           return handleReadBinary(req);
         case '/write':
           return handleWrite(req);
+        case '/write_binary':
+          return handleWriteBinary(req);
         case '/edit':
           return handleEdit(req);
         case '/grep':
