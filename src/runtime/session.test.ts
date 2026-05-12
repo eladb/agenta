@@ -54,6 +54,42 @@ describe('session state machine', () => {
     expect(edits.some((e) => e.text === 'hi')).toBe(true);
   });
 
+  test('runtime.json is written while running and cleared on idle', async () => {
+    const { readRuntime } = await import('./runtime-store');
+    const { web } = makeWebStub();
+    let observedDuringRun: string | undefined;
+    const callModel: CallModel = async () => {
+      observedDuringRun = (await readRuntime('k1'))?.status;
+      return { role: 'assistant', content: 'hi' };
+    };
+    await startOrQueue(web, callModel, 'sys', input);
+    expect(observedDuringRun).toBe('running');
+    expect(await readRuntime('k1')).toBeUndefined();
+  });
+
+  test('runtime.json flips to stopping when /stop fires mid-turn', async () => {
+    const { readRuntime } = await import('./runtime-store');
+    const { web, edits } = makeWebStub();
+    const callModel: CallModel = async (_msgs, opts) => {
+      await new Promise<void>((_resolve, reject) => {
+        opts?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        );
+      });
+      return { role: 'assistant', content: 'unreached' };
+    };
+    const run = startOrQueue(web, callModel, 'sys', input);
+    await new Promise((r) => setTimeout(r, 10));
+    await signalStop(web, 'C', '1.0', 'k1');
+    // After signalStop, runtime.json should say "stopping" before the turn
+    // actually exits.
+    expect((await readRuntime('k1'))?.status).toBe('stopping');
+    await run;
+    // Once the loop exits, runtime.json is cleared.
+    expect(await readRuntime('k1')).toBeUndefined();
+    expect(edits.some((e) => e.text === 'stopped')).toBe(true);
+  });
+
   test('queues a concurrent mention and runs one extra turn after current', async () => {
     const { web } = makeWebStub();
     let calls = 0;

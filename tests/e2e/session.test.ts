@@ -83,7 +83,7 @@ test('/stop cancels an in-flight turn and edits checklist to "stopped"', async (
   createdThreads.push(threadTs);
 
   // Wait until the model is actually being called.
-  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === '• calling model');
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === '• thinking…');
 
   // Fire /stop while the turn is hanging on the gate.
   await mention(tester, agent.botUserId, channel, threadTs, '/stop');

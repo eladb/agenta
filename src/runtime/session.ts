@@ -2,7 +2,12 @@ import type { WebClient } from '@slack/web-api';
 import { log } from '../log';
 import type { CallModel } from '../model/gateway';
 import { postInThread } from '../slack/post';
+import { clearRuntime, writeRuntime } from './runtime-store';
 import { runTurn, type TurnInput } from './turn';
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
 
 type Status = 'idle' | 'running' | 'stopping';
 
@@ -49,6 +54,7 @@ export async function startOrQueue(
   }
   s.status = 'running';
   s.pending = false;
+  await writeRuntime(input.threadKey, { status: 'running', updated_at: nowIso() });
   try {
     while (true) {
       s.abort = new AbortController();
@@ -58,11 +64,13 @@ export async function startOrQueue(
       // If /stop fired during the turn we are now in 'stopping'; flip back
       // to 'running' since the user has since sent a new mention.
       s.status = 'running';
+      await writeRuntime(input.threadKey, { status: 'running', updated_at: nowIso() });
     }
   } finally {
     s.status = 'idle';
     s.abort = undefined;
     s.pending = false;
+    await clearRuntime(input.threadKey);
   }
 }
 
@@ -76,6 +84,10 @@ export async function signalStop(
   if (s.status === 'running' && s.abort) {
     s.status = 'stopping';
     s.pending = false;
+    // Persist BEFORE firing abort: otherwise the abort cascade lets the
+    // turn's `finally { clearRuntime }` race ahead of our writeRuntime and
+    // leave a stale `stopping` file behind.
+    await writeRuntime(tk, { status: 'stopping', updated_at: nowIso() });
     s.abort.abort();
     log.info('session', `[${tk}] stop signaled`);
     return;

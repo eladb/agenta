@@ -1,6 +1,7 @@
 import { log } from './log';
 import { createCallModel } from './model/gateway';
 import { makeEventHandler } from './runtime/handler';
+import { recoverInterruptedSessions } from './runtime/recovery';
 import { killAllSandboxContainers } from './sandbox/docker';
 import { connect } from './slack/connect';
 import { listen } from './slack/events';
@@ -41,4 +42,11 @@ await killAllSandboxContainers().catch((err) => {
 
 const { socket, web, botUserId } = await connect(appToken, botToken);
 log.info('boot', `connected as bot user ${botUserId}`);
+
+// Announce any in-flight sessions that died with the previous process before
+// we start handling new events. listRuntimes() scans data/{thread_key}/runtime.json.
+await recoverInterruptedSessions(web).catch((err) => {
+  log.warn('boot', `recovery failed: ${(err as Error).message}`);
+});
+
 listen(socket, botUserId, makeEventHandler(web, botToken, botUserId, callModel, systemPrompt));

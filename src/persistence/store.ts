@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { appendFile, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-function dataRoot(): string {
+export function dataRoot(): string {
   return process.env.AGENTA_DATA_DIR ?? join(process.cwd(), 'data');
 }
 
