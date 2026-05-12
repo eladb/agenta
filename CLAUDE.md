@@ -35,14 +35,35 @@ Phases completed (in order):
 5. **Tool calling** — multi-iteration loop. Built-in tools registered in `src/model/tools/` (one file per tool). Tool events (`tool_call`, `tool_result`) recorded to JSONL; `context.ts` reattaches them on reconstruction. Includes orphan-tool_call guard (synthetic stub if no result was persisted).
 6. **Sandbox** — Docker container per thread (image `agenta-sandbox:latest`, built from `sandbox/Dockerfile`). All bot↔sandbox traffic goes through an in-container **Bun HTTP server** (`sandbox/server/server.ts`, compiled to a static binary) over a random `127.0.0.1:<port>` with a per-container Bearer token. Endpoints: `/exec` (SSE-streamed bash), `/read`, `/write`, `/edit`, `/grep`, `/glob`, `/ls`, `/health`. Hardening: runs as **uid 1000 `sandbox`**, `--cap-drop ALL` + `--cap-add NET_ADMIN/SETUID/SETGID/SETPCAP` (entrypoint uses them then `setpriv`s them away), `--security-opt no-new-privileges`, `--pids-limit 256`, `--memory 1g`, `--cpus 1.0`, egress blocked via in-container iptables OUTPUT rules. Per-thread anonymous volume at `/workspace`.
 7. **Live-streamed bash** — `consumeExecStream` fires `onChunk` per SSE event; `runTurn` shows a debounced (800ms) live preview line under the bash bullet, replaces it with a one-line `→ exit: N` summary on completion.
-8. **Interactive Slack asks** — `ask_user` tool posts block-kit messages (buttons / static_select / multi_static_select / text-via-thread-reply). The tool's `invoke()` registers a deferred in `src/runtime/asks.ts` and awaits. `src/slack/interactive.ts` dispatches `block_actions` payloads to the registry. 10-min timeout, `/stop`-cancellable, text reply in the same thread auto-resolves the ask.
+8. **Interactive Slack asks** — `ask_user` tool posts block-kit messages (buttons / static_select / multi_static_select / text-via-thread-reply). The tool's `invoke()` registers a deferred in `src/runtime/asks.ts` and awaits. `src/slack/interactive.ts` dispatches `block_actions` payloads to the registry. 10-min timeout, `/stop`-cancellable, text reply in the same thread auto-resolves the ask. The ask blocks render *on* the checklist message (chat.update with blocks) rather than as a separate post — keeps the thread chronologically coherent. Settled answer is appended inline to the ask bullet (`• ask_user (buttons): pick db → postgres`).
+9. **`share_file` tool** — uploads a file from the sandbox to the Slack thread via `files.uploadV2`. Bytes are read from the sandbox over `/read_binary` (new server endpoint; base64 over HTTP), MIME detected from bytes, persisted locally under `data/{thread_key}/attachments/{file_id}-{name}`, and recorded as an `assistant message` event with `files` payload mirroring the user-attachment shape. Tool_result intentionally omits the permalink and the upload uses no `initial_comment` — the model's final reply is the only place prose lives, which removes a class of duplicate-message UX bugs. System prompt has a "File handling rules (strict)" block enforcing this for smaller models.
+10. **Sandbox provider abstraction + Fly Machines provider** — `src/sandbox/provider.ts` defines `SandboxProvider { ensure, getEndpoint, remove, killAll }`. `src/sandbox/docker.ts` and `src/sandbox/fly.ts` implement it. `src/sandbox/index.ts` selects via `SANDBOX_PROVIDER=docker|fly` and exports the unified HTTP client (runBash/readFile/…). The Fly provider creates a per-thread Firecracker VM via the Machines REST API, routes via `fly-force-instance-id` on the shared `<app>.fly.dev` URL, with a per-machine `SANDBOX_TOKEN` in env. `scripts/deploy-sandbox-fly.ts` provisions the app, allocates shared v4 + dedicated v6, and `fly deploy --build-only --push --image-label latest` so the registry tag is stable.
 
 ### Not yet implemented (deferred from spec)
 
 - **Edits/deletes projected into model context.** Persisted in JSONL but not flattened into the messages array. Spec §11.
-- **Context window trimming** (spec §11: 50% sliding window, atomic tool-block trim). We send the full history.
-- **Host-side egress block.** The in-container iptables block is defense-in-depth, but the container retains NET_ADMIN at runtime so a deliberately malicious shell could flush it. Real fix is host-side `DOCKER-USER` rules tied to container IPs.
+- **Context window trimming** (spec §11: 50% sliding window, atomic tool-block trim). We send the full history. Starts mattering once tool loops produce long histories.
 - **Persisted dedupe + pending-mention queue** across restarts. In-memory only; Slack redelivery on bot restart can re-process events.
+
+### Known issues / gotchas worth knowing about
+
+- **Egress block ineffective on Fly.** The entrypoint's iptables rules allow `172.16.0.0/12` because the local-Docker setup needs to reach the bridge gateway. On Fly the machine's outbound default route is *also* a 172.x address (Fly's overlay gateway), which then forwards to the public internet. So the same rule that's correct for Docker is wide-open on Fly. Verified live (`curl https://example.com` from inside a Fly sandbox succeeds). Fix idea: detect the directly-connected subnet at entrypoint time and allow only that CIDR, not the whole RFC1918 block. Local-Docker egress block is still working correctly.
+- **Fly trial machines auto-stop at 5 min** ("Trial machine stopping. To run for longer than 5m0s, add a credit card." in `flyctl logs`). Long-lived turns / threads will get killed mid-flight. Add a payment method on the Fly account to remove the cap.
+- **Fly host-side DNS hostility.** On networks that block outbound port 53 to public resolvers AND the local resolver mishandles `<app>.fly.dev` (Elad's home network does both: router returns AAAA-only, ISP blocks port 53 to 8.8.8.8/1.1.1.1), Bun's `fetch` can't resolve the Fly host. Workarounds we've used:
+  - `/etc/hosts` line: `66.241.125.131 agenta-sandbox.fly.dev` (added on Elad's Mac during this session).
+  - Encrypted DNS profile on macOS (cleaner; uses DoH over 443).
+  - **Better long-term fix:** implement DoH-based resolution inside `flyProvider` so the bot is independent of the host's resolver. Sketch in `runBash`/`postJson`: resolve via `https://cloudflare-dns.com/dns-query`, open the TLS socket to the resolved IP with SNI = original hostname. Would need Node's `https.request` with custom `lookup` since Bun's `fetch` has no DNS hook.
+- **Host port not cached on Docker.** Docker Desktop auto-restarts containers when their main process exits and reassigns the host port. `dockerProvider.getEndpoint` re-reads via `docker port` on every call (~50ms). Fly doesn't have this quirk.
+- **share_file files aren't reprojected to the model on later turns.** OpenAI/Anthropic compat doesn't allow image content on `assistant` role. The bytes are archived in `data/{thread_key}/attachments/` and the metadata is in the JSONL `assistant message.files` payload, but `buildMessages` doesn't emit them as multipart `user` content. If we want the model to "see" what it sent later, that's a synthetic-user-message hack.
+
+### Session continuity checklist for a fresh Claude session
+
+When you start a new session on this repo:
+
+1. Read this file in full (you're doing that now).
+2. Skim recent commits: `git log -20 --oneline` to see what's actually merged vs. what this doc claims.
+3. Glance at open issues above — the Fly egress and DNS items are the most likely things the user will want to revisit.
+4. If the user asks "what's next?", the open phases are: edits/deletes into context (smallest), context-window trimming, persisted dedupe + queue, and Fly-side egress block. There may also be UX iteration on existing tools.
 
 ## Repo layout
 
@@ -89,7 +110,8 @@ src/
       grep.ts              ripgrep + line numbers
       glob.ts              ripgrep --files
       list-dir.ts          structured ls
-      ask-user.ts          interactive Slack ask (buttons/select/multi_select/text) — uses asks.ts registry
+      ask-user.ts          interactive Slack ask (buttons/select/multi_select/text) — uses asks.ts registry, renders on the checklist message itself
+      share-file.ts        uploads a sandbox file to the Slack thread; records assistant message event with files payload
   sandbox/
     provider.ts            SandboxProvider interface (ensure / getEndpoint / remove / killAll) + SandboxEndpoint {baseUrl, headers}
     docker.ts              dockerProvider — local Docker container. ensureImage / ensureNetwork / dockerSpawn + lifecycle.
@@ -217,7 +239,11 @@ bun run setup    # interactive Slack app creation
 
 ## Open questions for the next session
 
-- **Edits/deletes into model context** — events are persisted in JSONL but `buildMessages` ignores them. Spec §11.
-- **Context-window trimming** — spec §11 sliding window with atomic tool-block trim. Will need a tokenizer.
-- **Host-side egress block** — replace in-container iptables with `DOCKER-USER` rules tied to container IPs so a malicious shell can't undo them. Needs root on the host + per-container teardown.
+Prioritized roughly by impact / effort:
+
+- **Fly egress block** — sandbox can reach public internet on Fly (RFC1918 allow is too wide; Fly's overlay gateway is in that range). Probably the most user-visible "issue" right now. Fix in `sandbox/entrypoint.sh`: derive the directly-connected subnet from `ip route` and only allow that CIDR instead of all of 172.16/12. Keep Docker behavior intact.
+- **DoH-based DNS in `flyProvider`** — so the bot doesn't depend on the host network resolving `<app>.fly.dev` correctly. See "Known issues" above for sketch.
+- **Edits/deletes into model context** — events are persisted in JSONL but `buildMessages` ignores them. Spec §11. Smallest of the remaining spec items.
+- **Context-window trimming** — spec §11 sliding window with atomic tool-block trim. Will need a tokenizer. Starts mattering when tool loops produce long histories.
+- **Host-side egress block (Docker case)** — replace in-container iptables with `DOCKER-USER` rules tied to container IPs so a malicious shell can't undo them. Needs root on the host + per-container teardown.
 - **Persisted dedupe + pending-mention queue** across restarts. In-memory only today; Slack redelivery on bot restart can re-process events.
