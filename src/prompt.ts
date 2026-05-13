@@ -5,8 +5,9 @@ import { parse as parseYaml } from 'yaml';
 import { log } from './log';
 
 // Skill entry as projected into the system prompt. `path` is relative to the
-// botspace root (i.e. `/workspace/...` inside the sandbox). Extra frontmatter
-// fields beyond `name`/`description` flow through verbatim (open extension).
+// botspace root (i.e. relative to the workspace, /home/sandbox/, inside the
+// sandbox). Extra frontmatter fields beyond `name`/`description` flow through
+// verbatim (open extension).
 export type SkillEntry = {
   path: string;
   name: string;

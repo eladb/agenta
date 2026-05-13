@@ -15,7 +15,7 @@ export const writeFileTool: Tool = {
         properties: {
           path: {
             type: 'string',
-            description: 'Path to write (absolute or relative to /workspace).',
+            description: 'Path to write (absolute or relative to the workspace, ~).',
           },
           content: { type: 'string', description: 'Text content to write.' },
         },

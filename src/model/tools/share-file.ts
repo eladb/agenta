@@ -20,14 +20,14 @@ export const shareFile: Tool = {
     function: {
       name: 'share_file',
       description:
-        'Upload a file from the sandbox INTO the Slack thread so the user can actually see it. CALL THIS whenever the user asks you to "send me", "show me", or "share" an image, chart, PDF, archive, or any other artifact — writing a file to /workspace alone does NOT deliver it to the user; only share_file does. Do not invent URLs like sandbox:// or file:// — the user can\'t open those. The file appears bare in the thread; whatever surrounding prose you want the user to see (caption, explanation, summary) goes in your final assistant reply, NOT here. Max 25 MB.',
+        'Upload a file from the sandbox INTO the Slack thread so the user can actually see it. CALL THIS whenever the user asks you to "send me", "show me", or "share" an image, chart, PDF, archive, or any other artifact — writing a file to the sandbox alone does NOT deliver it to the user; only share_file does. Do not invent URLs like sandbox:// or file:// — the user can\'t open those. The file appears bare in the thread; whatever surrounding prose you want the user to see (caption, explanation, summary) goes in your final assistant reply, NOT here. Max 25 MB.',
       parameters: {
         type: 'object',
         properties: {
           path: {
             type: 'string',
             description:
-              'Path to the file inside the sandbox (relative to /workspace or absolute).',
+              'Path to the file inside the sandbox (relative to the workspace ~, or absolute).',
           },
         },
         required: ['path'],

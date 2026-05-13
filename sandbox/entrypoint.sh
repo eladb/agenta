@@ -2,7 +2,7 @@
 # Sets up the sandbox container, then drops to an unprivileged user before
 # exec'ing the server. Runs as root inside the container so it can:
 #   1. Install iptables OUTPUT rules (egress block; requires NET_ADMIN cap).
-#   2. chown the (possibly empty) /workspace volume mount to the sandbox user.
+#   2. Seed /home/sandbox from /opt/botspace/ on first boot (copy-if-missing).
 #   3. Drop privs and exec the server.
 #
 # After step 3, the server — and any bash command it spawns via /exec —
@@ -29,9 +29,21 @@ iptables -A OUTPUT -d 192.168.0.0/16 -j ACCEPT
 iptables -A OUTPUT -d 169.254.0.0/16 -j ACCEPT
 iptables -P OUTPUT DROP
 
-# /workspace is owned by sandbox:sandbox in the image; Docker preserves that
-# when populating a fresh anonymous volume. We don't chown here because
-# --cap-drop ALL strips CAP_CHOWN even from root inside the container.
+# Seed the per-thread persistent volume on first boot. /home/sandbox is the
+# volume mount; if README.md doesn't exist we treat it as empty and copy in
+# the botspace seed. Idempotent: on subsequent boots README.md is already
+# there and we skip the copy, preserving any state the thread has built up.
+#
+# Important: --cap-drop ALL strips CAP_DAC_OVERRIDE, so root can't actually
+# read/write inside /home/sandbox (owned 0750 sandbox:sandbox). Run the cp
+# as the sandbox user via setpriv (no need to grant the read-only seed dir
+# extra permissions). The /opt/botspace tree was COPY'd --chown=sandbox at
+# image-build time, and `cp -a` preserves ownership/mode.
+if ! setpriv --reuid=sandbox --regid=sandbox --init-groups \
+  test -e /home/sandbox/README.md; then
+  setpriv --reuid=sandbox --regid=sandbox --init-groups \
+    cp -a /opt/botspace/. /home/sandbox/
+fi
 
 export HOME=/home/sandbox
 export USER=sandbox

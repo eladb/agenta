@@ -31,7 +31,9 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 const PORT = Number(process.env.SANDBOX_PORT ?? 9000);
 const TOKEN = process.env.SANDBOX_TOKEN;
-const WORKSPACE = '/workspace';
+// The sandbox user's home dir doubles as the workspace; it's also the mount
+// point for the per-thread persistent volume managed by the bot.
+const WORKSPACE = '/home/sandbox';
 // Hard cap on /exec runtime. Long-hanging commands (e.g. `curl` to a blocked
 // host waiting on TCP timeout) would otherwise block the model's turn
 // indefinitely. The model sees a clean error in stderr and can adjust.

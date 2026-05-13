@@ -22,9 +22,12 @@ import {
   waitForReply,
 } from './helpers';
 
-// When the persisted container is gone before agent B starts, the next
-// mention should re-provision a fresh container without erroring out the
-// turn. The marker file written in agent A's container should NOT be there.
+// When the persisted container is gone before agent B starts but the
+// per-thread named volume survives, the next mention should provision a
+// fresh container ATTACHED to the same volume. The marker file written in
+// agent A's container should still be there — that's the value-add of
+// per-thread persistent volumes over the original sandbox-persistence work
+// (which only handled the bot-restart case, not container replacement).
 
 function dockerAvailable(): boolean {
   const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
@@ -56,7 +59,12 @@ function scriptReply(message: AssistantMessage): void {
 }
 
 function readSessionRaw(tk: string): {
-  sandbox?: { provider: string; container_name?: string; token?: string };
+  sandbox?: {
+    provider: string;
+    container_name?: string;
+    token?: string;
+    volume_name?: string;
+  };
 } {
   return JSON.parse(readFileSync(join(getDataDir(), tk, 'session.json'), 'utf8'));
 }
@@ -80,12 +88,12 @@ afterAll(async () => {
 });
 
 test.if(HAS_DOCKER)(
-  'dead-container re-hydration: agent B re-provisions when the persisted container is gone',
+  'dead-container + live-volume re-hydration: marker survives container replacement',
   async () => {
     script.length = 0;
     calls.length = 0;
 
-    // Turn 1: write a marker.
+    // Turn 1: write a marker into the (per-thread persistent) workspace.
     scriptReply({
       role: 'assistant',
       content: null,
@@ -96,7 +104,7 @@ test.if(HAS_DOCKER)(
           function: {
             name: 'bash',
             arguments: JSON.stringify({
-              command: 'echo first-boot > /workspace/marker',
+              command: 'echo first-boot > ~/marker',
             }),
           },
         },
@@ -121,10 +129,14 @@ test.if(HAS_DOCKER)(
 
     const session1 = readSessionRaw(tk);
     expect(session1.sandbox?.container_name).toBe(containerName(tk));
+    expect(session1.sandbox?.volume_name).toBeDefined();
     const token1 = session1.sandbox?.token;
+    const volume1 = session1.sandbox?.volume_name;
     expect(typeof token1).toBe('string');
 
     // Simulate restart + force-remove the container behind the bot's back.
+    // The named volume is NOT removed (docker rm -fv removes anonymous
+    // volumes only; named volumes survive).
     await agent.socket.disconnect();
     const { _resetImageReadyCache } = await import('../../src/sandbox/docker');
     _resetImageReadyCache();
@@ -134,11 +146,14 @@ test.if(HAS_DOCKER)(
     const rm = spawnSync('docker', ['rm', '-fv', containerName(tk)]);
     expect(rm.status).toBe(0);
 
+    // Confirm the volume is still there.
+    const volInspect = spawnSync('docker', ['volume', 'inspect', volume1 ?? '__missing__']);
+    expect(volInspect.status).toBe(0);
+
     agent = await startAgent(scriptedCallModel);
 
-    // Turn 2: try to read the marker. Should re-provision a fresh container
-    // and `cat /workspace/marker` should fail (marker is in the dead
-    // container, not the new one).
+    // Turn 2: read the marker. The new container is attached to the
+    // existing volume, so `cat ~/marker` should still return `first-boot`.
     scriptReply({
       role: 'assistant',
       content: null,
@@ -148,15 +163,15 @@ test.if(HAS_DOCKER)(
           type: 'function',
           function: {
             name: 'bash',
-            arguments: JSON.stringify({ command: 'cat /workspace/marker 2>&1 || echo MISSING' }),
+            arguments: JSON.stringify({ command: 'cat ~/marker' }),
           },
         },
       ],
     });
-    scriptReply({ role: 'assistant', content: 'attempted read' });
+    scriptReply({ role: 'assistant', content: 'read complete' });
 
     await mention(tester, agent.botUserId, channel, threadTs, 'check marker');
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'attempted read', {
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'read complete', {
       timeoutMs: 60_000,
     });
     await waitFor(() => calls.length === 4, { what: 'four model calls', timeoutMs: 30_000 });
@@ -165,13 +180,15 @@ test.if(HAS_DOCKER)(
     if (!fourth) throw new Error('expected fourth call');
     const readResult = fourth.find((m) => m.role === 'tool' && m.tool_call_id === 'call_read');
     if (readResult?.role !== 'tool') throw new Error('expected read tool msg');
-    expect(readResult.content).toContain('MISSING');
-    expect(readResult.content).not.toContain('first-boot');
+    expect(readResult.content).toContain('first-boot');
 
-    // session.json should now reference a NEW token (fresh container).
+    // session.json should still reference the SAME volume; the token is
+    // preserved across the reattach (provider keeps the persisted token so
+    // anyone holding the bearer header can keep working).
     const session2 = readSessionRaw(tk);
     expect(session2.sandbox?.container_name).toBe(containerName(tk));
-    expect(session2.sandbox?.token).not.toBe(token1);
+    expect(session2.sandbox?.volume_name).toBe(volume1);
+    expect(session2.sandbox?.token).toBe(token1);
   },
   240_000,
 );

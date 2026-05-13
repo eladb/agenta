@@ -216,7 +216,7 @@ test('/delete removes session.json (and the rest of the thread dir)', async () =
 });
 
 test.if(HAS_DOCKER)(
-  'model can read_file a skill SKILL.md inside the sandbox (botspace copied into /workspace)',
+  'model can read_file a skill SKILL.md inside the sandbox (botspace seeded into ~)',
   async () => {
     script.length = 0;
     calls.length = 0;

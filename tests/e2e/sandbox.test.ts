@@ -105,7 +105,7 @@ test.if(HAS_DOCKER)(
     if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
     expect(toolMsg.content).toContain('exit: 0');
     expect(toolMsg.content).toContain('hello-from-sandbox');
-    expect(toolMsg.content).toContain('/workspace');
+    expect(toolMsg.content).toContain('/home/sandbox');
   },
   60_000,
 );

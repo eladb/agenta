@@ -4,9 +4,19 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readSession, writeSession } from '../runtime/session-store';
-import { _resetImageReadyCache, dockerProvider, ensureImage } from './docker';
+import { _resetImageReadyCache, dockerProvider, ensureImage, volumeName } from './docker';
 import { _resetFlyState, flyProvider } from './fly';
 import { consumeExecStream, containerName, writeBinary } from './index';
+
+function volumeExists(name: string): boolean {
+  return spawnSync('docker', ['volume', 'inspect', name]).status === 0;
+}
+
+function containerRunning(name: string): boolean {
+  const r = spawnSync('docker', ['inspect', '-f', '{{.State.Running}}', name]);
+  if (r.status !== 0) return false;
+  return r.stdout.toString().trim() === 'true';
+}
 
 function dockerAvailable(): boolean {
   const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
@@ -155,6 +165,7 @@ describe('writeBinary HTTP shape', () => {
 describe('dockerProvider persistence (live Docker)', () => {
   let dataDir: string;
   const created: string[] = [];
+  const createdVolumes: string[] = [];
 
   beforeEach(() => {
     dataDir = mkdtempSync(join(tmpdir(), 'agenta-docker-persist-'));
@@ -164,11 +175,16 @@ describe('dockerProvider persistence (live Docker)', () => {
   });
 
   afterEach(async () => {
-    // Best-effort: remove any containers we spawned.
+    // Best-effort: remove any containers we spawned, then any volumes.
+    // Volumes second because `volume rm` refuses while a container holds it.
     for (const id of created) {
       spawnSync('docker', ['rm', '-fv', id], { stdio: 'ignore' });
     }
+    for (const id of createdVolumes) {
+      spawnSync('docker', ['volume', 'rm', id], { stdio: 'ignore' });
+    }
     created.length = 0;
+    createdVolumes.length = 0;
     rmSync(dataDir, { recursive: true, force: true });
     delete process.env.AGENTA_DATA_DIR;
     _resetImageReadyCache();
@@ -180,6 +196,7 @@ describe('dockerProvider persistence (live Docker)', () => {
       await ensureImage();
       const TK = `unit-persist-${Date.now()}`;
       created.push(containerName(TK));
+      createdVolumes.push(volumeName(TK));
 
       await dockerProvider.ensure(TK);
       const session = await readSession(TK);
@@ -187,6 +204,127 @@ describe('dockerProvider persistence (live Docker)', () => {
       if (session?.sandbox?.provider !== 'docker') throw new Error('unreachable');
       expect(session.sandbox.container_name).toBe(containerName(TK));
       expect(session.sandbox.token.length).toBeGreaterThan(16);
+      expect(session.sandbox.volume_name).toBe(volumeName(TK));
+    },
+    180_000,
+  );
+
+  test.if(HAS_DOCKER)(
+    'ensure creates a named volume on first run; second ensure reuses the same volume',
+    async () => {
+      await ensureImage();
+      const TK = `unit-vol-create-${Date.now()}`;
+      created.push(containerName(TK));
+      createdVolumes.push(volumeName(TK));
+
+      await dockerProvider.ensure(TK);
+      expect(volumeExists(volumeName(TK))).toBe(true);
+
+      // Simulate a bot restart: clear in-memory state. The volume + the
+      // running container are still on disk. A second ensure should adopt
+      // the existing container; the volume name should be unchanged.
+      _resetImageReadyCache();
+      await dockerProvider.ensure(TK);
+      const after = await readSession(TK);
+      if (after?.sandbox?.provider !== 'docker') throw new Error('unreachable');
+      expect(after.sandbox.volume_name).toBe(volumeName(TK));
+    },
+    180_000,
+  );
+
+  test.if(HAS_DOCKER)(
+    'remove deletes both the container and the named volume',
+    async () => {
+      await ensureImage();
+      const TK = `unit-rm-vol-${Date.now()}`;
+      created.push(containerName(TK));
+      createdVolumes.push(volumeName(TK));
+
+      await dockerProvider.ensure(TK);
+      expect(containerRunning(containerName(TK))).toBe(true);
+      expect(volumeExists(volumeName(TK))).toBe(true);
+
+      await dockerProvider.remove(TK);
+      expect(containerRunning(containerName(TK))).toBe(false);
+      expect(volumeExists(volumeName(TK))).toBe(false);
+    },
+    180_000,
+  );
+
+  test.if(HAS_DOCKER)(
+    'dead container + live volume re-hydration creates a new container attached to the same volume',
+    async () => {
+      await ensureImage();
+      const TK = `unit-revive-${Date.now()}`;
+      created.push(containerName(TK));
+      createdVolumes.push(volumeName(TK));
+
+      // First ensure: writes a marker file into the volume.
+      await dockerProvider.ensure(TK);
+      const before = await readSession(TK);
+      if (before?.sandbox?.provider !== 'docker') throw new Error('unreachable');
+      const token1 = before.sandbox.token;
+      const vol1 = before.sandbox.volume_name;
+      expect(vol1).toBe(volumeName(TK));
+
+      // Run as the sandbox user — root inside the container has its
+      // CAP_DAC_OVERRIDE stripped (--cap-drop ALL) so it can't write into
+      // /home/sandbox (mode 0750, owned sandbox:sandbox).
+      const write = spawnSync('docker', [
+        'exec',
+        '-u',
+        'sandbox',
+        containerName(TK),
+        'bash',
+        '-c',
+        'echo persisted > /home/sandbox/marker',
+      ]);
+      expect(write.status).toBe(0);
+
+      // Force-remove the container. The named volume survives.
+      const rm = spawnSync('docker', ['rm', '-fv', containerName(TK)]);
+      expect(rm.status).toBe(0);
+      expect(volumeExists(volumeName(TK))).toBe(true);
+
+      // Wipe in-memory state to simulate a bot restart. Second ensure
+      // should see the dead container + live volume and spawn a fresh
+      // container attached to the same volume.
+      _resetImageReadyCache();
+      await dockerProvider.ensure(TK);
+      expect(containerRunning(containerName(TK))).toBe(true);
+
+      // Marker survives.
+      const cat = spawnSync('docker', [
+        'exec',
+        '-u',
+        'sandbox',
+        containerName(TK),
+        'cat',
+        '/home/sandbox/marker',
+      ]);
+      expect(cat.stdout.toString().trim()).toBe('persisted');
+
+      // Volume + token preserved across the reattach.
+      const after = await readSession(TK);
+      if (after?.sandbox?.provider !== 'docker') throw new Error('unreachable');
+      expect(after.sandbox.volume_name).toBe(vol1);
+      expect(after.sandbox.token).toBe(token1);
+    },
+    240_000,
+  );
+
+  test.if(HAS_DOCKER)(
+    'listAll reports both the container and the named volume',
+    async () => {
+      await ensureImage();
+      const TK = `unit-listall-vol-${Date.now()}`;
+      created.push(containerName(TK));
+      createdVolumes.push(volumeName(TK));
+
+      await dockerProvider.ensure(TK);
+      const ids = (await dockerProvider.listAll()).map((e) => e.id);
+      expect(ids).toContain(containerName(TK));
+      expect(ids).toContain(volumeName(TK));
     },
     180_000,
   );
@@ -197,6 +335,7 @@ describe('dockerProvider persistence (live Docker)', () => {
       await ensureImage();
       const TK = `unit-rehydrate-${Date.now()}`;
       created.push(containerName(TK));
+      createdVolumes.push(volumeName(TK));
 
       await dockerProvider.ensure(TK);
       const first = await readSession(TK);
@@ -228,6 +367,7 @@ describe('dockerProvider persistence (live Docker)', () => {
       await ensureImage();
       const TK = `unit-remove-${Date.now()}`;
       created.push(containerName(TK));
+      createdVolumes.push(volumeName(TK));
 
       // Pre-write a status + system_prompt so we can verify they survive.
       await writeSession(TK, {
@@ -255,6 +395,7 @@ describe('dockerProvider persistence (live Docker)', () => {
       await ensureImage();
       const TK = `unit-listall-${Date.now()}`;
       created.push(containerName(TK));
+      createdVolumes.push(volumeName(TK));
 
       await dockerProvider.ensure(TK);
       const list = await dockerProvider.listAll();
@@ -263,6 +404,7 @@ describe('dockerProvider persistence (live Docker)', () => {
       await dockerProvider.remove(TK);
       const listAfter = await dockerProvider.listAll();
       expect(listAfter.map((e) => e.id)).not.toContain(containerName(TK));
+      expect(listAfter.map((e) => e.id)).not.toContain(volumeName(TK));
     },
     180_000,
   );
@@ -274,6 +416,7 @@ describe('dockerProvider persistence (live Docker)', () => {
       const TK1 = `unit-killall-a-${Date.now()}`;
       const TK2 = `unit-killall-b-${Date.now()}`;
       created.push(containerName(TK1), containerName(TK2));
+      createdVolumes.push(volumeName(TK1), volumeName(TK2));
 
       // Pre-write a system_prompt on TK2 so we can verify killAll only
       // clears the sandbox field, not the rest.
@@ -285,6 +428,8 @@ describe('dockerProvider persistence (live Docker)', () => {
 
       await dockerProvider.ensure(TK1);
       await dockerProvider.ensure(TK2);
+      expect(volumeExists(volumeName(TK1))).toBe(true);
+      expect(volumeExists(volumeName(TK2))).toBe(true);
 
       // Image cache will be touched between ensures; that's fine.
       await dockerProvider.killAll();
@@ -294,6 +439,10 @@ describe('dockerProvider persistence (live Docker)', () => {
       expect(a?.sandbox).toBeUndefined();
       expect(b?.sandbox).toBeUndefined();
       expect(b?.system_prompt).toBe('preserve-me');
+      // killAll sweeps named volumes too — the per-thread workspace is
+      // intended to be wiped along with the container.
+      expect(volumeExists(volumeName(TK1))).toBe(false);
+      expect(volumeExists(volumeName(TK2))).toBe(false);
     },
     240_000,
   );

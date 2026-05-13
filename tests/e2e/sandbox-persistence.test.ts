@@ -65,7 +65,12 @@ function dockerInspectRunning(name: string): boolean {
 
 function readSessionRaw(tk: string): {
   status?: string;
-  sandbox?: { provider: string; container_name?: string; token?: string };
+  sandbox?: {
+    provider: string;
+    container_name?: string;
+    token?: string;
+    volume_name?: string;
+  };
 } {
   return JSON.parse(readFileSync(join(getDataDir(), tk, 'session.json'), 'utf8'));
 }
@@ -94,7 +99,7 @@ test.if(HAS_DOCKER)(
     script.length = 0;
     calls.length = 0;
 
-    // Turn 1 (agent A): write a marker file in /workspace.
+    // Turn 1 (agent A): write a marker file in the workspace.
     scriptReply({
       role: 'assistant',
       content: null,
@@ -105,7 +110,7 @@ test.if(HAS_DOCKER)(
           function: {
             name: 'bash',
             arguments: JSON.stringify({
-              command: 'echo first-boot > /workspace/marker && ls -la /workspace/marker',
+              command: 'echo first-boot > ~/marker && ls -la ~/marker',
             }),
           },
         },
@@ -153,7 +158,9 @@ test.if(HAS_DOCKER)(
     agent = await startAgent(scriptedCallModel);
 
     // Turn 2 (agent B): read the marker. If the sandbox was re-provisioned
-    // /workspace would be empty (anonymous volume) and the read would fail.
+    // and the volume was wiped, the read would fail. Per-thread persistent
+    // volumes mean the workspace state survives both bot restarts and
+    // container replacement.
     scriptReply({
       role: 'assistant',
       content: null,
@@ -163,7 +170,7 @@ test.if(HAS_DOCKER)(
           type: 'function',
           function: {
             name: 'bash',
-            arguments: JSON.stringify({ command: 'cat /workspace/marker' }),
+            arguments: JSON.stringify({ command: 'cat ~/marker' }),
           },
         },
       ],
