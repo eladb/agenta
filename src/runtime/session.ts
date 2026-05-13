@@ -18,6 +18,9 @@ type Session = {
   // batching: after the current turn finishes we run one more turn that
   // picks up everything queued (the JSONL already has the new messages).
   pending: boolean;
+  // Frozen system prompt for this thread. Threaded through every
+  // writeRuntime call so the file always carries it forward.
+  systemPrompt?: string;
 };
 
 const sessions = new Map<string, Session>();
@@ -47,6 +50,9 @@ export async function startOrQueue(
   input: TurnInput,
 ): Promise<void> {
   const s = getSession(input.threadKey);
+  // Track the frozen prompt for this thread on the in-memory session so all
+  // subsequent runtime writes carry it forward.
+  s.systemPrompt = systemPrompt;
   if (s.status !== 'idle') {
     s.pending = true;
     log.info('session', `[${input.threadKey}] queued (status=${s.status})`);
@@ -54,7 +60,11 @@ export async function startOrQueue(
   }
   s.status = 'running';
   s.pending = false;
-  await writeRuntime(input.threadKey, { status: 'running', updated_at: nowIso() });
+  await writeRuntime(input.threadKey, {
+    status: 'running',
+    updated_at: nowIso(),
+    system_prompt: systemPrompt,
+  });
   try {
     while (true) {
       s.abort = new AbortController();
@@ -64,7 +74,11 @@ export async function startOrQueue(
       // If /stop fired during the turn we are now in 'stopping'; flip back
       // to 'running' since the user has since sent a new mention.
       s.status = 'running';
-      await writeRuntime(input.threadKey, { status: 'running', updated_at: nowIso() });
+      await writeRuntime(input.threadKey, {
+        status: 'running',
+        updated_at: nowIso(),
+        system_prompt: systemPrompt,
+      });
     }
   } finally {
     s.status = 'idle';
@@ -87,7 +101,11 @@ export async function signalStop(
     // Persist BEFORE firing abort: otherwise the abort cascade lets the
     // turn's `finally { clearRuntime }` race ahead of our writeRuntime and
     // leave a stale `stopping` file behind.
-    await writeRuntime(tk, { status: 'stopping', updated_at: nowIso() });
+    await writeRuntime(tk, {
+      status: 'stopping',
+      updated_at: nowIso(),
+      ...(s.systemPrompt !== undefined ? { system_prompt: s.systemPrompt } : {}),
+    });
     s.abort.abort();
     log.info('session', `[${tk}] stop signaled`);
     return;

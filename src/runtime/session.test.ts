@@ -54,7 +54,7 @@ describe('session state machine', () => {
     expect(edits.some((e) => e.text === 'hi')).toBe(true);
   });
 
-  test('runtime.json is written while running and cleared on idle', async () => {
+  test('runtime.json is running while in flight, flips to idle with system_prompt after', async () => {
     const { readRuntime } = await import('./runtime-store');
     const { web } = makeWebStub();
     let observedDuringRun: string | undefined;
@@ -64,7 +64,9 @@ describe('session state machine', () => {
     };
     await startOrQueue(web, callModel, 'sys', input);
     expect(observedDuringRun).toBe('running');
-    expect(await readRuntime('k1')).toBeUndefined();
+    const after = await readRuntime('k1');
+    expect(after?.status).toBe('idle');
+    expect(after?.system_prompt).toBe('sys');
   });
 
   test('runtime.json flips to stopping when /stop fires mid-turn', async () => {
@@ -82,11 +84,15 @@ describe('session state machine', () => {
     await new Promise((r) => setTimeout(r, 10));
     await signalStop(web, 'C', '1.0', 'k1');
     // After signalStop, runtime.json should say "stopping" before the turn
-    // actually exits.
-    expect((await readRuntime('k1'))?.status).toBe('stopping');
+    // actually exits. system_prompt is threaded through every write.
+    const duringStop = await readRuntime('k1');
+    expect(duringStop?.status).toBe('stopping');
+    expect(duringStop?.system_prompt).toBe('sys');
     await run;
-    // Once the loop exits, runtime.json is cleared.
-    expect(await readRuntime('k1')).toBeUndefined();
+    // Once the loop exits, runtime.json flips to idle (preserving prompt).
+    const after = await readRuntime('k1');
+    expect(after?.status).toBe('idle');
+    expect(after?.system_prompt).toBe('sys');
     expect(edits.some((e) => e.text === 'stopped')).toBe(true);
   });
 

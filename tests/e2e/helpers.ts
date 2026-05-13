@@ -39,8 +39,6 @@ export const stubCallModel: CallModel = async (messages) => {
   return { role: 'assistant', content: `${STUB_REPLY_PREFIX}(no user message)` };
 };
 
-const STUB_SYSTEM_PROMPT = 'test stub system prompt';
-
 export function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`missing required env var: ${name}`);
@@ -85,7 +83,7 @@ export async function startAgent(callModel: CallModel = stubCallModel): Promise<
   listen(
     agent.socket,
     agent.botUserId,
-    makeEventHandler(agent.web, botToken, agent.botUserId, callModel, STUB_SYSTEM_PROMPT),
+    makeEventHandler(agent.web, botToken, agent.botUserId, callModel),
   );
   return agent;
 }

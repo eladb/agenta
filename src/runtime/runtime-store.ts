@@ -4,12 +4,13 @@ import { join } from 'node:path';
 import { log } from '../log';
 import { dataRoot, ensureThreadDir, threadDir } from '../persistence/store';
 
-// Idle state is encoded as "no file present" — that way the runtime cache
-// stays self-cleaning and a missing file is unambiguous on crash. Files only
-// exist while a thread is mid-turn ('running' or 'stopping').
+// Per-thread runtime state. The file now persists even when the thread is
+// idle — it carries the frozen `system_prompt` across turns so each thread's
+// prompt is stable for its lifetime. Recovery filters on status !== 'idle'.
 export type RuntimeState = {
-  status: 'running' | 'stopping';
+  status: 'idle' | 'running' | 'stopping';
   updated_at: string;
+  system_prompt?: string;
 };
 
 const RUNTIME_FILENAME = 'runtime.json';
@@ -39,7 +40,9 @@ export async function readRuntime(threadKey: string): Promise<RuntimeState | und
   try {
     const raw = await readFile(path, 'utf8');
     const parsed = JSON.parse(raw) as RuntimeState;
-    if (parsed.status !== 'running' && parsed.status !== 'stopping') return undefined;
+    if (parsed.status !== 'idle' && parsed.status !== 'running' && parsed.status !== 'stopping') {
+      return undefined;
+    }
     return parsed;
   } catch (err) {
     log.warn('runtime', `readRuntime(${threadKey}) failed: ${(err as Error).message}`);
@@ -47,8 +50,17 @@ export async function readRuntime(threadKey: string): Promise<RuntimeState | und
   }
 }
 
+// "Clear" no longer means delete — going idle leaves the file in place with
+// status: 'idle' so the frozen system_prompt survives across turns. Read
+// existing state first so we preserve system_prompt when transitioning.
+// `/delete` removes the entire thread dir, which takes runtime.json with it.
 export async function clearRuntime(threadKey: string): Promise<void> {
-  await rm(runtimePath(threadKey), { force: true }).catch(() => {});
+  const existing = await readRuntime(threadKey);
+  await writeRuntime(threadKey, {
+    status: 'idle',
+    updated_at: new Date().toISOString(),
+    ...(existing?.system_prompt !== undefined ? { system_prompt: existing.system_prompt } : {}),
+  });
 }
 
 export async function listRuntimes(): Promise<Array<{ threadKey: string; state: RuntimeState }>> {

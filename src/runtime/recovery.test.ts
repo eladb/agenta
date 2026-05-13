@@ -18,8 +18,8 @@ afterEach(() => {
   delete process.env.AGENTA_DATA_DIR;
 });
 
-// biome-ignore lint/suspicious/noExplicitAny: stub mimics WebClient surface used by recovery
 function makeWebStub(): {
+  // biome-ignore lint/suspicious/noExplicitAny: stub mimics WebClient surface used by recovery
   web: any;
   posts: Array<{ channel: string; thread_ts?: string; text: string }>;
 } {
@@ -36,11 +36,11 @@ function makeWebStub(): {
 }
 
 describe('recoverInterruptedSessions', () => {
-  test('posts a notice for each runtime.json then clears it', async () => {
+  test('posts a notice for each non-idle runtime.json then flips it to idle', async () => {
     const tk1 = threadKey('C123', '1700000000.000100');
     const tk2 = threadKey('C456', '1700000001.000200');
-    await writeRuntime(tk1, { status: 'running', updated_at: 't' });
-    await writeRuntime(tk2, { status: 'stopping', updated_at: 't' });
+    await writeRuntime(tk1, { status: 'running', updated_at: 't', system_prompt: 'sp1' });
+    await writeRuntime(tk2, { status: 'stopping', updated_at: 't', system_prompt: 'sp2' });
 
     const { web, posts } = makeWebStub();
     await recoverInterruptedSessions(web);
@@ -52,14 +52,32 @@ describe('recoverInterruptedSessions', () => {
     expect(byChannel.C123?.text).toMatch(/running/);
     expect(byChannel.C456?.text).toMatch(/stopping/);
 
-    expect(await readRuntime(tk1)).toBeUndefined();
-    expect(await readRuntime(tk2)).toBeUndefined();
+    // After clearing the entry transitions to idle with system_prompt
+    // preserved. The next mention picks the prompt back up.
+    const after1 = await readRuntime(tk1);
+    const after2 = await readRuntime(tk2);
+    expect(after1?.status).toBe('idle');
+    expect(after1?.system_prompt).toBe('sp1');
+    expect(after2?.status).toBe('idle');
+    expect(after2?.system_prompt).toBe('sp2');
   });
 
   test('no-op when there are no interrupted sessions', async () => {
     const { web, posts } = makeWebStub();
     await recoverInterruptedSessions(web);
     expect(posts).toEqual([]);
+  });
+
+  test('idle entries do not trigger boot announcements', async () => {
+    // An idle entry from a previous turn that completed cleanly. Recovery
+    // must not re-announce on every restart.
+    const tk = threadKey('C9', '1700000099.000100');
+    await writeRuntime(tk, { status: 'idle', updated_at: 't', system_prompt: 'sp' });
+    const { web, posts } = makeWebStub();
+    await recoverInterruptedSessions(web);
+    expect(posts).toEqual([]);
+    // And the idle entry stays untouched.
+    expect((await readRuntime(tk))?.status).toBe('idle');
   });
 
   test('Slack post failure does not abort recovery of other threads', async () => {
@@ -81,18 +99,19 @@ describe('recoverInterruptedSessions', () => {
     // biome-ignore lint/suspicious/noExplicitAny: stub
     await recoverInterruptedSessions(web as any);
     expect(calls).toBe(2);
-    // Both runtime entries should be cleared regardless of post success — we
-    // don't want to keep re-announcing a dead channel on every boot.
-    expect(await readRuntime(tk1)).toBeUndefined();
-    expect(await readRuntime(tk2)).toBeUndefined();
+    // Both runtime entries should be flipped to idle regardless of post
+    // success — we don't want to keep re-announcing a dead channel on
+    // every boot.
+    expect((await readRuntime(tk1))?.status).toBe('idle');
+    expect((await readRuntime(tk2))?.status).toBe('idle');
   });
 
-  test('clears entries with undecodable threadKey without posting', async () => {
+  test('flips entries with undecodable threadKey to idle without posting', async () => {
     // Write a runtime.json under a malformed dir name.
     await writeRuntime('no-separator', { status: 'running', updated_at: 't' });
     const { web, posts } = makeWebStub();
     await recoverInterruptedSessions(web);
     expect(posts).toEqual([]);
-    expect(await readRuntime('no-separator')).toBeUndefined();
+    expect((await readRuntime('no-separator'))?.status).toBe('idle');
   });
 });
