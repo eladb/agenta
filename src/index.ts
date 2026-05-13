@@ -2,7 +2,7 @@ import { log } from './log';
 import { createCallModel } from './model/gateway';
 import { makeEventHandler } from './runtime/handler';
 import { recoverInterruptedSessions } from './runtime/recovery';
-import { killAllSandboxContainers } from './sandbox';
+import { reapOrphanSandboxes } from './sandbox';
 import { connect } from './slack/connect';
 import { listen } from './slack/events';
 import { listenInteractive } from './slack/interactive';
@@ -35,15 +35,17 @@ const callModel = createCallModel({
 // then freezes it in `data/{thread_key}/session.json`. `SYSTEM_PROMPT` env
 // var, if set, *prepends* to that composition; it no longer replaces it.
 
-// Clean slate for sandboxes on every boot — see CLAUDE.md: state-machine
-// recovery is deferred, so any prior threads' containers would be unreachable
-// (we'd have lost their tokens) anyway.
-await killAllSandboxContainers().catch((err) => {
-  log.warn('boot', `sandbox cleanup failed: ${(err as Error).message}`);
-});
-
 const { socket, web, botUserId } = await connect(appToken, botToken);
 log.info('boot', `connected as bot user ${botUserId}`);
+
+// Sandboxes survive bot restart: per-thread routing info lives in
+// session.json, the provider re-hydrates from disk on the next mention.
+// Routine cleanup is `/delete`. This boot-time reap is a safety net for
+// orphans the bot lost track of (e.g. `rm -rf data/` without `/delete`,
+// or a thread dir nuked while the bot was down).
+await reapOrphanSandboxes().catch((err) => {
+  log.warn('boot', `orphan reap failed: ${(err as Error).message}`);
+});
 
 // Announce any in-flight sessions that died with the previous process before
 // we start handling new events. listSessions() scans data/{thread_key}/session.json.

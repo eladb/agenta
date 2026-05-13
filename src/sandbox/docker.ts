@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { log } from '../log';
+import { clearSandbox, loadSandbox, saveSandbox, sweepAllSandboxes } from './persistence';
 import type { SandboxEndpoint, SandboxProvider } from './provider';
 
 export const SANDBOX_IMAGE = 'agenta-sandbox:latest';
@@ -132,6 +133,25 @@ async function readHostPort(name: string): Promise<number> {
   return port;
 }
 
+// Liveness check for a previously-persisted record. ~3s timeout via
+// AbortSignal so a hung daemon can't block a turn. Returns true iff the
+// container exists AND State.Running is true.
+async function verifyAlive(name: string): Promise<boolean> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 3_000);
+  try {
+    const inspect = await dockerSpawn(['inspect', '--format', '{{.State.Running}}', name], {
+      signal: ac.signal,
+    });
+    if (inspect.exitCode !== 0) return false;
+    return inspect.stdout.trim() === 'true';
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function ensureContainer(threadKey: string): Promise<void> {
   await Promise.all([ensureImage(), ensureNetwork()]);
   const name = containerName(threadKey);
@@ -140,6 +160,30 @@ async function ensureContainer(threadKey: string): Promise<void> {
     const inspect = await dockerSpawn(['inspect', '-f', '{{.State.Status}}', name]);
     if (inspect.exitCode === 0 && inspect.stdout.trim() === 'running') return;
     tokens.delete(threadKey);
+  }
+
+  // Re-hydration path: in-memory cache is empty, but disk may carry a record
+  // from a previous bot process. If it's live, adopt it; if dead or
+  // cross-provider, clear it and continue to provisioning.
+  const persisted = await loadSandbox(threadKey);
+  if (persisted) {
+    if (persisted.provider !== 'docker') {
+      log.warn(
+        'sandbox',
+        `[${threadKey}] persisted sandbox is ${persisted.provider}; SANDBOX_PROVIDER=docker — ignoring`,
+      );
+      await clearSandbox(threadKey);
+    } else if (persisted.container_name === name && (await verifyAlive(name))) {
+      tokens.set(threadKey, persisted.token);
+      log.info('sandbox', `re-hydrated container ${name} from session.json`);
+      return;
+    } else {
+      log.info(
+        'sandbox',
+        `[${threadKey}] persisted container ${persisted.container_name} not alive; re-provisioning`,
+      );
+      await clearSandbox(threadKey);
+    }
   }
 
   const inspectStale = await dockerSpawn(['inspect', name]);
@@ -196,12 +240,32 @@ async function ensureContainer(threadKey: string): Promise<void> {
   const hostPort = await readHostPort(name);
   await waitForHealth(hostPort);
   tokens.set(threadKey, token);
+  await saveSandbox(threadKey, { provider: 'docker', container_name: name, token });
   log.info('sandbox', `container ${name} ready on :${hostPort}`);
 }
 
 async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
-  const token = tokens.get(threadKey);
-  if (!token) throw new Error(`sandbox not initialized for ${threadKey}`);
+  let token = tokens.get(threadKey);
+  if (!token) {
+    // Lazy re-hydration: in-memory cache is empty but disk may carry a live
+    // record from a previous bot process. Adopt it without provisioning a
+    // new container; if it's dead, clear it and surface a clear error so
+    // the caller knows to `ensure` first.
+    const persisted = await loadSandbox(threadKey);
+    if (
+      persisted &&
+      persisted.provider === 'docker' &&
+      persisted.container_name === containerName(threadKey) &&
+      (await verifyAlive(persisted.container_name))
+    ) {
+      tokens.set(threadKey, persisted.token);
+      token = persisted.token;
+      log.info('sandbox', `[${threadKey}] re-hydrated endpoint from session.json`);
+    } else {
+      if (persisted) await clearSandbox(threadKey);
+      throw new Error(`sandbox not initialized for ${threadKey}`);
+    }
+  }
   const port = await readHostPort(containerName(threadKey));
   return {
     baseUrl: `http://127.0.0.1:${port}`,
@@ -212,6 +276,9 @@ async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
 async function remove(threadKey: string): Promise<void> {
   const name = containerName(threadKey);
   tokens.delete(threadKey);
+  await clearSandbox(threadKey).catch((err) => {
+    log.warn('sandbox', `remove: clearSandbox(${threadKey}) failed: ${(err as Error).message}`);
+  });
   const res = await dockerSpawn(['rm', '-fv', name]);
   if (res.exitCode !== 0 && !/No such container/i.test(res.stderr)) {
     log.warn('sandbox', `docker rm ${name}: ${res.stderr.trim()}`);
@@ -227,14 +294,49 @@ async function killAll(): Promise<void> {
     return;
   }
   const ids = list.stdout.trim().split('\n').filter(Boolean);
-  if (ids.length === 0) return;
+  if (ids.length === 0) {
+    tokens.clear();
+    await sweepAllSandboxes();
+    return;
+  }
   const rm = await dockerSpawn(['rm', '-fv', ...ids]);
   tokens.clear();
+  await sweepAllSandboxes();
   if (rm.exitCode !== 0) {
     log.warn('sandbox', `killAll: rm failed: ${rm.stderr.trim()}`);
   } else {
     log.info('sandbox', `killed ${ids.length} sandbox container(s)`);
   }
+}
+
+// Destroy by container name (the same id `listAll` returns). Best-effort.
+async function destroyById(id: string): Promise<void> {
+  const res = await dockerSpawn(['rm', '-fv', id]);
+  if (res.exitCode !== 0 && !/No such container/i.test(res.stderr)) {
+    log.warn('sandbox', `destroyById ${id}: ${res.stderr.trim()}`);
+  }
+}
+
+// Returns the container names of every running-or-stopped sandbox container
+// this host owns (filter is identical to killAll). Used by the orphan reap.
+async function listAll(): Promise<Array<{ id: string }>> {
+  const list = await dockerSpawn([
+    'ps',
+    '-a',
+    '--filter',
+    `name=^${CONTAINER_PREFIX}`,
+    '--format',
+    '{{.Names}}',
+  ]);
+  if (list.exitCode !== 0) {
+    log.warn('sandbox', `listAll: ps failed: ${list.stderr.trim()}`);
+    return [];
+  }
+  return list.stdout
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((id) => ({ id }));
 }
 
 function isReady(threadKey: string): boolean {
@@ -248,6 +350,8 @@ export const dockerProvider: SandboxProvider = {
   getEndpoint,
   remove,
   killAll,
+  listAll,
+  destroyById,
 };
 
 // For tests.

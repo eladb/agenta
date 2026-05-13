@@ -4,6 +4,18 @@ import { join } from 'node:path';
 import { log } from '../log';
 import { dataRoot, ensureThreadDir, threadDir } from '../persistence/store';
 
+// Provider-tagged routing info for a thread's sandbox. Persisted into
+// session.json so per-thread sandboxes survive a bot restart: on the next
+// mention the provider re-hydrates from this record (verifying liveness)
+// instead of provisioning a fresh container/machine. Token is the per-
+// sandbox SANDBOX_TOKEN bearer; it also lives in the container's env so it
+// survives container restart. Docker doesn't persist the host port because
+// Docker Desktop reassigns it on container restart — `docker port` is read
+// fresh on every getEndpoint call.
+export type SandboxRecord =
+  | { provider: 'docker'; container_name: string; token: string }
+  | { provider: 'fly'; machine_id: string; token: string };
+
 // Per-thread runtime state. The file now persists even when the thread is
 // idle — it carries the frozen `system_prompt` across turns so each thread's
 // prompt is stable for its lifetime. Recovery filters on status !== 'idle'.
@@ -11,6 +23,7 @@ export type SessionState = {
   status: 'idle' | 'running' | 'stopping';
   updated_at: string;
   system_prompt?: string;
+  sandbox?: SandboxRecord;
 };
 
 const RUNTIME_FILENAME = 'session.json';
@@ -51,16 +64,51 @@ export async function readSession(threadKey: string): Promise<SessionState | und
 }
 
 // "Clear" no longer means delete — going idle leaves the file in place with
-// status: 'idle' so the frozen system_prompt survives across turns. Read
-// existing state first so we preserve system_prompt when transitioning.
-// `/delete` removes the entire thread dir, which takes session.json with it.
+// status: 'idle' so the frozen system_prompt + sandbox record survive across
+// turns. Read existing state first so we preserve those fields when
+// transitioning. `/delete` removes the entire thread dir, which takes
+// session.json with it.
 export async function clearSession(threadKey: string): Promise<void> {
   const existing = await readSession(threadKey);
   await writeSession(threadKey, {
     status: 'idle',
     updated_at: new Date().toISOString(),
     ...(existing?.system_prompt !== undefined ? { system_prompt: existing.system_prompt } : {}),
+    ...(existing?.sandbox !== undefined ? { sandbox: existing.sandbox } : {}),
   });
+}
+
+// Atomic read-modify-write that sets (or clears, when undefined) the
+// sandbox routing record on a thread's session.json, preserving every other
+// field. Called by provider implementations after they provision, reattach,
+// or destroy a sandbox. No-op on the disk side when there's no session.json
+// yet — that means the thread has never been mentioned, which shouldn't
+// happen via the normal flow but we tolerate it.
+export async function setSandbox(
+  threadKey: string,
+  sandbox: SandboxRecord | undefined,
+): Promise<void> {
+  const existing = await readSession(threadKey);
+  if (!existing) {
+    if (sandbox === undefined) return;
+    // No prior state: write a minimal idle record carrying just the sandbox.
+    // This branch shouldn't be exercised in practice (handler always writes a
+    // 'running' record before any tool — and therefore any sandbox — runs),
+    // but it keeps the API total.
+    await writeSession(threadKey, {
+      status: 'idle',
+      updated_at: new Date().toISOString(),
+      sandbox,
+    });
+    return;
+  }
+  const next: SessionState = {
+    ...existing,
+    updated_at: new Date().toISOString(),
+    ...(sandbox !== undefined ? { sandbox } : {}),
+  };
+  if (sandbox === undefined) delete next.sandbox;
+  await writeSession(threadKey, next);
 }
 
 export async function listSessions(): Promise<Array<{ threadKey: string; state: SessionState }>> {

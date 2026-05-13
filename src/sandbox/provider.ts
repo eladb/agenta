@@ -32,7 +32,17 @@ export type SandboxProvider = {
   getEndpoint(threadKey: string): Promise<SandboxEndpoint>;
   // Tear down the thread's sandbox. No-op if missing.
   remove(threadKey: string): Promise<void>;
-  // Wipe every sandbox this provider owns. Called at bot startup so each
-  // run starts clean.
+  // Wipe every sandbox this provider owns. Used by tests and by the
+  // (rarely called) `killAllSandboxContainers` re-export. Not on the runtime
+  // hot path: routine cleanup is `/delete` per thread; boot-time cleanup is
+  // `reapOrphanSandboxes`.
   killAll(): Promise<void>;
+  // Returns the provider-native identifiers of every sandbox this provider
+  // currently owns (containers for docker, machines for fly). Used by the
+  // boot-time orphan reap to find sandboxes with no matching session.json.
+  listAll(): Promise<Array<{ id: string }>>;
+  // Destroy a sandbox by its provider-native id (the same id `listAll`
+  // returns). Used by the orphan reap when the threadKey is no longer known
+  // — `remove(threadKey)` is the user-facing tear-down.
+  destroyById(id: string): Promise<void>;
 };

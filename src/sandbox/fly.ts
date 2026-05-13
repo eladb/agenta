@@ -1,4 +1,5 @@
 import { log } from '../log';
+import { clearSandbox, loadSandbox, saveSandbox, sweepAllSandboxes } from './persistence';
 import type { SandboxEndpoint, SandboxProvider } from './provider';
 
 // Fly Machines API base. We don't use flyctl from the bot — too slow, and
@@ -76,9 +77,56 @@ async function waitForHealth(machineId: string, timeoutMs = 60_000): Promise<voi
   throw new Error(`fly sandbox not healthy after ${timeoutMs}ms: ${String(lastErr)}`);
 }
 
+// Liveness check for a persisted record. Returns true iff the machine
+// exists and is in the 'started' state. ~3s timeout to match the Docker
+// path.
+async function verifyAlive(machineId: string): Promise<boolean> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 3_000);
+  try {
+    const res = await fetch(`${FLY_API}/apps/${appName()}/machines/${machineId}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token()}` },
+      signal: ac.signal,
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { state?: string };
+    return body.state === 'started';
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function ensure(threadKey: string): Promise<void> {
   if (state.has(threadKey)) return;
   const name = machineName(threadKey);
+
+  // Re-hydration path: in-memory cache is empty but disk may carry a record
+  // from a previous bot process. If it's live, adopt it and skip
+  // provisioning. Cross-provider records get cleared.
+  const persisted = await loadSandbox(threadKey);
+  if (persisted) {
+    if (persisted.provider !== 'fly') {
+      log.warn(
+        'sandbox',
+        `[${threadKey}] persisted sandbox is ${persisted.provider}; SANDBOX_PROVIDER=fly — ignoring`,
+      );
+      await clearSandbox(threadKey);
+    } else if (await verifyAlive(persisted.machine_id)) {
+      state.set(threadKey, { machineId: persisted.machine_id, token: persisted.token });
+      log.info('sandbox', `re-hydrated fly machine ${persisted.machine_id} from session.json`);
+      return;
+    } else {
+      log.info(
+        'sandbox',
+        `[${threadKey}] persisted machine ${persisted.machine_id} not alive; re-provisioning`,
+      );
+      await clearSandbox(threadKey);
+    }
+  }
+
   // If a stale machine with the same name exists (from a previous run that
   // crashed without clearing in-memory state), destroy it before recreating
   // so we control the token.
@@ -111,13 +159,27 @@ async function ensure(threadKey: string): Promise<void> {
   }
   const machine = (await create.json()) as { id: string };
   state.set(threadKey, { machineId: machine.id, token: sandboxToken });
+  await saveSandbox(threadKey, { provider: 'fly', machine_id: machine.id, token: sandboxToken });
   await waitForHealth(machine.id);
   log.info('sandbox', `fly machine ${name} (${machine.id}) ready`);
 }
 
 async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
-  const s = state.get(threadKey);
-  if (!s) throw new Error(`sandbox not initialized for ${threadKey}`);
+  let s = state.get(threadKey);
+  if (!s) {
+    // Lazy re-hydration: in-memory cache empty, but disk may carry a record.
+    // If alive, adopt it; otherwise clear and throw so caller knows to
+    // `ensure` first.
+    const persisted = await loadSandbox(threadKey);
+    if (persisted && persisted.provider === 'fly' && (await verifyAlive(persisted.machine_id))) {
+      s = { machineId: persisted.machine_id, token: persisted.token };
+      state.set(threadKey, s);
+      log.info('sandbox', `[${threadKey}] re-hydrated fly endpoint from session.json`);
+    } else {
+      if (persisted) await clearSandbox(threadKey);
+      throw new Error(`sandbox not initialized for ${threadKey}`);
+    }
+  }
   return {
     baseUrl: `https://${appName()}.fly.dev`,
     headers: {
@@ -132,8 +194,11 @@ async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
 
 async function remove(threadKey: string): Promise<void> {
   const s = state.get(threadKey);
-  if (!s) return;
   state.delete(threadKey);
+  await clearSandbox(threadKey).catch((err) => {
+    log.warn('sandbox', `remove: clearSandbox(${threadKey}) failed: ${(err as Error).message}`);
+  });
+  if (!s) return;
   const res = await flyFetch('DELETE', `/apps/${appName()}/machines/${s.machineId}?force=true`);
   if (!res.ok) {
     log.warn('sandbox', `fly destroy machine ${s.machineId}: ${res.status} ${await res.text()}`);
@@ -154,7 +219,25 @@ async function killAll(): Promise<void> {
     await flyFetch('DELETE', `/apps/${appName()}/machines/${m.id}?force=true`).catch(() => {});
   }
   state.clear();
+  await sweepAllSandboxes();
   if (ours.length > 0) log.info('sandbox', `fly: destroyed ${ours.length} machine(s)`);
+}
+
+async function listAll(): Promise<Array<{ id: string }>> {
+  const res = await flyFetch('GET', `/apps/${appName()}/machines`);
+  if (!res.ok) {
+    log.warn('sandbox', `fly listAll: ${res.status}`);
+    return [];
+  }
+  const list = (await res.json()) as MachineSummary[];
+  return list.filter((m) => m.name.startsWith(MACHINE_PREFIX)).map((m) => ({ id: m.id }));
+}
+
+async function destroyById(id: string): Promise<void> {
+  const res = await flyFetch('DELETE', `/apps/${appName()}/machines/${id}?force=true`);
+  if (!res.ok) {
+    log.warn('sandbox', `fly destroyById ${id}: ${res.status}`);
+  }
 }
 
 function isReady(threadKey: string): boolean {
@@ -168,6 +251,8 @@ export const flyProvider: SandboxProvider = {
   getEndpoint,
   remove,
   killAll,
+  listAll,
+  destroyById,
 };
 
 // For tests.

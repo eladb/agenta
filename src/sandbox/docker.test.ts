@@ -1,7 +1,21 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { _resetImageReadyCache, dockerProvider } from './docker';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readSession, writeSession } from '../runtime/session-store';
+import { _resetImageReadyCache, dockerProvider, ensureImage } from './docker';
 import { _resetFlyState, flyProvider } from './fly';
 import { consumeExecStream, containerName, writeBinary } from './index';
+
+function dockerAvailable(): boolean {
+  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
+    stdio: 'ignore',
+  });
+  return r.status === 0;
+}
+
+const HAS_DOCKER = dockerAvailable();
 
 describe('containerName', () => {
   test('prefixes threadKey with agenta-', () => {
@@ -133,4 +147,154 @@ describe('writeBinary HTTP shape', () => {
     expect(body.path).toBe('attachments/F1-foo.bin');
     expect(Buffer.from(body.content_b64, 'base64').toString('utf8')).toBe('abc');
   });
+});
+
+// Docker-gated: exercises ensure/getEndpoint/remove/killAll/listAll against
+// a real Docker daemon. Each test is fully self-contained and cleans up its
+// container in `afterEach`. Skipped on hosts without Docker.
+describe('dockerProvider persistence (live Docker)', () => {
+  let dataDir: string;
+  const created: string[] = [];
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'agenta-docker-persist-'));
+    process.env.AGENTA_DATA_DIR = dataDir;
+    process.env.SANDBOX_EXEC_TIMEOUT_MS ??= '8000';
+    _resetImageReadyCache();
+  });
+
+  afterEach(async () => {
+    // Best-effort: remove any containers we spawned.
+    for (const id of created) {
+      spawnSync('docker', ['rm', '-fv', id], { stdio: 'ignore' });
+    }
+    created.length = 0;
+    rmSync(dataDir, { recursive: true, force: true });
+    delete process.env.AGENTA_DATA_DIR;
+    _resetImageReadyCache();
+  });
+
+  test.if(HAS_DOCKER)(
+    'ensure writes a docker session record after readiness',
+    async () => {
+      await ensureImage();
+      const TK = `unit-persist-${Date.now()}`;
+      created.push(containerName(TK));
+
+      await dockerProvider.ensure(TK);
+      const session = await readSession(TK);
+      expect(session?.sandbox?.provider).toBe('docker');
+      if (session?.sandbox?.provider !== 'docker') throw new Error('unreachable');
+      expect(session.sandbox.container_name).toBe(containerName(TK));
+      expect(session.sandbox.token.length).toBeGreaterThan(16);
+    },
+    180_000,
+  );
+
+  test.if(HAS_DOCKER)(
+    'ensure re-hydrates an existing live container (second ensure does not recreate it)',
+    async () => {
+      await ensureImage();
+      const TK = `unit-rehydrate-${Date.now()}`;
+      created.push(containerName(TK));
+
+      await dockerProvider.ensure(TK);
+      const first = await readSession(TK);
+      const tokenA = first?.sandbox?.provider === 'docker' ? first.sandbox.token : undefined;
+
+      // Capture the docker container ID so we can verify it's the same one.
+      const inspectA = spawnSync('docker', ['inspect', '-f', '{{.Id}}', containerName(TK)]);
+      const idA = inspectA.stdout.toString().trim();
+
+      // Simulate a bot restart: wipe in-memory state. Disk still has the
+      // record. The container is still running.
+      _resetImageReadyCache();
+
+      // Second ensure should adopt the existing container — no new container.
+      await dockerProvider.ensure(TK);
+      const after = await readSession(TK);
+      const tokenB = after?.sandbox?.provider === 'docker' ? after.sandbox.token : undefined;
+      expect(tokenB).toBe(tokenA);
+
+      const inspectB = spawnSync('docker', ['inspect', '-f', '{{.Id}}', containerName(TK)]);
+      expect(inspectB.stdout.toString().trim()).toBe(idA);
+    },
+    180_000,
+  );
+
+  test.if(HAS_DOCKER)(
+    'remove clears the disk record while preserving status + system_prompt',
+    async () => {
+      await ensureImage();
+      const TK = `unit-remove-${Date.now()}`;
+      created.push(containerName(TK));
+
+      // Pre-write a status + system_prompt so we can verify they survive.
+      await writeSession(TK, {
+        status: 'idle',
+        updated_at: 't',
+        system_prompt: 'keep-me',
+      });
+
+      await dockerProvider.ensure(TK);
+      // Sanity: sandbox was added to the existing session record.
+      expect((await readSession(TK))?.system_prompt).toBe('keep-me');
+
+      await dockerProvider.remove(TK);
+      const after = await readSession(TK);
+      expect(after?.sandbox).toBeUndefined();
+      expect(after?.status).toBe('idle');
+      expect(after?.system_prompt).toBe('keep-me');
+    },
+    180_000,
+  );
+
+  test.if(HAS_DOCKER)(
+    'listAll returns the container name of an ensured sandbox',
+    async () => {
+      await ensureImage();
+      const TK = `unit-listall-${Date.now()}`;
+      created.push(containerName(TK));
+
+      await dockerProvider.ensure(TK);
+      const list = await dockerProvider.listAll();
+      expect(list.map((e) => e.id)).toContain(containerName(TK));
+
+      await dockerProvider.remove(TK);
+      const listAfter = await dockerProvider.listAll();
+      expect(listAfter.map((e) => e.id)).not.toContain(containerName(TK));
+    },
+    180_000,
+  );
+
+  test.if(HAS_DOCKER)(
+    'killAll sweeps the sandbox field across every session.json',
+    async () => {
+      await ensureImage();
+      const TK1 = `unit-killall-a-${Date.now()}`;
+      const TK2 = `unit-killall-b-${Date.now()}`;
+      created.push(containerName(TK1), containerName(TK2));
+
+      // Pre-write a system_prompt on TK2 so we can verify killAll only
+      // clears the sandbox field, not the rest.
+      await writeSession(TK2, {
+        status: 'idle',
+        updated_at: 't',
+        system_prompt: 'preserve-me',
+      });
+
+      await dockerProvider.ensure(TK1);
+      await dockerProvider.ensure(TK2);
+
+      // Image cache will be touched between ensures; that's fine.
+      await dockerProvider.killAll();
+
+      const a = await readSession(TK1);
+      const b = await readSession(TK2);
+      expect(a?.sandbox).toBeUndefined();
+      expect(b?.sandbox).toBeUndefined();
+      expect(b?.system_prompt).toBe('preserve-me');
+    },
+    240_000,
+  );
 });

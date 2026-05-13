@@ -2,6 +2,7 @@ import { readFile as fsReadFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from '../log';
 import { attachmentsDir } from '../persistence/store';
+import { listSessions } from '../runtime/session-store';
 import { containerName, dockerProvider } from './docker';
 import { flyProvider } from './fly';
 import type { SandboxEndpoint, SandboxProvider } from './provider';
@@ -43,6 +44,46 @@ export async function removeContainer(threadKey: string): Promise<void> {
 export async function killAllSandboxContainers(): Promise<void> {
   syncedAttachments.clear();
   return provider.killAll();
+}
+
+// Boot-time orphan reap: destroy provider-owned sandboxes with no matching
+// session.json record. Replaces the old boot-time killAll — sandboxes now
+// survive bot restart and are reattached on demand. This sweep only fires
+// when something has gone wrong outside the normal `/delete` flow (e.g.
+// `rm -rf data/` without going through the bot). Errors logged, not thrown.
+export async function reapOrphanSandboxes(): Promise<void> {
+  let owned: Array<{ id: string }>;
+  try {
+    owned = await provider.listAll();
+  } catch (err) {
+    log.warn('sandbox', `reap: listAll failed: ${(err as Error).message}`);
+    return;
+  }
+  if (owned.length === 0) return;
+  const sessions = await listSessions();
+  // For docker the provider's id is the container name (agenta-<threadKey>);
+  // we expect a session whose threadKey maps to that name AND whose record
+  // matches. For fly it's the machine id, which we match by record.machine_id.
+  const live = new Set<string>();
+  for (const { threadKey, state } of sessions) {
+    const sb = state.sandbox;
+    if (!sb) continue;
+    if (sb.provider === 'docker') {
+      if (sb.container_name === containerName(threadKey)) live.add(sb.container_name);
+    } else if (sb.provider === 'fly') {
+      live.add(sb.machine_id);
+    }
+  }
+  const orphans = owned.filter((o) => !live.has(o.id));
+  if (orphans.length === 0) return;
+  log.info('sandbox', `reap: destroying ${orphans.length} orphan sandbox(es)`);
+  for (const o of orphans) {
+    try {
+      await provider.destroyById(o.id);
+    } catch (err) {
+      log.warn('sandbox', `reap: destroying ${o.id} failed: ${(err as Error).message}`);
+    }
+  }
 }
 
 async function endpoint(threadKey: string): Promise<SandboxEndpoint> {

@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import { log } from '../log';
 import type { CallModel } from '../model/gateway';
 import { postInThread } from '../slack/post';
-import { clearSession, writeSession } from './session-store';
+import { clearSession, readSession, writeSession } from './session-store';
 import { runTurn, type TurnInput } from './turn';
 
 function nowIso(): string {
@@ -60,10 +60,16 @@ export async function startOrQueue(
   }
   s.status = 'running';
   s.pending = false;
+  // Preserve the persisted sandbox routing record across the status flip so
+  // we don't drop it on idle → running. The provider may write a fresh
+  // record back during this turn (or not at all, if no sandbox-touching
+  // tool runs).
+  const prior = await readSession(input.threadKey);
   await writeSession(input.threadKey, {
     status: 'running',
     updated_at: nowIso(),
     system_prompt: systemPrompt,
+    ...(prior?.sandbox !== undefined ? { sandbox: prior.sandbox } : {}),
   });
   try {
     while (true) {
@@ -74,10 +80,12 @@ export async function startOrQueue(
       // If /stop fired during the turn we are now in 'stopping'; flip back
       // to 'running' since the user has since sent a new mention.
       s.status = 'running';
+      const carry = await readSession(input.threadKey);
       await writeSession(input.threadKey, {
         status: 'running',
         updated_at: nowIso(),
         system_prompt: systemPrompt,
+        ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
       });
     }
   } finally {
@@ -101,10 +109,12 @@ export async function signalStop(
     // Persist BEFORE firing abort: otherwise the abort cascade lets the
     // turn's `finally { clearSession }` race ahead of our writeSession and
     // leave a stale `stopping` file behind.
+    const carry = await readSession(tk);
     await writeSession(tk, {
       status: 'stopping',
       updated_at: nowIso(),
       ...(s.systemPrompt !== undefined ? { system_prompt: s.systemPrompt } : {}),
+      ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
     });
     s.abort.abort();
     log.info('session', `[${tk}] stop signaled`);

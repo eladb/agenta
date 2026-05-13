@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import {
   clearSession,
   listSessions,
-  type SessionState,
   readSession,
+  type SandboxRecord,
+  type SessionState,
+  setSandbox,
   writeSession,
 } from './session-store';
 
@@ -106,5 +108,69 @@ describe('session-store', () => {
   test('the session.json file is at the expected path', async () => {
     await writeSession('tk', { status: 'running', updated_at: 't' });
     expect(existsSync(join(dataDir, 'tk', 'session.json'))).toBe(true);
+  });
+
+  test('setSandbox preserves status and system_prompt on writes', async () => {
+    await writeSession('tk-sb', {
+      status: 'running',
+      updated_at: 't0',
+      system_prompt: 'hello prompt',
+    });
+    const rec: SandboxRecord = { provider: 'docker', container_name: 'agenta-tk-sb', token: 'tok' };
+    await setSandbox('tk-sb', rec);
+    const after = await readSession('tk-sb');
+    expect(after?.status).toBe('running');
+    expect(after?.system_prompt).toBe('hello prompt');
+    expect(after?.sandbox).toEqual(rec);
+  });
+
+  test('setSandbox(undefined) removes the sandbox field but keeps the rest', async () => {
+    const rec: SandboxRecord = { provider: 'fly', machine_id: 'm-1', token: 'tok' };
+    await writeSession('tk-clear', {
+      status: 'idle',
+      updated_at: 't',
+      system_prompt: 'p',
+      sandbox: rec,
+    });
+    await setSandbox('tk-clear', undefined);
+    const after = await readSession('tk-clear');
+    expect(after?.status).toBe('idle');
+    expect(after?.system_prompt).toBe('p');
+    expect(after?.sandbox).toBeUndefined();
+  });
+
+  test('setSandbox on a thread with no session.json writes a minimal idle record', async () => {
+    const rec: SandboxRecord = { provider: 'docker', container_name: 'agenta-x', token: 't' };
+    await setSandbox('tk-fresh', rec);
+    const after = await readSession('tk-fresh');
+    expect(after?.status).toBe('idle');
+    expect(after?.sandbox).toEqual(rec);
+  });
+
+  test('setSandbox(undefined) on a thread with no session.json is a no-op', async () => {
+    await setSandbox('never-existed-2', undefined);
+    expect(await readSession('never-existed-2')).toBeUndefined();
+  });
+
+  test('clearSession preserves the sandbox record across the running -> idle transition', async () => {
+    const rec: SandboxRecord = { provider: 'docker', container_name: 'agenta-keep', token: 't' };
+    await writeSession('tk-keep', {
+      status: 'running',
+      updated_at: 't',
+      system_prompt: 'p',
+      sandbox: rec,
+    });
+    await clearSession('tk-keep');
+    const after = await readSession('tk-keep');
+    expect(after?.status).toBe('idle');
+    expect(after?.system_prompt).toBe('p');
+    expect(after?.sandbox).toEqual(rec);
+  });
+
+  test('readSession round-trips a sandbox record on an idle state', async () => {
+    const rec: SandboxRecord = { provider: 'fly', machine_id: 'm-42', token: 'tok42' };
+    await writeSession('tk-rt', { status: 'idle', updated_at: 't', sandbox: rec });
+    const out = await readSession('tk-rt');
+    expect(out?.sandbox).toEqual(rec);
   });
 });
