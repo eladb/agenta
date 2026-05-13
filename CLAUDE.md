@@ -40,6 +40,7 @@ Phases completed (in order):
 10. **Sandbox provider abstraction + Fly Machines provider** — `src/sandbox/provider.ts` defines `SandboxProvider { ensure, getEndpoint, remove, killAll, isReady }`. `src/sandbox/docker.ts` and `src/sandbox/fly.ts` implement it. `src/sandbox/index.ts` selects via `SANDBOX_PROVIDER=docker|fly` and exports the unified HTTP client (runBash/readFile/…). The Fly provider creates a per-thread Firecracker VM via the Machines REST API, routes via `fly-force-instance-id` on the shared `<app>.fly.dev` URL, with a per-machine `SANDBOX_TOKEN` in env. `scripts/deploy-sandbox-fly.ts` provisions the app, allocates shared v4 + dedicated v6, and `fly deploy --build-only --push --image-label latest` so the registry tag is stable.
 11. **Lazy sandbox provisioning + UI** — the sandbox is no longer created on every mention. Each `Tool` carries a `requiresSandbox?: boolean` flag; the first tool with that flag in a turn triggers `ensureContainer` if `isSandboxReady(threadKey)` is false. While provisioning is in flight the checklist gets a `• 🛠️ provisioning workspace…` line, which mutates to `• ✅ workspace ready` on success or `• ❌ workspace provisioning failed: <err>` on failure. On failure the tool gets an error tool_result synthesized in turn.ts (invoke isn't called), so the model can recover. Mentions that never use a sandbox-touching tool (chat-only, `get_current_time`, `fetch_url`, `ask_user`) skip provisioning entirely.
 12. **Inbound attachments → sandbox** — user-uploaded files are mirrored into `/workspace/attachments/<file_id>-<safeName>` so the model can `read_file`/`bash` over them. Sync is lazy (runs after `ensureContainer` on the first sandbox-touching tool of a turn) and idempotent via a per-thread `Map<threadKey, Set<basename>>` in `src/sandbox/index.ts` (cleared on `removeContainer`/`killAllSandboxContainers`). The sandbox server exposes `POST /write_binary` (`{ path, content_b64 }`) for the upload. `buildMessages` also appends `[attached: attachments/<file_id>-<safeName>]` to the user message text so non-vision models see the path hint.
+13. **Skills + botspace + per-thread frozen prompt** — the system prompt is no longer a const in `src/index.ts`. It lives in `sandbox/botspace/`: `BOT.md` for identity/rules + `skills/<slug>/SKILL.md` files with YAML frontmatter (`name`, `description`, anything else flows through verbatim). `src/prompt.ts:buildSystemPrompt` walks the dir, parses frontmatter (malformed = warn + skip, never crash), and composes `<SYSTEM_PROMPT env prefix?>\n\n<BOT.md>\n\n# Available skills\n…\n<JSON array, sorted by path>` (the skills section is omitted entirely when there are zero skills). The whole `sandbox/botspace/` tree is `COPY --chown=sandbox:sandbox`'d into `/workspace/` at image-build time so a fresh sandbox starts with BOT.md + skills/* in place; the model loads a skill by `read_file('skills/<slug>/SKILL.md')`. The composed prompt is **frozen per thread**: `runtime.json` schema now persists `{status, updated_at, system_prompt?}` with `status: 'idle' | 'running' | 'stopping'`, `handler.ts` composes on the first mention and writes it into the file, and every subsequent turn in that thread reads `system_prompt` back from runtime.json. `clearRuntime` rewrites the file as idle (preserving the prompt) instead of deleting it; only `/delete` removes the thread dir. `recoverInterruptedSessions` filters on status !== 'idle' so we don't re-announce on every boot. `SYSTEM_PROMPT` env var semantics changed: it **prepends** to BOT.md (used to **replace** the default).
 
 ### Not yet implemented (deferred from spec)
 
@@ -73,6 +74,7 @@ When you start a new session on this repo:
 src/
   index.ts                 entry: env → killAllSandboxContainers → connect → recoverInterruptedSessions → listen
   log.ts                   tiny console logger with scope + level
+  prompt.ts                buildSystemPrompt(botspaceDir?, envPrefix?): walks `sandbox/botspace/` to compose [env prefix] + BOT.md + "Available skills" + JSON array (sorted by path). Pure, no Slack/sandbox deps. Skills with bad frontmatter are warn-and-skipped.
   slack/
     connect.ts             SocketModeClient + WebClient + auth.test
     events.ts              message → IncomingEvent (message | edit | delete)
@@ -86,7 +88,7 @@ src/
     thread.ts              threadKey + decodeThreadKey (inverse, for recovery)
     redact.ts              best-effort secret scrubber for error messages
     session.ts             per-thread state machine (idle / running / stopping); writes runtime.json on transitions
-    runtime-store.ts       atomic temp+rename runtime.json per thread; idle = no file
+    runtime-store.ts       atomic temp+rename runtime.json per thread; schema {status, updated_at, system_prompt?}; clearRuntime now rewrites idle (preserving system_prompt), only /delete removes the file
     recovery.ts            recoverInterruptedSessions: on boot, post "agent restarted" notice + clear stale runtime.json
     asks.ts                pending ask_user registry; at most one per thread; resolveByThreadText for text-override
     turn.ts                runTurn: ephemeral thinking… → callModel → tool loop with live bash preview → final reply
@@ -120,7 +122,8 @@ src/
     fly.ts                 flyProvider — per-thread Fly machine via the Fly Machines REST API. fly-force-instance-id header routes requests to the specific machine over the shared <app>.fly.dev URL.
     index.ts               provider selector (SANDBOX_PROVIDER=docker|fly), provider-agnostic HTTP client: runBash/readFile/readBinary/writeFile/editFile/grep/glob/listDir, consumeExecStream (SSE parser). Re-exports containerName for tests.
 sandbox/
-  Dockerfile               multi-stage: oven/bun:1-slim builds the server binary → ubuntu:24.04 runtime + iptables/ripgrep/git/curl/jq/python3/python3-pil/matplotlib/numpy/pandas/imagemagick, sandbox user uid 1000
+  Dockerfile               multi-stage: oven/bun:1-slim builds the server binary → ubuntu:24.04 runtime + iptables/ripgrep/git/curl/jq/python3/python3-pil/matplotlib/numpy/pandas/imagemagick, sandbox user uid 1000. Also `COPY --chown=sandbox:sandbox botspace /workspace/` so BOT.md + skills/* ship into every container.
+  botspace/                BOT.md + skills/<slug>/SKILL.md library. Single source of truth for the bot's prompt; copied into /workspace at image-build time and read by src/prompt.ts on first mention. Override the dir for tests via `BOTSPACE_DIR` env.
   entrypoint.sh            installs iptables OUTPUT rules (root + NET_ADMIN), then `setpriv` to sandbox user with bounding/inheritable/ambient caps wiped, then exec the server
   fly.toml                 minimal Fly app config — `app = "agenta-sandbox"` + Dockerfile pointer. No services here; the bot creates per-thread machines on demand.
   server/
@@ -135,7 +138,7 @@ slack-manifests/
 tests/e2e/
   helpers.ts               startAgent (in-process), startTester, mention, uploadFile, waitForReply, waitFor, deleteThread (also removeContainer), stubCalls/recordingStub
   fixtures.ts              inline PNG/PDF/text/binary byte fixtures
-  *.test.ts                echo, commands, persistence, edits, attachments, session, tools, sandbox
+  *.test.ts                echo, commands, persistence, edits, attachments, session, tools, sandbox, skills
 ```
 
 ## Key invariants / gotchas
@@ -158,8 +161,9 @@ tests/e2e/
 
 ### Session + recovery semantics
 
-- **`runtime.json` per thread** records non-idle session state (`running` or `stopping`). Idle = no file. Written atomically (temp + rename) on every transition. `signalStop` writes `stopping` **before** firing `abort.abort()` — otherwise the abort cascade lets the turn's `finally { clearRuntime }` race ahead and leave a stale `stopping` entry on disk.
-- **On boot**, `recoverInterruptedSessions(web)` scans `data/*/runtime.json`, posts an "agent restarted — previous turn was interrupted" notice per non-idle entry, then clears the entry. Bad threadKeys and Slack errors don't abort the whole recovery; entries always clear (we don't re-announce on every boot).
+- **`runtime.json` per thread** records session state: `{status: 'idle' | 'running' | 'stopping', updated_at, system_prompt?}`. Written atomically (temp + rename) on every transition. The file lives across the thread's whole lifetime — `clearRuntime` rewrites it as `idle` (preserving `system_prompt`) instead of deleting; only `/delete` removes it. `signalStop` writes `stopping` **before** firing `abort.abort()` — otherwise the abort cascade lets the turn's `finally { clearRuntime }` race ahead and leave a stale `stopping` entry on disk.
+- **Per-thread frozen prompt.** `handler.ts` composes the system prompt via `buildSystemPrompt()` on the first mention of a thread, writes it into `runtime.json` (status: idle), and reads it back on every subsequent turn. So BOT.md/skill edits don't affect already-running threads; only new threads pick up changes. `session.ts` threads the prompt through every `writeRuntime` call so it survives running ↔ stopping ↔ idle transitions.
+- **On boot**, `recoverInterruptedSessions(web)` scans `data/*/runtime.json`, filters to `status === 'running' | 'stopping'`, posts an "agent restarted — previous turn was interrupted" notice per match, then clears the entry (which flips it to idle, preserving the prompt). Idle entries are skipped — we don't re-announce on every boot. Bad threadKeys and Slack errors don't abort the whole recovery; entries always clear.
 - **`/delete` removes the whole thread dir** including `runtime.json` and the sandbox container — no special cleanup logic.
 
 ### Sandbox quirks
@@ -202,7 +206,8 @@ Optional:
 - `AGENTA_DATA_DIR` — overrides `./data` (tests use a mkdtemp dir)
 - `MODEL_NAME` — defaults to `claude-sonnet-4-6`
 - `MODEL_BASE_URL` — defaults to `https://api.anthropic.com/v1`. For OpenRouter set `https://openrouter.ai/api/v1` and choose a tool-supporting model (e.g. `google/gemini-2.0-flash-exp:free`). Tool calling reliability varies wildly by model — many free models don't support `tool_calls` and the agent regresses to chat-only.
-- `SYSTEM_PROMPT` — has a sensible default
+- `SYSTEM_PROMPT` — **prepended** to BOT.md (separated by a blank line). Used to **replace** the default const prompt entirely; the switch to a per-thread frozen prompt composed from `sandbox/botspace/BOT.md` made replace-semantics meaningless, so it's now a prefix. Leave unset to use BOT.md verbatim.
+- `BOTSPACE_DIR` — override the directory the prompt is composed from (defaults to `<cwd>/sandbox/botspace`). E2E tests use this to point at an isolated tmpdir.
 - `SANDBOX_PROVIDER` — `docker` (default) or `fly`. Picks where per-thread sandboxes live.
 - `FLY_APP_NAME` + `FLY_API_TOKEN` — required when `SANDBOX_PROVIDER=fly`. Provision the app once via `bun scripts/deploy-sandbox-fly.ts`, then generate a token: `flyctl tokens create deploy -a <app>`.
 - `SANDBOX_EXEC_TIMEOUT_MS` — bash command wall-clock cap inside the sandbox. Default 60s. Tests set it lower.

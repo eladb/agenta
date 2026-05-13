@@ -23,6 +23,13 @@ RUN userdel -r ubuntu 2>/dev/null || true \
  && mkdir -p /workspace \
  && chown sandbox:sandbox /workspace
 
+# Bot identity + skills library: a fresh sandbox starts with BOT.md and
+# skills/* already in /workspace, owned by the unprivileged user so the
+# server can read them via the normal read_file path. Build context is
+# `sandbox/` (see src/sandbox/docker.ts:DOCKERFILE_DIR), so `botspace` here
+# resolves to `sandbox/botspace/` in the repo.
+COPY --chown=sandbox:sandbox botspace /workspace/
+
 COPY --from=builder /build/sandbox-server /usr/local/bin/sandbox-server
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

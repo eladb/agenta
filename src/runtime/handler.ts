@@ -5,12 +5,14 @@ import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attac
 import { backfillIfNew } from '../persistence/backfill';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { deleteThreadData } from '../persistence/store';
+import { buildSystemPrompt } from '../prompt';
 import { removeContainer } from '../sandbox';
 import type { DeleteMessage, EditMessage, IncomingEvent, NormalMessage } from '../slack/events';
 import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
+import { readRuntime, writeRuntime } from './runtime-store';
 import { signalStop, startOrQueue } from './session';
 import { threadKey } from './thread';
 
@@ -21,11 +23,10 @@ export function makeEventHandler(
   botToken: string,
   botUserId: string,
   callModel: CallModel,
-  systemPrompt: string,
 ): (e: IncomingEvent) => Promise<void> {
   return async (e) => {
     if (e.kind === 'message') {
-      return handleMessage(web, botToken, botUserId, callModel, systemPrompt, e);
+      return handleMessage(web, botToken, botUserId, callModel, e);
     }
     if (e.kind === 'edit') return handleEdit(e);
     if (e.kind === 'delete') return handleDelete(e);
@@ -37,7 +38,6 @@ async function handleMessage(
   botToken: string,
   botUserId: string,
   callModel: CallModel,
-  systemPrompt: string,
   e: NormalMessage,
 ): Promise<void> {
   const key = dedupeKey({
@@ -102,17 +102,39 @@ async function handleMessage(
     return;
   }
 
+  // Per-thread frozen system prompt: composed on the first mention and
+  // persisted into runtime.json so every subsequent turn in this thread
+  // sees the same prompt even if BOT.md / skills change in the meantime.
+  // `clearRuntime` writes idle (preserving system_prompt) so the file is
+  // there across turns; only `/delete` removes it.
+  const prompt = await resolveSystemPrompt(tk);
+
   // Sandbox provisioning is deferred — see turn.ts. The first tool that
   // sets requiresSandbox triggers `ensureContainer` and surfaces a
   // "🛠️ provisioning workspace…" line in the checklist. Mentions that
   // never use a sandbox-touching tool (just chat, time, fetch_url, ask_user)
   // pay nothing.
 
-  await startOrQueue(web, callModel, systemPrompt, {
+  await startOrQueue(web, callModel, prompt, {
     channel: e.channel,
     threadTs: e.threadTs,
     threadKey: tk,
   });
+}
+
+async function resolveSystemPrompt(tk: string): Promise<string> {
+  const existing = await readRuntime(tk);
+  if (existing?.system_prompt !== undefined) return existing.system_prompt;
+  const composed = await buildSystemPrompt();
+  // Persist as idle so it survives this turn and any future ones. session.ts
+  // will overwrite the file with running/stopping/idle as it transitions,
+  // always carrying `system_prompt` forward.
+  await writeRuntime(tk, {
+    status: 'idle',
+    updated_at: nowIso(),
+    system_prompt: composed,
+  });
+  return composed;
 }
 
 async function handleEdit(e: EditMessage): Promise<void> {

@@ -13,7 +13,12 @@ import { decodeThreadKey } from './thread';
 // any partial tool execution would be confusing to replay. The user can
 // re-mention to start over.
 export async function recoverInterruptedSessions(web: WebClient): Promise<void> {
-  const interrupted = await listRuntimes();
+  // Idle entries exist for any thread that has ever been mentioned (the
+  // frozen system_prompt lives there). Filter to non-idle so we only
+  // announce real interruptions.
+  const interrupted = (await listRuntimes()).filter(
+    ({ state }) => state.status === 'running' || state.status === 'stopping',
+  );
   if (interrupted.length === 0) return;
   log.info('recovery', `found ${interrupted.length} interrupted session(s)`);
   for (const { threadKey, state } of interrupted) {
