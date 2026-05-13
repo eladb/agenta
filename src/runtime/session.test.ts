@@ -54,23 +54,23 @@ describe('session state machine', () => {
     expect(edits.some((e) => e.text === 'hi')).toBe(true);
   });
 
-  test('runtime.json is running while in flight, flips to idle with system_prompt after', async () => {
-    const { readRuntime } = await import('./runtime-store');
+  test('session.json is running while in flight, flips to idle with system_prompt after', async () => {
+    const { readSession } = await import('./session-store');
     const { web } = makeWebStub();
     let observedDuringRun: string | undefined;
     const callModel: CallModel = async () => {
-      observedDuringRun = (await readRuntime('k1'))?.status;
+      observedDuringRun = (await readSession('k1'))?.status;
       return { role: 'assistant', content: 'hi' };
     };
     await startOrQueue(web, callModel, 'sys', input);
     expect(observedDuringRun).toBe('running');
-    const after = await readRuntime('k1');
+    const after = await readSession('k1');
     expect(after?.status).toBe('idle');
     expect(after?.system_prompt).toBe('sys');
   });
 
-  test('runtime.json flips to stopping when /stop fires mid-turn', async () => {
-    const { readRuntime } = await import('./runtime-store');
+  test('session.json flips to stopping when /stop fires mid-turn', async () => {
+    const { readSession } = await import('./session-store');
     const { web, edits } = makeWebStub();
     const callModel: CallModel = async (_msgs, opts) => {
       await new Promise<void>((_resolve, reject) => {
@@ -83,14 +83,14 @@ describe('session state machine', () => {
     const run = startOrQueue(web, callModel, 'sys', input);
     await new Promise((r) => setTimeout(r, 10));
     await signalStop(web, 'C', '1.0', 'k1');
-    // After signalStop, runtime.json should say "stopping" before the turn
+    // After signalStop, session.json should say "stopping" before the turn
     // actually exits. system_prompt is threaded through every write.
-    const duringStop = await readRuntime('k1');
+    const duringStop = await readSession('k1');
     expect(duringStop?.status).toBe('stopping');
     expect(duringStop?.system_prompt).toBe('sys');
     await run;
-    // Once the loop exits, runtime.json flips to idle (preserving prompt).
-    const after = await readRuntime('k1');
+    // Once the loop exits, session.json flips to idle (preserving prompt).
+    const after = await readSession('k1');
     expect(after?.status).toBe('idle');
     expect(after?.system_prompt).toBe('sys');
     expect(edits.some((e) => e.text === 'stopped')).toBe(true);

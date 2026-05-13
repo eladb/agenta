@@ -23,7 +23,7 @@ RUN userdel -r ubuntu 2>/dev/null || true \
  && mkdir -p /workspace \
  && chown sandbox:sandbox /workspace
 
-# Bot identity + skills library: a fresh sandbox starts with BOT.md and
+# Bot identity + skills library: a fresh sandbox starts with README.md and
 # skills/* already in /workspace, owned by the unprivileged user so the
 # server can read them via the normal read_file path. Build context is
 # `sandbox/` (see src/sandbox/docker.ts:DOCKERFILE_DIR), so `botspace` here

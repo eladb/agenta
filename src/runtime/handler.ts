@@ -12,7 +12,7 @@ import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
-import { readRuntime, writeRuntime } from './runtime-store';
+import { readSession, writeSession } from './session-store';
 import { signalStop, startOrQueue } from './session';
 import { threadKey } from './thread';
 
@@ -103,9 +103,9 @@ async function handleMessage(
   }
 
   // Per-thread frozen system prompt: composed on the first mention and
-  // persisted into runtime.json so every subsequent turn in this thread
-  // sees the same prompt even if BOT.md / skills change in the meantime.
-  // `clearRuntime` writes idle (preserving system_prompt) so the file is
+  // persisted into session.json so every subsequent turn in this thread
+  // sees the same prompt even if README.md / skills change in the meantime.
+  // `clearSession` writes idle (preserving system_prompt) so the file is
   // there across turns; only `/delete` removes it.
   const prompt = await resolveSystemPrompt(tk);
 
@@ -123,13 +123,13 @@ async function handleMessage(
 }
 
 async function resolveSystemPrompt(tk: string): Promise<string> {
-  const existing = await readRuntime(tk);
+  const existing = await readSession(tk);
   if (existing?.system_prompt !== undefined) return existing.system_prompt;
   const composed = await buildSystemPrompt();
   // Persist as idle so it survives this turn and any future ones. session.ts
   // will overwrite the file with running/stopping/idle as it transitions,
   // always carrying `system_prompt` forward.
-  await writeRuntime(tk, {
+  await writeSession(tk, {
     status: 'idle',
     updated_at: nowIso(),
     system_prompt: composed,

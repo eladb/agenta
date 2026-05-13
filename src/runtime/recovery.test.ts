@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { recoverInterruptedSessions } from './recovery';
-import { readRuntime, writeRuntime } from './runtime-store';
+import { readSession, writeSession } from './session-store';
 import { threadKey } from './thread';
 
 let dataDir: string;
@@ -36,11 +36,11 @@ function makeWebStub(): {
 }
 
 describe('recoverInterruptedSessions', () => {
-  test('posts a notice for each non-idle runtime.json then flips it to idle', async () => {
+  test('posts a notice for each non-idle session.json then flips it to idle', async () => {
     const tk1 = threadKey('C123', '1700000000.000100');
     const tk2 = threadKey('C456', '1700000001.000200');
-    await writeRuntime(tk1, { status: 'running', updated_at: 't', system_prompt: 'sp1' });
-    await writeRuntime(tk2, { status: 'stopping', updated_at: 't', system_prompt: 'sp2' });
+    await writeSession(tk1, { status: 'running', updated_at: 't', system_prompt: 'sp1' });
+    await writeSession(tk2, { status: 'stopping', updated_at: 't', system_prompt: 'sp2' });
 
     const { web, posts } = makeWebStub();
     await recoverInterruptedSessions(web);
@@ -54,8 +54,8 @@ describe('recoverInterruptedSessions', () => {
 
     // After clearing the entry transitions to idle with system_prompt
     // preserved. The next mention picks the prompt back up.
-    const after1 = await readRuntime(tk1);
-    const after2 = await readRuntime(tk2);
+    const after1 = await readSession(tk1);
+    const after2 = await readSession(tk2);
     expect(after1?.status).toBe('idle');
     expect(after1?.system_prompt).toBe('sp1');
     expect(after2?.status).toBe('idle');
@@ -72,19 +72,19 @@ describe('recoverInterruptedSessions', () => {
     // An idle entry from a previous turn that completed cleanly. Recovery
     // must not re-announce on every restart.
     const tk = threadKey('C9', '1700000099.000100');
-    await writeRuntime(tk, { status: 'idle', updated_at: 't', system_prompt: 'sp' });
+    await writeSession(tk, { status: 'idle', updated_at: 't', system_prompt: 'sp' });
     const { web, posts } = makeWebStub();
     await recoverInterruptedSessions(web);
     expect(posts).toEqual([]);
     // And the idle entry stays untouched.
-    expect((await readRuntime(tk))?.status).toBe('idle');
+    expect((await readSession(tk))?.status).toBe('idle');
   });
 
   test('Slack post failure does not abort recovery of other threads', async () => {
     const tk1 = threadKey('C1', '1700000000.000100');
     const tk2 = threadKey('C2', '1700000001.000200');
-    await writeRuntime(tk1, { status: 'running', updated_at: 't' });
-    await writeRuntime(tk2, { status: 'running', updated_at: 't' });
+    await writeSession(tk1, { status: 'running', updated_at: 't' });
+    await writeSession(tk2, { status: 'running', updated_at: 't' });
 
     let calls = 0;
     const web = {
@@ -102,16 +102,16 @@ describe('recoverInterruptedSessions', () => {
     // Both runtime entries should be flipped to idle regardless of post
     // success — we don't want to keep re-announcing a dead channel on
     // every boot.
-    expect((await readRuntime(tk1))?.status).toBe('idle');
-    expect((await readRuntime(tk2))?.status).toBe('idle');
+    expect((await readSession(tk1))?.status).toBe('idle');
+    expect((await readSession(tk2))?.status).toBe('idle');
   });
 
   test('flips entries with undecodable threadKey to idle without posting', async () => {
-    // Write a runtime.json under a malformed dir name.
-    await writeRuntime('no-separator', { status: 'running', updated_at: 't' });
+    // Write a session.json under a malformed dir name.
+    await writeSession('no-separator', { status: 'running', updated_at: 't' });
     const { web, posts } = makeWebStub();
     await recoverInterruptedSessions(web);
     expect(posts).toEqual([]);
-    expect((await readRuntime('no-separator'))?.status).toBe('idle');
+    expect((await readSession('no-separator'))?.status).toBe('idle');
   });
 });

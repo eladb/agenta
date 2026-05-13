@@ -22,26 +22,26 @@ function defaultBotspaceDir(): string {
 //
 // `botspaceDir` defaults to `process.env.BOTSPACE_DIR ?? <cwd>/sandbox/botspace`.
 // `envPrefix` defaults to `process.env.SYSTEM_PROMPT` — when set, it is
-// prepended (with a blank-line separator) to the BOT.md body. This is the
+// prepended (with a blank-line separator) to the README.md body. This is the
 // only behavior delta from the legacy const prompt: SYSTEM_PROMPT used to
 // replace, it now prepends.
 //
 // Layout:
 //   botspace/
-//     BOT.md
+//     README.md
 //     skills/<slug>/SKILL.md  (YAML frontmatter parsed for the skills map)
 export async function buildSystemPrompt(
   botspaceDir: string = defaultBotspaceDir(),
   envPrefix: string | undefined = process.env.SYSTEM_PROMPT,
 ): Promise<string> {
-  const botPath = join(botspaceDir, 'BOT.md');
+  const botPath = join(botspaceDir, 'README.md');
   let bot = '';
   try {
     bot = await readFile(botPath, 'utf8');
   } catch (err) {
-    // BOT.md missing is unusual but not fatal — emit a warning and continue
+    // README.md missing is unusual but not fatal — emit a warning and continue
     // with an empty body so threads still get the env prefix + skills block.
-    log.warn('prompt', `BOT.md not readable at ${botPath}: ${(err as Error).message}`);
+    log.warn('prompt', `README.md not readable at ${botPath}: ${(err as Error).message}`);
   }
 
   const skills = await loadSkills(botspaceDir);

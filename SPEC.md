@@ -31,7 +31,7 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
 - **Storage layout:**
   - `data/{thread_key}/messages.jsonl`
   - `data/{thread_key}/attachments/...`
-  - `data/{thread_key}/runtime.json` (or equivalent runtime checkpoint file)
+  - `data/{thread_key}/session.json` (or equivalent runtime checkpoint file)
 
 ## 5) Session Lifecycle
 ### Session Mapping
@@ -202,7 +202,7 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
 - Runtime state is checkpointed to disk.
 - On process crash/restart, in-flight turns are marked interrupted; no auto-resume in v1.
 - Interrupted/failure status should be surfaced to Slack thread.
-- On startup, runtime performs best-effort recovery scan of `runtime.json` files to reconcile stale `running/stopping/deleting` states into deterministic interrupted/deleted terminal states.
+- On startup, runtime performs best-effort recovery scan of `session.json` files to reconcile stale `running/stopping/deleting` states into deterministic interrupted/deleted terminal states.
 
 ## 16) OpenAI-Compatible Model Interface
 - Agent loop talks to model providers through standard OpenAI-format API compatibility.

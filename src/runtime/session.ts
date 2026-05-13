@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import { log } from '../log';
 import type { CallModel } from '../model/gateway';
 import { postInThread } from '../slack/post';
-import { clearRuntime, writeRuntime } from './runtime-store';
+import { clearSession, writeSession } from './session-store';
 import { runTurn, type TurnInput } from './turn';
 
 function nowIso(): string {
@@ -19,7 +19,7 @@ type Session = {
   // picks up everything queued (the JSONL already has the new messages).
   pending: boolean;
   // Frozen system prompt for this thread. Threaded through every
-  // writeRuntime call so the file always carries it forward.
+  // writeSession call so the file always carries it forward.
   systemPrompt?: string;
 };
 
@@ -60,7 +60,7 @@ export async function startOrQueue(
   }
   s.status = 'running';
   s.pending = false;
-  await writeRuntime(input.threadKey, {
+  await writeSession(input.threadKey, {
     status: 'running',
     updated_at: nowIso(),
     system_prompt: systemPrompt,
@@ -74,7 +74,7 @@ export async function startOrQueue(
       // If /stop fired during the turn we are now in 'stopping'; flip back
       // to 'running' since the user has since sent a new mention.
       s.status = 'running';
-      await writeRuntime(input.threadKey, {
+      await writeSession(input.threadKey, {
         status: 'running',
         updated_at: nowIso(),
         system_prompt: systemPrompt,
@@ -84,7 +84,7 @@ export async function startOrQueue(
     s.status = 'idle';
     s.abort = undefined;
     s.pending = false;
-    await clearRuntime(input.threadKey);
+    await clearSession(input.threadKey);
   }
 }
 
@@ -99,9 +99,9 @@ export async function signalStop(
     s.status = 'stopping';
     s.pending = false;
     // Persist BEFORE firing abort: otherwise the abort cascade lets the
-    // turn's `finally { clearRuntime }` race ahead of our writeRuntime and
+    // turn's `finally { clearSession }` race ahead of our writeSession and
     // leave a stale `stopping` file behind.
-    await writeRuntime(tk, {
+    await writeSession(tk, {
       status: 'stopping',
       updated_at: nowIso(),
       ...(s.systemPrompt !== undefined ? { system_prompt: s.systemPrompt } : {}),

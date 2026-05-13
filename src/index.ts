@@ -31,8 +31,8 @@ const callModel = createCallModel({
 });
 
 // The system prompt is no longer constructed here — the handler composes it
-// per thread from `sandbox/botspace/` on the first mention (BOT.md + skills),
-// then freezes it in `data/{thread_key}/runtime.json`. `SYSTEM_PROMPT` env
+// per thread from `sandbox/botspace/` on the first mention (README.md + skills),
+// then freezes it in `data/{thread_key}/session.json`. `SYSTEM_PROMPT` env
 // var, if set, *prepends* to that composition; it no longer replaces it.
 
 // Clean slate for sandboxes on every boot — see CLAUDE.md: state-machine
@@ -46,7 +46,7 @@ const { socket, web, botUserId } = await connect(appToken, botToken);
 log.info('boot', `connected as bot user ${botUserId}`);
 
 // Announce any in-flight sessions that died with the previous process before
-// we start handling new events. listRuntimes() scans data/{thread_key}/runtime.json.
+// we start handling new events. listSessions() scans data/{thread_key}/session.json.
 await recoverInterruptedSessions(web).catch((err) => {
   log.warn('boot', `recovery failed: ${(err as Error).message}`);
 });

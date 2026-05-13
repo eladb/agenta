@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 function writeBot(text: string): void {
-  writeFileSync(join(botspace, 'BOT.md'), text);
+  writeFileSync(join(botspace, 'README.md'), text);
 }
 
 function writeSkill(slug: string, frontmatter: string, body = ''): void {
@@ -25,14 +25,14 @@ function writeSkill(slug: string, frontmatter: string, body = ''): void {
 }
 
 describe('buildSystemPrompt', () => {
-  test('BOT.md alone (no skills dir) -> output is BOT.md verbatim', async () => {
+  test('README.md alone (no skills dir) -> output is README.md verbatim', async () => {
     const body = 'You are a bot.\nBe nice.';
     writeBot(body);
     const out = await buildSystemPrompt(botspace, undefined);
     expect(out).toBe(body);
   });
 
-  test('BOT.md + two valid skills -> Available skills block with sorted JSON array', async () => {
+  test('README.md + two valid skills -> Available skills block with sorted JSON array', async () => {
     writeBot('BOT');
     // Write in reverse alphabetical order to verify path sorting.
     writeSkill('zeta', 'name: zeta\ndescription: zeta-desc');
@@ -87,7 +87,7 @@ describe('buildSystemPrompt', () => {
     ]);
   });
 
-  test('SYSTEM_PROMPT env prefix is prepended with a blank line before BOT.md', async () => {
+  test('SYSTEM_PROMPT env prefix is prepended with a blank line before README.md', async () => {
     writeBot('BOT body');
     const out = await buildSystemPrompt(botspace, 'PREFIX TEXT');
     expect(out).toBe('PREFIX TEXT\n\nBOT body');

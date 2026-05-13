@@ -74,7 +74,7 @@ beforeAll(async () => {
   // repo's actual `sandbox/botspace/` contents. Point handler.ts at it via
   // the BOTSPACE_DIR env var.
   botspaceDir = mkdtempSync(join(tmpdir(), 'agenta-skills-'));
-  writeFileSync(join(botspaceDir, 'BOT.md'), 'INITIAL BOT BODY');
+  writeFileSync(join(botspaceDir, 'README.md'), 'INITIAL BOT BODY');
   originalBotspaceEnv = process.env.BOTSPACE_DIR;
   process.env.BOTSPACE_DIR = botspaceDir;
 
@@ -115,9 +115,9 @@ test('two mentions in one thread -> system message is byte-identical (frozen pro
     t.startsWith(STUB_REPLY_PREFIX),
   );
 
-  // Mutate BOT.md between the two mentions — the frozen prompt for this
+  // Mutate README.md between the two mentions — the frozen prompt for this
   // thread must NOT pick up the change.
-  writeFileSync(join(botspaceDir, 'BOT.md'), 'MUTATED BOT BODY — should not appear');
+  writeFileSync(join(botspaceDir, 'README.md'), 'MUTATED BOT BODY — should not appear');
 
   const secondMentionText = `second-turn-${Date.now()}`;
   await mention(tester, agent.botUserId, channel, threadTs, secondMentionText);
@@ -145,20 +145,20 @@ test('two mentions in one thread -> system message is byte-identical (frozen pro
   expect(typeof sys1.content === 'string' && sys1.content).toContain('INITIAL BOT BODY');
   expect(typeof sys1.content === 'string' && sys1.content).not.toContain('MUTATED BOT BODY');
 
-  // And the frozen prompt is on disk in runtime.json.
-  const runtimePath = join(getDataDir(), threadKey(channel, threadTs), 'runtime.json');
+  // And the frozen prompt is on disk in session.json.
+  const runtimePath = join(getDataDir(), threadKey(channel, threadTs), 'session.json');
   const persisted = JSON.parse(readFileSync(runtimePath, 'utf8')) as {
     system_prompt?: string;
   };
   expect(persisted.system_prompt).toBe(sys1.content);
 }, 120_000);
 
-test('new thread after BOT.md edit -> system prompt reflects the new BOT.md', async () => {
+test('new thread after README.md edit -> system prompt reflects the new README.md', async () => {
   script.length = 0;
   calls.length = 0;
-  // Drop the mutated body into BOT.md (the previous test's mutation persists
+  // Drop the mutated body into README.md (the previous test's mutation persists
   // here intentionally; if it doesn't, re-write it).
-  writeFileSync(join(botspaceDir, 'BOT.md'), 'NEW BOT BODY for new thread');
+  writeFileSync(join(botspaceDir, 'README.md'), 'NEW BOT BODY for new thread');
 
   const seed = `e2e-skills-new-${Date.now()}`;
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, seed);
@@ -175,7 +175,7 @@ test('new thread after BOT.md edit -> system prompt reflects the new BOT.md', as
   expect(typeof sys.content === 'string' && sys.content).toContain('NEW BOT BODY for new thread');
 });
 
-test('/delete removes runtime.json (and the rest of the thread dir)', async () => {
+test('/delete removes session.json (and the rest of the thread dir)', async () => {
   script.length = 0;
   calls.length = 0;
 
@@ -186,8 +186,8 @@ test('/delete removes runtime.json (and the rest of the thread dir)', async () =
     t.startsWith(STUB_REPLY_PREFIX),
   );
 
-  const runtimePath = join(getDataDir(), threadKey(channel, threadTs), 'runtime.json');
-  // After the turn settles, runtime.json should exist (idle state with prompt).
+  const runtimePath = join(getDataDir(), threadKey(channel, threadTs), 'session.json');
+  // After the turn settles, session.json should exist (idle state with prompt).
   await waitFor(
     () => {
       try {
@@ -197,7 +197,7 @@ test('/delete removes runtime.json (and the rest of the thread dir)', async () =
         return false;
       }
     },
-    { what: 'runtime.json exists after first turn', timeoutMs: 20_000 },
+    { what: 'session.json exists after first turn', timeoutMs: 20_000 },
   );
 
   // Now /delete.
@@ -211,7 +211,7 @@ test('/delete removes runtime.json (and the rest of the thread dir)', async () =
         return true;
       }
     },
-    { what: 'runtime.json gone after /delete', timeoutMs: 20_000 },
+    { what: 'session.json gone after /delete', timeoutMs: 20_000 },
   );
 });
 

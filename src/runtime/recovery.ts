@@ -1,10 +1,10 @@
 import type { WebClient } from '@slack/web-api';
 import { log } from '../log';
 import { postInThread } from '../slack/post';
-import { clearRuntime, listRuntimes } from './runtime-store';
+import { clearSession, listSessions } from './session-store';
 import { decodeThreadKey } from './thread';
 
-// On boot, find any thread whose runtime.json says it was 'running' or
+// On boot, find any thread whose session.json says it was 'running' or
 // 'stopping' when the previous process died. Post a notice in the thread so
 // the user knows what happened, then clear the runtime entry so the thread
 // starts fresh on the next mention.
@@ -16,7 +16,7 @@ export async function recoverInterruptedSessions(web: WebClient): Promise<void> 
   // Idle entries exist for any thread that has ever been mentioned (the
   // frozen system_prompt lives there). Filter to non-idle so we only
   // announce real interruptions.
-  const interrupted = (await listRuntimes()).filter(
+  const interrupted = (await listSessions()).filter(
     ({ state }) => state.status === 'running' || state.status === 'stopping',
   );
   if (interrupted.length === 0) return;
@@ -25,7 +25,7 @@ export async function recoverInterruptedSessions(web: WebClient): Promise<void> 
     const decoded = decodeThreadKey(threadKey);
     if (!decoded) {
       log.warn('recovery', `[${threadKey}] could not decode threadKey; clearing entry`);
-      await clearRuntime(threadKey);
+      await clearSession(threadKey);
       continue;
     }
     const text = `agent restarted — previous turn was interrupted (was ${state.status})`;
@@ -36,6 +36,6 @@ export async function recoverInterruptedSessions(web: WebClient): Promise<void> 
       // the rest of recovery on a single bad thread.
       log.warn('recovery', `[${threadKey}] postInThread failed: ${(err as Error).message}`);
     }
-    await clearRuntime(threadKey);
+    await clearSession(threadKey);
   }
 }
