@@ -8,11 +8,16 @@ export const SANDBOX_IMAGE = 'agenta-sandbox:latest';
 export const SANDBOX_NETWORK = 'agenta-sandbox-net';
 const SANDBOX_PORT = 9000;
 const CONTAINER_PREFIX = 'agenta-';
+const VOLUME_PREFIX = 'agenta-vol-';
 
 const DOCKERFILE_DIR = join(import.meta.dir, '..', '..', 'sandbox');
 
 export function containerName(threadKey: string): string {
   return `${CONTAINER_PREFIX}${threadKey}`;
+}
+
+export function volumeName(threadKey: string): string {
+  return `${VOLUME_PREFIX}${threadKey}`;
 }
 
 type DockerCmdResult = { stdout: string; stderr: string; exitCode: number };
@@ -152,47 +157,35 @@ async function verifyAlive(name: string): Promise<boolean> {
   }
 }
 
-async function ensureContainer(threadKey: string): Promise<void> {
-  await Promise.all([ensureImage(), ensureNetwork()]);
-  const name = containerName(threadKey);
+async function volumeExists(name: string): Promise<boolean> {
+  const res = await dockerSpawn(['volume', 'inspect', name]);
+  return res.exitCode === 0;
+}
 
-  if (tokens.has(threadKey)) {
-    const inspect = await dockerSpawn(['inspect', '-f', '{{.State.Status}}', name]);
-    if (inspect.exitCode === 0 && inspect.stdout.trim() === 'running') return;
-    tokens.delete(threadKey);
+async function ensureVolume(name: string): Promise<void> {
+  if (await volumeExists(name)) return;
+  const res = await dockerSpawn(['volume', 'create', name]);
+  if (res.exitCode !== 0) {
+    throw new Error(`docker volume create ${name} failed: ${res.stderr || res.stdout}`);
   }
+}
 
-  // Re-hydration path: in-memory cache is empty, but disk may carry a record
-  // from a previous bot process. If it's live, adopt it; if dead or
-  // cross-provider, clear it and continue to provisioning.
-  const persisted = await loadSandbox(threadKey);
-  if (persisted) {
-    if (persisted.provider !== 'docker') {
-      log.warn(
-        'sandbox',
-        `[${threadKey}] persisted sandbox is ${persisted.provider}; SANDBOX_PROVIDER=docker — ignoring`,
-      );
-      await clearSandbox(threadKey);
-    } else if (persisted.container_name === name && (await verifyAlive(name))) {
-      tokens.set(threadKey, persisted.token);
-      log.info('sandbox', `re-hydrated container ${name} from session.json`);
-      return;
-    } else {
-      log.info(
-        'sandbox',
-        `[${threadKey}] persisted container ${persisted.container_name} not alive; re-provisioning`,
-      );
-      await clearSandbox(threadKey);
-    }
+// Best-effort: a volume removal can fail if some other container still holds
+// a reference (shouldn't happen in normal flow since we remove the container
+// first, but worth tolerating).
+async function removeVolume(name: string): Promise<void> {
+  const res = await dockerSpawn(['volume', 'rm', name]);
+  if (res.exitCode !== 0 && !/no such volume/i.test(res.stderr)) {
+    log.warn('sandbox', `docker volume rm ${name}: ${res.stderr.trim()}`);
   }
+}
 
-  const inspectStale = await dockerSpawn(['inspect', name]);
-  if (inspectStale.exitCode === 0) {
-    await dockerSpawn(['rm', '-fv', name]);
-  }
-
-  const token = randomToken();
-  const run = await dockerSpawn([
+// docker run flags shared between fresh provisioning and re-provisioning
+// against an existing volume. Splitting this out keeps the two ensure-paths
+// (cold start + dead-container/live-volume reattach) honestly identical
+// modulo the in-memory bookkeeping.
+function runArgs(name: string, vol: string, token: string): string[] {
+  return [
     'run',
     '-d',
     '--name',
@@ -207,9 +200,9 @@ async function ensureContainer(threadKey: string): Promise<void> {
       ? ['-e', `SANDBOX_EXEC_TIMEOUT_MS=${process.env.SANDBOX_EXEC_TIMEOUT_MS}`]
       : []),
     '-w',
-    '/workspace',
-    '--mount',
-    'type=volume,target=/workspace',
+    '/home/sandbox',
+    '-v',
+    `${vol}:/home/sandbox`,
     // entrypoint.sh wants NET_ADMIN for iptables, plus SETUID/SETGID/SETPCAP
     // for the setpriv-to-sandbox-user drop. All four are dropped from the
     // bounding set after setpriv runs, so the unprivileged process can
@@ -233,15 +226,102 @@ async function ensureContainer(threadKey: string): Promise<void> {
     '--cpus',
     '1.0',
     SANDBOX_IMAGE,
-  ]);
+  ];
+}
+
+async function ensureContainer(threadKey: string): Promise<void> {
+  await Promise.all([ensureImage(), ensureNetwork()]);
+  const name = containerName(threadKey);
+  const vol = volumeName(threadKey);
+
+  if (tokens.has(threadKey)) {
+    const inspect = await dockerSpawn(['inspect', '-f', '{{.State.Status}}', name]);
+    if (inspect.exitCode === 0 && inspect.stdout.trim() === 'running') return;
+    tokens.delete(threadKey);
+  }
+
+  // Re-hydration path: in-memory cache is empty, but disk may carry a record
+  // from a previous bot process.
+  //   - same-provider, live container → adopt it.
+  //   - same-provider, dead container, **live volume** → create a fresh
+  //     container attached to the existing volume. The thread's state
+  //     (workspace files, caches, the botspace seed) survives.
+  //   - cross-provider or fully-missing → clear and provision from scratch.
+  const persisted = await loadSandbox(threadKey);
+  if (persisted) {
+    if (persisted.provider !== 'docker') {
+      log.warn(
+        'sandbox',
+        `[${threadKey}] persisted sandbox is ${persisted.provider}; SANDBOX_PROVIDER=docker — ignoring`,
+      );
+      await clearSandbox(threadKey);
+    } else if (persisted.container_name === name && (await verifyAlive(name))) {
+      tokens.set(threadKey, persisted.token);
+      log.info('sandbox', `re-hydrated container ${name} from session.json`);
+      return;
+    } else if (persisted.volume_name && (await volumeExists(persisted.volume_name))) {
+      // Dead container, live volume. Create a fresh container attached to
+      // the existing volume; keep the previous token so anyone holding it
+      // (e.g. an in-flight HTTP client) can keep going. The entrypoint
+      // copy-if-missing seeder no-ops because README.md already exists in
+      // the volume from the first provision.
+      log.info(
+        'sandbox',
+        `[${threadKey}] persisted container ${persisted.container_name} dead; reattaching to volume ${persisted.volume_name}`,
+      );
+      const inspectStale = await dockerSpawn(['inspect', persisted.container_name]);
+      if (inspectStale.exitCode === 0) {
+        await dockerSpawn(['rm', '-fv', persisted.container_name]);
+      }
+      const token = persisted.token;
+      const run = await dockerSpawn(runArgs(name, persisted.volume_name, token));
+      if (run.exitCode !== 0) {
+        throw new Error(`docker run ${name} failed: ${run.stderr || run.stdout}`);
+      }
+      const hostPort = await readHostPort(name);
+      await waitForHealth(hostPort);
+      tokens.set(threadKey, token);
+      await saveSandbox(threadKey, {
+        provider: 'docker',
+        container_name: name,
+        token,
+        volume_name: persisted.volume_name,
+      });
+      log.info(
+        'sandbox',
+        `container ${name} ready on :${hostPort} (reattached volume ${persisted.volume_name})`,
+      );
+      return;
+    } else {
+      log.info(
+        'sandbox',
+        `[${threadKey}] persisted container ${persisted.container_name} not alive (and no live volume); re-provisioning`,
+      );
+      await clearSandbox(threadKey);
+    }
+  }
+
+  const inspectStale = await dockerSpawn(['inspect', name]);
+  if (inspectStale.exitCode === 0) {
+    await dockerSpawn(['rm', '-fv', name]);
+  }
+
+  await ensureVolume(vol);
+  const token = randomToken();
+  const run = await dockerSpawn(runArgs(name, vol, token));
   if (run.exitCode !== 0) {
     throw new Error(`docker run ${name} failed: ${run.stderr || run.stdout}`);
   }
   const hostPort = await readHostPort(name);
   await waitForHealth(hostPort);
   tokens.set(threadKey, token);
-  await saveSandbox(threadKey, { provider: 'docker', container_name: name, token });
-  log.info('sandbox', `container ${name} ready on :${hostPort}`);
+  await saveSandbox(threadKey, {
+    provider: 'docker',
+    container_name: name,
+    token,
+    volume_name: vol,
+  });
+  log.info('sandbox', `container ${name} ready on :${hostPort} (volume ${vol})`);
 }
 
 async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
@@ -275,6 +355,12 @@ async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
 
 async function remove(threadKey: string): Promise<void> {
   const name = containerName(threadKey);
+  // Resolve the volume name from the persisted record before clearing it.
+  // Falls back to the derived name (volumeName(threadKey)) so a /delete on
+  // a thread whose record was written before this change still nukes its
+  // legacy volume.
+  const persisted = await loadSandbox(threadKey);
+  const vol = persisted?.provider === 'docker' ? (persisted.volume_name ?? undefined) : undefined;
   tokens.delete(threadKey);
   await clearSandbox(threadKey).catch((err) => {
     log.warn('sandbox', `remove: clearSandbox(${threadKey}) failed: ${(err as Error).message}`);
@@ -285,6 +371,9 @@ async function remove(threadKey: string): Promise<void> {
   } else if (res.exitCode === 0) {
     log.info('sandbox', `container ${name} removed`);
   }
+  if (vol) {
+    await removeVolume(vol);
+  }
 }
 
 async function killAll(): Promise<void> {
@@ -294,32 +383,56 @@ async function killAll(): Promise<void> {
     return;
   }
   const ids = list.stdout.trim().split('\n').filter(Boolean);
-  if (ids.length === 0) {
-    tokens.clear();
-    await sweepAllSandboxes();
-    return;
+  if (ids.length > 0) {
+    const rm = await dockerSpawn(['rm', '-fv', ...ids]);
+    if (rm.exitCode !== 0) {
+      log.warn('sandbox', `killAll: rm failed: ${rm.stderr.trim()}`);
+    } else {
+      log.info('sandbox', `killed ${ids.length} sandbox container(s)`);
+    }
   }
-  const rm = await dockerSpawn(['rm', '-fv', ...ids]);
+
+  // Sweep every agenta-vol-<*> volume on the host. Container removal had to
+  // happen first since `volume rm` refuses to delete a volume in use.
+  const volList = await dockerSpawn(['volume', 'ls', '-q', '--filter', `name=^${VOLUME_PREFIX}`]);
+  if (volList.exitCode === 0) {
+    const volIds = volList.stdout.trim().split('\n').filter(Boolean);
+    if (volIds.length > 0) {
+      const rmv = await dockerSpawn(['volume', 'rm', ...volIds]);
+      if (rmv.exitCode !== 0) {
+        log.warn('sandbox', `killAll: volume rm failed: ${rmv.stderr.trim()}`);
+      } else {
+        log.info('sandbox', `killed ${volIds.length} sandbox volume(s)`);
+      }
+    }
+  }
+
   tokens.clear();
   await sweepAllSandboxes();
-  if (rm.exitCode !== 0) {
-    log.warn('sandbox', `killAll: rm failed: ${rm.stderr.trim()}`);
-  } else {
-    log.info('sandbox', `killed ${ids.length} sandbox container(s)`);
-  }
 }
 
-// Destroy by container name (the same id `listAll` returns). Best-effort.
+// Destroy by container OR volume name (the same id `listAll` returns). The
+// orphan reap mixes both kinds. We try container removal first; if it
+// reports "no such container" we fall back to volume removal so a stray
+// volume isn't left behind.
 async function destroyById(id: string): Promise<void> {
   const res = await dockerSpawn(['rm', '-fv', id]);
-  if (res.exitCode !== 0 && !/No such container/i.test(res.stderr)) {
-    log.warn('sandbox', `destroyById ${id}: ${res.stderr.trim()}`);
+  if (res.exitCode === 0) return;
+  if (/No such container/i.test(res.stderr)) {
+    if (id.startsWith(VOLUME_PREFIX)) {
+      await removeVolume(id);
+      return;
+    }
+    return;
   }
+  log.warn('sandbox', `destroyById ${id}: ${res.stderr.trim()}`);
 }
 
-// Returns the container names of every running-or-stopped sandbox container
-// this host owns (filter is identical to killAll). Used by the orphan reap.
+// Returns the container names AND volume names of every sandbox this host
+// owns. The orphan reap walks both: a volume without a matching session
+// record is just as much an orphan as a container without one.
 async function listAll(): Promise<Array<{ id: string }>> {
+  const out: Array<{ id: string }> = [];
   const list = await dockerSpawn([
     'ps',
     '-a',
@@ -330,13 +443,20 @@ async function listAll(): Promise<Array<{ id: string }>> {
   ]);
   if (list.exitCode !== 0) {
     log.warn('sandbox', `listAll: ps failed: ${list.stderr.trim()}`);
-    return [];
+  } else {
+    for (const id of list.stdout.trim().split('\n').filter(Boolean)) {
+      out.push({ id });
+    }
   }
-  return list.stdout
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .map((id) => ({ id }));
+  const volList = await dockerSpawn(['volume', 'ls', '-q', '--filter', `name=^${VOLUME_PREFIX}`]);
+  if (volList.exitCode !== 0) {
+    log.warn('sandbox', `listAll: volume ls failed: ${volList.stderr.trim()}`);
+  } else {
+    for (const id of volList.stdout.trim().split('\n').filter(Boolean)) {
+      out.push({ id });
+    }
+  }
+  return out;
 }
 
 function isReady(threadKey: string): boolean {

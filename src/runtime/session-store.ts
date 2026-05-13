@@ -12,9 +12,25 @@ import { dataRoot, ensureThreadDir, threadDir } from '../persistence/store';
 // survives container restart. Docker doesn't persist the host port because
 // Docker Desktop reassigns it on container restart — `docker port` is read
 // fresh on every getEndpoint call.
+//
+// The `volume_name` / `volume_id` field is the per-thread persistent volume
+// mounted at /home/sandbox. Optional for backwards-compat with already-
+// running sandboxes whose records were written before the volumes work
+// landed; those threads just won't have a volume to clean up. Fresh
+// provisions always populate it.
 export type SandboxRecord =
-  | { provider: 'docker'; container_name: string; token: string }
-  | { provider: 'fly'; machine_id: string; token: string };
+  | {
+      provider: 'docker';
+      container_name: string;
+      token: string;
+      volume_name?: string;
+    }
+  | {
+      provider: 'fly';
+      machine_id: string;
+      token: string;
+      volume_id?: string;
+    };
 
 // Per-thread runtime state. The file now persists even when the thread is
 // idle — it carries the frozen `system_prompt` across turns so each thread's

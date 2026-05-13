@@ -61,8 +61,9 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
       const files = e.payload.files ?? [];
       // Hint the model where the synced files live inside the sandbox. The
       // bot's lazy-sync pushes data/{tk}/attachments/<file_id>-<safeName>
-      // into /workspace/attachments/<file_id>-<safeName> so the model can
-      // read_file / bash over it without re-uploading.
+      // into attachments/<file_id>-<safeName> under the workspace
+      // (/home/sandbox) so the model can read_file / bash over it without
+      // re-uploading.
       const attachedSuffix = buildAttachedSuffix(files);
       if (files.length === 0) {
         messages.push({ role: 'user', content: text });

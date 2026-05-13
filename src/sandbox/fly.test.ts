@@ -34,6 +34,10 @@ let dataDir: string;
 beforeEach(() => {
   process.env.FLY_API_TOKEN = 'test-token';
   process.env.FLY_APP_NAME = 'test-app';
+  // Pin a region so we don't have to stub GET /apps/<app> in every test.
+  // Real config can still rely on the app's primary_region; the tests just
+  // bypass that lookup for simplicity.
+  process.env.FLY_REGION = 'iad';
   dataDir = mkdtempSync(join(tmpdir(), 'agenta-fly-'));
   process.env.AGENTA_DATA_DIR = dataDir;
 });
@@ -44,15 +48,22 @@ afterEach(() => {
   delete process.env.AGENTA_DATA_DIR;
   delete process.env.FLY_API_TOKEN;
   delete process.env.FLY_APP_NAME;
+  delete process.env.FLY_REGION;
   _resetFlyState();
 });
 
 describe('flyProvider', () => {
-  test('ensure: creates a machine, waits for /health, caches token+id', async () => {
+  test('ensure: creates a volume + machine, waits for /health, caches token+id', async () => {
     const { calls } = withStubFetch((call) => {
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'GET') {
         // listing for stale-machine check — empty.
         return new Response('[]', { status: 200 });
+      }
+      if (call.url.endsWith('/v1/apps/test-app/volumes') && call.method === 'POST') {
+        return new Response(
+          JSON.stringify({ id: 'vol_xyz', name: 'agenta_vol_thread_k', region: 'iad' }),
+          { status: 200 },
+        );
       }
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'POST') {
         return new Response(JSON.stringify({ id: 'machine-xyz' }), { status: 200 });
@@ -65,18 +76,41 @@ describe('flyProvider', () => {
 
     await flyProvider.ensure('thread-k');
 
-    const create = calls.find(
+    // Volume create happens BEFORE machine create — the machine config
+    // references the volume id in its mounts.
+    const volumeIdx = calls.findIndex(
+      (c) => c.method === 'POST' && c.url.endsWith('/v1/apps/test-app/volumes'),
+    );
+    const machineIdx = calls.findIndex(
       (c) => c.method === 'POST' && c.url.endsWith('/v1/apps/test-app/machines'),
     );
+    expect(volumeIdx).toBeGreaterThanOrEqual(0);
+    expect(machineIdx).toBeGreaterThan(volumeIdx);
+
+    const volumeCreate = calls[volumeIdx];
+    if (!volumeCreate) throw new Error('expected volume create call');
+    const volBody = volumeCreate.body as { name: string; region: string; size_gb: number };
+    expect(volBody.name).toMatch(/^agenta_vol_/);
+    expect(volBody.region).toBe('iad');
+    expect(volBody.size_gb).toBe(1);
+
+    const create = calls[machineIdx];
     if (!create) throw new Error('expected create call');
     expect(create.headers.Authorization).toBe('Bearer test-token');
     const body = create.body as {
       name: string;
-      config: { image: string; env: Record<string, string> };
+      config: {
+        image: string;
+        env: Record<string, string>;
+        mounts?: Array<{ volume: string; path: string }>;
+        region?: string;
+      };
     };
     expect(body.name).toMatch(/^agenta-/);
     expect(body.config.image).toBe('registry.fly.io/test-app:latest');
     expect(body.config.env.SANDBOX_TOKEN.length).toBeGreaterThan(16);
+    expect(body.config.region).toBe('iad');
+    expect(body.config.mounts).toEqual([{ volume: 'vol_xyz', path: '/home/sandbox' }]);
 
     // getEndpoint returns the cached token + the fly-force-instance-id header.
     const ep = await flyProvider.getEndpoint('thread-k');
@@ -88,11 +122,16 @@ describe('flyProvider', () => {
     expect(calls.some((c) => c.url === 'https://test-app.fly.dev/health')).toBe(true);
   });
 
-  test('remove: deletes the cached machine', async () => {
-    let machineDestroyed = false;
+  test('remove: deletes the machine AND its volume (machine first, then volume)', async () => {
+    const order: string[] = [];
     withStubFetch((call) => {
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'GET') {
         return new Response('[]', { status: 200 });
+      }
+      if (call.url.endsWith('/v1/apps/test-app/volumes') && call.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'vol_rm', name: 'v', region: 'iad' }), {
+          status: 200,
+        });
       }
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'POST') {
         return new Response(JSON.stringify({ id: 'machine-rm' }), { status: 200 });
@@ -101,7 +140,11 @@ describe('flyProvider', () => {
         return new Response('ok', { status: 200 });
       }
       if (call.url.includes('/machines/machine-rm') && call.method === 'DELETE') {
-        machineDestroyed = true;
+        order.push('machine');
+        return new Response('{}', { status: 200 });
+      }
+      if (call.url.includes('/volumes/vol_rm') && call.method === 'DELETE') {
+        order.push('volume');
         return new Response('{}', { status: 200 });
       }
       return new Response('unexpected', { status: 500 });
@@ -109,13 +152,16 @@ describe('flyProvider', () => {
 
     await flyProvider.ensure('rm-thread');
     await flyProvider.remove('rm-thread');
-    expect(machineDestroyed).toBe(true);
+    // Machine destroyed before volume (volume rm refuses while still
+    // mounted by a live machine — same shape on docker and fly).
+    expect(order).toEqual(['machine', 'volume']);
     // After remove, getEndpoint throws (no cached entry).
     await expect(flyProvider.getEndpoint('rm-thread')).rejects.toThrow(/not initialized/);
   });
 
-  test('killAll: destroys every machine whose name starts with agenta-', async () => {
-    const deleted: string[] = [];
+  test('killAll: destroys every agenta- machine AND every agenta_vol_ volume', async () => {
+    const deletedMachines: string[] = [];
+    const deletedVolumes: string[] = [];
     withStubFetch((call) => {
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'GET') {
         return new Response(
@@ -127,16 +173,32 @@ describe('flyProvider', () => {
           { status: 200 },
         );
       }
+      if (call.url.endsWith('/v1/apps/test-app/volumes') && call.method === 'GET') {
+        return new Response(
+          JSON.stringify([
+            { id: 'vol_1', name: 'agenta_vol_a', region: 'iad' },
+            { id: 'vol_2', name: 'agenta_vol_b', region: 'iad' },
+            { id: 'vol_3', name: 'unrelated', region: 'iad' },
+          ]),
+          { status: 200 },
+        );
+      }
       if (call.method === 'DELETE' && call.url.includes('/machines/')) {
         const id = call.url.split('/machines/')[1]?.split('?')[0];
-        if (id) deleted.push(id);
+        if (id) deletedMachines.push(id);
+        return new Response('{}', { status: 200 });
+      }
+      if (call.method === 'DELETE' && call.url.includes('/volumes/')) {
+        const id = call.url.split('/volumes/')[1]?.split('?')[0];
+        if (id) deletedVolumes.push(id);
         return new Response('{}', { status: 200 });
       }
       return new Response('unexpected', { status: 500 });
     });
 
     await flyProvider.killAll();
-    expect(deleted.sort()).toEqual(['m1', 'm2']);
+    expect(deletedMachines.sort()).toEqual(['m1', 'm2']);
+    expect(deletedVolumes.sort()).toEqual(['vol_1', 'vol_2']);
   });
 
   test('ensure throws when env vars missing', async () => {
@@ -144,10 +206,15 @@ describe('flyProvider', () => {
     await expect(flyProvider.ensure('k')).rejects.toThrow(/FLY_API_TOKEN/);
   });
 
-  test('ensure: writes session.json record with provider/machine_id/token', async () => {
+  test('ensure: writes session.json record with provider/machine_id/token/volume_id', async () => {
     withStubFetch((call) => {
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'GET') {
         return new Response('[]', { status: 200 });
+      }
+      if (call.url.endsWith('/v1/apps/test-app/volumes') && call.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'vol_persisted', name: 'v', region: 'iad' }), {
+          status: 200,
+        });
       }
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'POST') {
         return new Response(JSON.stringify({ id: 'machine-persisted' }), { status: 200 });
@@ -165,6 +232,7 @@ describe('flyProvider', () => {
     if (session?.sandbox?.provider !== 'fly') throw new Error('unreachable');
     expect(session.sandbox.machine_id).toBe('machine-persisted');
     expect(session.sandbox.token.length).toBeGreaterThan(16);
+    expect(session.sandbox.volume_id).toBe('vol_persisted');
   });
 
   test('ensure: re-hydrates from disk when in-memory state is empty and the machine is alive', async () => {
@@ -173,7 +241,12 @@ describe('flyProvider', () => {
     await writeSession(TK, {
       status: 'idle',
       updated_at: 't',
-      sandbox: { provider: 'fly', machine_id: 'pre-existing', token: 'pre-token' },
+      sandbox: {
+        provider: 'fly',
+        machine_id: 'pre-existing',
+        token: 'pre-token',
+        volume_id: 'vol_pre',
+      },
     });
 
     const created: string[] = [];
@@ -198,6 +271,81 @@ describe('flyProvider', () => {
     expect(ep.headers.Authorization).toBe('Bearer pre-token');
   });
 
+  test('ensure: dead machine + live volume reattaches a new machine to the same volume', async () => {
+    const TK = 'tk-revive';
+    await writeSession(TK, {
+      status: 'idle',
+      updated_at: 't',
+      system_prompt: 'preserve',
+      sandbox: {
+        provider: 'fly',
+        machine_id: 'old-dead-machine',
+        token: 'preserved-token',
+        volume_id: 'vol_live',
+      },
+    });
+
+    const createCalls: Array<Record<string, unknown>> = [];
+    withStubFetch((call) => {
+      // Liveness: dead.
+      if (
+        call.url.endsWith('/v1/apps/test-app/machines/old-dead-machine') &&
+        call.method === 'GET'
+      ) {
+        return new Response(JSON.stringify({ id: 'old-dead-machine', state: 'stopped' }), {
+          status: 200,
+        });
+      }
+      // Volume lookup: alive.
+      if (call.url.endsWith('/v1/apps/test-app/volumes/vol_live') && call.method === 'GET') {
+        return new Response(
+          JSON.stringify({ id: 'vol_live', name: 'agenta_vol_revive', region: 'iad' }),
+          { status: 200 },
+        );
+      }
+      // Stale machine cleanup (best-effort) — accept any DELETE.
+      if (call.method === 'DELETE' && call.url.includes('/machines/')) {
+        return new Response('{}', { status: 200 });
+      }
+      if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'GET') {
+        return new Response('[]', { status: 200 });
+      }
+      if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'POST') {
+        createCalls.push(call.body as Record<string, unknown>);
+        return new Response(JSON.stringify({ id: 'new-machine' }), { status: 200 });
+      }
+      if (call.url === 'https://test-app.fly.dev/health') {
+        return new Response('ok', { status: 200 });
+      }
+      // Volume create should NOT be called on the reattach path.
+      if (call.url.endsWith('/v1/apps/test-app/volumes') && call.method === 'POST') {
+        throw new Error('reattach should not create a new volume');
+      }
+      return new Response('unexpected', { status: 500 });
+    });
+
+    await flyProvider.ensure(TK);
+
+    // Exactly one machine create, attached to the existing volume id.
+    expect(createCalls).toHaveLength(1);
+    const created = createCalls[0] as {
+      name: string;
+      config: { mounts?: Array<{ volume: string; path: string }>; region?: string };
+    };
+    expect(created.config.mounts?.[0]?.volume).toBe('vol_live');
+    expect(created.config.mounts?.[0]?.path).toBe('/home/sandbox');
+    expect(created.config.region).toBe('iad');
+
+    const session = await readSession(TK);
+    if (session?.sandbox?.provider !== 'fly') throw new Error('unreachable');
+    expect(session.sandbox.machine_id).toBe('new-machine');
+    expect(session.sandbox.volume_id).toBe('vol_live');
+    // Token preserved so anyone holding the bearer header keeps working.
+    expect(session.sandbox.token).toBe('preserved-token');
+    // System prompt + other fields untouched.
+    expect(session.system_prompt).toBe('preserve');
+  });
+
   test('ensure: persisted record with non-fly provider is cleared and ignored', async () => {
     const TK = 'tk-cross';
     await writeSession(TK, {
@@ -209,6 +357,11 @@ describe('flyProvider', () => {
     withStubFetch((call) => {
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'GET') {
         return new Response('[]', { status: 200 });
+      }
+      if (call.url.endsWith('/v1/apps/test-app/volumes') && call.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'vol_fresh', name: 'v', region: 'iad' }), {
+          status: 200,
+        });
       }
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'POST') {
         return new Response(JSON.stringify({ id: 'fresh-machine' }), { status: 200 });
@@ -245,6 +398,11 @@ describe('flyProvider', () => {
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'GET') {
         return new Response('[]', { status: 200 });
       }
+      if (call.url.endsWith('/v1/apps/test-app/volumes') && call.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'vol_new', name: 'v', region: 'iad' }), {
+          status: 200,
+        });
+      }
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'POST') {
         return new Response(JSON.stringify({ id: 'new-machine' }), { status: 200 });
       }
@@ -276,6 +434,11 @@ describe('flyProvider', () => {
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'GET') {
         return new Response('[]', { status: 200 });
       }
+      if (call.url.endsWith('/v1/apps/test-app/volumes') && call.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'vol_rm2', name: 'v', region: 'iad' }), {
+          status: 200,
+        });
+      }
       if (call.url.endsWith('/v1/apps/test-app/machines') && call.method === 'POST') {
         return new Response(JSON.stringify({ id: 'm-rm' }), { status: 200 });
       }
@@ -283,6 +446,9 @@ describe('flyProvider', () => {
         return new Response('ok', { status: 200 });
       }
       if (call.url.includes('/machines/m-rm') && call.method === 'DELETE') {
+        return new Response('{}', { status: 200 });
+      }
+      if (call.url.includes('/volumes/vol_rm2') && call.method === 'DELETE') {
         return new Response('{}', { status: 200 });
       }
       return new Response('unexpected', { status: 500 });

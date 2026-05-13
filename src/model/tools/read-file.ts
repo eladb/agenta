@@ -10,7 +10,7 @@ export const readFileTool: Tool = {
     function: {
       name: 'read_file',
       description:
-        'Read a text file from the sandbox. Paths are resolved relative to /workspace. Output is truncated at 16 KB. Use offset+limit (1-indexed line numbers) to read part of a large file.',
+        'Read a text file from the sandbox. Paths are resolved relative to the workspace (~). Output is truncated at 16 KB. Use offset+limit (1-indexed line numbers) to read part of a large file.',
       parameters: {
         type: 'object',
         properties: {

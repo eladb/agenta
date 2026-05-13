@@ -15,7 +15,10 @@ export const glob: Tool = {
         type: 'object',
         properties: {
           pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.md".' },
-          path: { type: 'string', description: 'Path to search under (defaults to /workspace).' },
+          path: {
+            type: 'string',
+            description: 'Path to search under (defaults to the workspace ~).',
+          },
         },
         required: ['pattern'],
         additionalProperties: false,

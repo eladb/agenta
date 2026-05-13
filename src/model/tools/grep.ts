@@ -15,7 +15,10 @@ export const grep: Tool = {
         type: 'object',
         properties: {
           pattern: { type: 'string', description: 'Regex pattern to search for.' },
-          path: { type: 'string', description: 'Path to search under (defaults to /workspace).' },
+          path: {
+            type: 'string',
+            description: 'Path to search under (defaults to the workspace ~).',
+          },
           glob: { type: 'string', description: 'Glob to filter files, e.g. "**/*.py". Optional.' },
         },
         required: ['pattern'],

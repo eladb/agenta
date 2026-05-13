@@ -101,7 +101,7 @@ function scriptReply(message: AssistantMessage): void {
 }
 
 test.if(HAS_DOCKER)(
-  'inbound attachment is synced to /workspace/attachments and read_file sees it',
+  'inbound attachment is synced to ~/attachments and read_file sees it',
   async () => {
     script.length = 0;
     calls.length = 0;

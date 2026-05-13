@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { log } from '../log';
 import { attachmentsDir } from '../persistence/store';
 import { listSessions } from '../runtime/session-store';
-import { containerName, dockerProvider } from './docker';
+import { containerName, dockerProvider, volumeName } from './docker';
 import { flyProvider } from './fly';
 import type { SandboxEndpoint, SandboxProvider } from './provider';
 
@@ -51,6 +51,10 @@ export async function killAllSandboxContainers(): Promise<void> {
 // survive bot restart and are reattached on demand. This sweep only fires
 // when something has gone wrong outside the normal `/delete` flow (e.g.
 // `rm -rf data/` without going through the bot). Errors logged, not thrown.
+//
+// The sweep walks both layers — containers/machines AND volumes — because
+// each is owned independently and either can survive without the other.
+// A volume with no owning session is just as much an orphan as a container.
 export async function reapOrphanSandboxes(): Promise<void> {
   let owned: Array<{ id: string }>;
   try {
@@ -61,17 +65,21 @@ export async function reapOrphanSandboxes(): Promise<void> {
   }
   if (owned.length === 0) return;
   const sessions = await listSessions();
-  // For docker the provider's id is the container name (agenta-<threadKey>);
-  // we expect a session whose threadKey maps to that name AND whose record
-  // matches. For fly it's the machine id, which we match by record.machine_id.
+  // For docker the provider's id is either the container name
+  // (agenta-<threadKey>) or the volume name (agenta-vol-<threadKey>); we
+  // expect a session whose record cites that id directly. For fly it's the
+  // machine id or the volume id, both stored on the session record.
   const live = new Set<string>();
   for (const { threadKey, state } of sessions) {
     const sb = state.sandbox;
     if (!sb) continue;
     if (sb.provider === 'docker') {
       if (sb.container_name === containerName(threadKey)) live.add(sb.container_name);
+      const vol = sb.volume_name ?? volumeName(threadKey);
+      live.add(vol);
     } else if (sb.provider === 'fly') {
       live.add(sb.machine_id);
+      if (sb.volume_id) live.add(sb.volume_id);
     }
   }
   const orphans = owned.filter((o) => !live.has(o.id));
@@ -265,15 +273,17 @@ export async function writeBinary(
 }
 
 // Per-thread set of attachment basenames already pushed into the sandbox in
-// this process. Reset on container removal / killAll: a fresh sandbox needs a
-// fresh sync since /workspace is ephemeral. In-process only — restart is
-// fine because the new sandbox starts empty too.
+// this process. Reset on container removal / killAll: a fresh sandbox starts
+// without these mirrored files (the volume may already have them from a
+// previous turn, but the per-process map is cleared so we re-emit them as
+// idempotent writes when the in-memory state was lost).
 const syncedAttachments = new Map<string, Set<string>>();
 
 // Push every file under data/{threadKey}/attachments/ into the sandbox at
-// /workspace/attachments/<basename>, skipping files already synced in this
-// process. Called lazily on the first sandbox-touching tool call per turn
-// (after ensureContainer). Idempotent and safe to re-call.
+// attachments/<basename> (relative to the workspace = /home/sandbox),
+// skipping files already synced in this process. Called lazily on the first
+// sandbox-touching tool call per turn (after ensureContainer). Idempotent
+// and safe to re-call.
 export async function syncAttachmentsToSandbox(threadKey: string): Promise<{ synced: number }> {
   const dir = attachmentsDir(threadKey);
   let entries: string[];

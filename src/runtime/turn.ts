@@ -117,10 +117,11 @@ export async function runTurn(
           await updateChecklist();
         }
 
-        // Once the sandbox is ready, push any ingested Slack attachments into
-        // /workspace/attachments/ so the model's tools can read them. The
-        // sync helper is idempotent + per-process-cached, so re-calling on
-        // every sandbox tool call is cheap after the first run of the turn.
+        // Once the sandbox is ready, push any ingested Slack attachments
+        // into attachments/ under the workspace (/home/sandbox) so the
+        // model's tools can read them. The sync helper is idempotent +
+        // per-process-cached, so re-calling on every sandbox tool call is
+        // cheap after the first run of the turn.
         if (tool?.requiresSandbox && !provisionError) {
           try {
             const { synced } = await syncAttachmentsToSandbox(input.threadKey);
