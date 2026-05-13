@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
-import type { CallModel, Message } from '../../src/model/gateway';
+import { type CallModel, createCallModel, type Message } from '../../src/model/gateway';
+import { withGolden } from '../../src/model/golden';
 import { makeEventHandler } from '../../src/runtime/handler';
 import { threadKey as makeThreadKey } from '../../src/runtime/thread';
 import { removeContainer } from '../../src/sandbox';
@@ -207,4 +208,47 @@ export async function waitFor(
     await new Promise((r) => setTimeout(r, intervalMs));
   }
   throw new Error(`waitFor timed out${opts.what ? `: ${opts.what}` : ''}`);
+}
+
+// Resolve the golden file path for a test:
+//   tests/golden/<testFileBase>/<kebab-test-name>.jsonl
+// `testFile` should be the source filename (e.g. `skills-golden.test.ts`);
+// the helper strips `.test.ts` so the directory is just `<base>/`.
+export function goldenPathFor(testFile: string, testName: string): string {
+  const base = testFile.replace(/\.test\.ts$/, '');
+  const safe = testName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return join(import.meta.dir, '..', 'golden', base, `${safe}.jsonl`);
+}
+
+// Build a `CallModel` for an e2e test that wraps the real gateway in
+// record/replay logic via `withGolden`. The returned `flush` should be invoked
+// in the test's afterEach/afterAll so a record run actually persists the file.
+//
+// In replay mode the real gateway is never constructed — no `MODEL_API_KEY` is
+// required. In record mode the gateway is constructed lazily from env vars,
+// using the same defaults as `src/index.ts`.
+export function createGoldenCallModel(
+  testFile: string,
+  testName: string,
+): { callModel: CallModel; flush: () => Promise<void>; path: string } {
+  const path = goldenPathFor(testFile, testName);
+  // Construct the real gateway only when needed — in replay mode the inner
+  // CallModel never runs, so we don't want to demand MODEL_API_KEY there.
+  const lazyInner: CallModel = async (messages, opts) => {
+    const apiKey = process.env.MODEL_API_KEY ?? process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error('recording a golden requires MODEL_API_KEY (or ANTHROPIC_API_KEY) to be set');
+    }
+    const real = createCallModel({
+      apiKey,
+      baseUrl: process.env.MODEL_BASE_URL ?? 'https://api.anthropic.com/v1',
+      model: process.env.MODEL_NAME ?? 'claude-sonnet-4-6',
+    });
+    return real(messages, opts);
+  };
+  const { callModel, flush } = withGolden(lazyInner, path);
+  return { callModel, flush, path };
 }
