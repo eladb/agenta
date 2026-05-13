@@ -72,21 +72,38 @@ change:
   has no session.json, no-op on the disk side.
 - `killAll()` — provider-internal sweep (existing behavior). Also walks
   every session.json under `data/*/` and clears their `sandbox` fields.
-  This is now only called by tests and `/delete`-style paths, NOT on boot.
+  No longer called on boot. Still useful for tests; not part of the runtime
+  hot path.
+- `listAll()` — new method on the provider interface. Returns the IDs of
+  every sandbox this provider currently owns. Used by the orphan reap.
+  Docker: `docker ps --filter name=agenta- --format '{{.Names}}'`. Fly:
+  `GET /v1/apps/{app}/machines`.
 - `isReady(threadKey)` — stays sync, in-memory check, current semantics.
   Drives the "provisioning workspace…" UI which should still appear after a
   bot restart for the first sandbox-touching tool call (the re-hydration
   step has a non-trivial latency).
 
-### Boot-time wipe — gone
+### Boot-time wipe → orphan reap
 
-`src/index.ts` drops the `killAllSandboxContainers()` call. The comment
-explaining "Clean slate for sandboxes on every boot — state-machine
-recovery is deferred" is now stale; replace it with a one-line note that
-sandboxes are reattached lazily.
+`src/index.ts` drops the `killAllSandboxContainers()` call. Sandboxes now
+survive bot restarts; routine cleanup happens via `/delete`, which already
+removes the thread dir + the sandbox.
 
-`recoverInterruptedSessions(web)` is unchanged. It announces interrupted
-turns; the sandbox plumbing happens on the next mention, independently.
+In its place, a new boot-time **orphan reap**: scan provider-owned
+containers/machines (those matching the `agenta-*` prefix on Docker, or all
+machines in the configured Fly app), cross-reference against existing
+session.json sandbox records, and destroy any with no matching session.
+With persistent sessions this rarely fires — its purpose is to clean up
+after edge cases like `rm -rf data/` without `/delete`. Errors during reap
+are logged but don't block boot.
+
+Implementation hint: add `reapOrphanSandboxes()` exported from
+`src/sandbox/index.ts` that delegates to a new provider method
+`listAll(): Promise<Array<{id: string}>>` (or extend an existing one).
+Cross-reference against `listSessions()` from session-store. Run it once
+in `src/index.ts` after `connect()` but before `recoverInterruptedSessions`.
+
+`recoverInterruptedSessions(web)` is unchanged.
 
 ### Liveness verification
 
@@ -139,12 +156,15 @@ fresh without an extra round-trip.
   `ensure` first attempts re-hydration from disk; `getEndpoint` falls back
   to disk re-hydration when in-memory is empty; `remove` clears disk record;
   `killAll` sweeps every session.json's sandbox field. Add a `verifyAlive`
-  internal helper.
+  internal helper and the `listAll` method.
 - `src/sandbox/fly.ts` — same change shape as docker.ts.
-- `src/sandbox/index.ts` — no functional change. The provider abstraction
-  hides everything.
-- `src/index.ts` — drop the `killAllSandboxContainers()` call. Update the
-  comment.
+- `src/sandbox/index.ts` — add `reapOrphanSandboxes()` that calls the
+  provider's `listAll()`, cross-references with `listSessions()`, and
+  destroys any provider-owned sandboxes with no matching session record.
+  Errors logged, not thrown.
+- `src/index.ts` — drop the `killAllSandboxContainers()` call. Add a call
+  to the new `reapOrphanSandboxes()` after `connect()`. Update the comment
+  to explain: sandboxes persist; orphan reap is the safety net.
 - `CLAUDE.md` — add a Phase 14 note, update Phase 11 to remove the "boot
   wipe" detail, update "Known issues / gotchas" to mention sandbox
   persistence behavior.
@@ -172,6 +192,15 @@ fresh without an extra round-trip.
 - `src/sandbox/fly.test.ts` (extend, fetch-stubbed): analogous.
 - `src/runtime/session-store.test.ts` (extend): `setSandbox` atomic
   read-modify-write preserves `system_prompt` and `status`.
+
+Also: provider-level `listAll()` returns provisioned sandboxes only; unit-test
+docker.ts with a stub or live (Docker-gated) that creates one container,
+asserts it shows up in listAll, removes it, asserts it doesn't.
+
+`reapOrphanSandboxes` unit test (`src/sandbox/index.test.ts` if missing,
+else extend): stub the provider's `listAll` to return three IDs; stub
+`listSessions` to claim two of them have matching sandbox records; assert
+the third gets destroyed via the provider's `remove`-equivalent.
 
 ### E2E
 
@@ -230,6 +259,8 @@ Stop and report if any of these come up:
 - [ ] Bot restart + mention re-provisions when the container is dead.
 - [ ] session.json after `remove` preserves `system_prompt` and `status`.
 - [ ] No reference to `killAllSandboxContainers` in `src/index.ts`.
+- [ ] Boot calls `reapOrphanSandboxes()`; orphans created by hand
+  (`docker run` outside the bot, then bot starts) get cleaned.
 - [ ] CLAUDE.md updated.
 
 ## Worktree setup hint
