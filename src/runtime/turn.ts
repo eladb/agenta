@@ -221,32 +221,34 @@ export async function runTurn(
         if (injected.length > 0) {
           onMidTurnConsume?.();
           for (const ts of injected) await reactOn(ts, REACTION_STEERING);
+          // Render the would-be-final as an italic intermediate in the
+          // live message. The next iteration will overwrite it.
           if (text.length > 0) {
             messages.push({ role: 'assistant', content: text });
-            await postInThread(
-              web,
-              input.channel,
-              input.threadTs,
-              renderRound(text, []),
-            );
+            liveHeader = text;
+            liveLines = [];
+            await repaint();
           }
-          // Reset liveTs: there's no in-flight round message. Next
-          // iteration will lazily create one if it has tools.
-          liveTs = undefined;
           continue;
         }
+        // Truly final. Replace the live message with the clean final
+        // reply, or post fresh if the model never exercised a tool and
+        // there's no live message yet.
         const reply = text.length > 0 ? text : '(empty reply)';
-        await postInThread(web, input.channel, input.threadTs, reply);
+        if (liveTs) {
+          await editMessage(web, input.channel, liveTs, reply).catch(() => {});
+        } else {
+          await postInThread(web, input.channel, input.threadTs, reply);
+        }
         log.info('turn', `[${input.threadKey}] replied (${reply.length} chars)`);
         return;
       }
 
-      // Has tool calls → prepare a new round. We DON'T post the round
-      // message yet: Slack rejects empty posts, so when the model
-      // emitted no reasoning text and we have no tool bullets yet,
-      // there's nothing to render. We lazy-create the post inside the
-      // tool loop the first time renderRound returns non-empty content
-      // (a provisioning line, a tool bullet, etc.).
+      // Has tool calls → overwrite the live message with this round's
+      // content. One Slack message is shared across the whole turn:
+      // each round REPLACES the previous round's content in place.
+      // repaint() lazy-creates the message the first time we have
+      // something non-empty to show.
       liveHeader = text;
       liveLines = [];
 
@@ -410,14 +412,12 @@ export async function runTurn(
         for (const ts of injectedMid) await reactOn(ts, REACTION_STEERING);
       }
 
-      // End of round. Leave this round's message frozen. Clear liveTs
-      // so the next iteration lazy-creates its own round message — no
-      // intermediate placeholder posted while the next model call is
-      // in flight. The 🤔 reaction is the user-facing "still working".
+      // End of round. Do NOT clear liveTs — the same live message
+      // carries forward to the next iteration and gets overwritten
+      // there. While the next model call is in flight the message
+      // still shows THIS round's content; the 🤔 reaction is the
+      // user-facing "still working" signal.
       await repaint();
-      liveTs = undefined;
-      liveHeader = '';
-      liveLines = [];
     }
   } catch (err) {
     if (signal?.aborted) {

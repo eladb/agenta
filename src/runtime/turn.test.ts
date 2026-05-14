@@ -96,13 +96,14 @@ describe('runTurn with tools', () => {
     await runTurn(web, callModel, 'sys', input);
 
     expect(n).toBe(2);
-    // Final reply is posted as a fresh clean message (no 💭 marker).
-    const lastPost = posts[posts.length - 1]?.text;
-    expect(lastPost).toBe('the time is now');
+    // Single-message-per-turn: the live message is created on first
+    // tool render and EDITED to the final reply. No fresh post for
+    // the final.
+    const lastEdit = edits[edits.length - 1]?.text;
+    expect(lastEdit).toBe('the time is now');
     // Final reply is plain — no leading arrow marker.
-    expect(lastPost?.startsWith('→')).toBe(false);
-    // At least one intermediate edit contains the tool's describe() label
-    // as plain text (no bullet, no backticks under the new layout).
+    expect(lastEdit?.startsWith('→')).toBe(false);
+    // At least one intermediate edit contains the tool's describe() label.
     expect(edits.some((e) => e.text.includes('get current time'))).toBe(true);
 
     const events = await readEvents<{
@@ -158,11 +159,11 @@ describe('runTurn with tools', () => {
     expect(posts[0]?.text.includes('• ')).toBe(false);
     expect(posts[0]?.text.includes('`')).toBe(false);
 
-    // Final reply is posted as a fresh plain message (no leading marker).
-    // No placeholder is posted any more, so nothing is deleted.
-    const lastPost = posts[posts.length - 1]?.text;
-    expect(lastPost).toBe('final reply');
-    expect(lastPost?.startsWith('→')).toBe(false);
+    // Single-message-per-turn: final reply is an EDIT to the live
+    // message (no new post, no delete).
+    const lastEdit = edits[edits.length - 1]?.text;
+    expect(lastEdit).toBe('final reply');
+    expect(lastEdit?.startsWith('→')).toBe(false);
     expect(deletes.length).toBe(0);
   });
 
@@ -244,8 +245,9 @@ describe('runTurn with tools', () => {
 
     await runTurn(web, callModel, 'sys', input);
 
-    // Final reply lands as a fresh post (not an edit) after the tool error.
-    expect(posts[posts.length - 1]?.text).toBe('I cannot do that, sorry');
+    // Single-message-per-turn: final reply is an EDIT to the live
+    // message that was lazy-created during tool processing.
+    expect(edits[edits.length - 1]?.text).toBe('I cannot do that, sorry');
 
     const events = await readEvents<{ type: string; payload: Record<string, unknown> }>('k1');
     const trs = events.filter((e) => e.type === 'tool_result');
@@ -294,8 +296,8 @@ describe('runTurn with tools', () => {
     expect(edits.some((e) => e.text.includes('workspace ready'))).toBe(false);
   });
 
-  test('abort signal during second model call posts "stopped" to the thread', async () => {
-    const { web, posts } = makeWebStub();
+  test('abort signal during second model call edits the live message to "stopped"', async () => {
+    const { web, edits } = makeWebStub();
     const controller = new AbortController();
     let n = 0;
     const callModel: CallModel = async (_messages, opts) => {
@@ -328,10 +330,10 @@ describe('runTurn with tools', () => {
     controller.abort();
     await run;
 
-    // After iteration 1 completes, liveTs is cleared (no inter-round
-    // placeholder). On abort during iteration 2's model call there's
-    // no live message to edit, so "stopped" lands as a fresh post.
-    expect(posts.some((p) => p.text === 'stopped')).toBe(true);
+    // Single-message-per-turn: the live message survives across
+    // iterations, so on abort during iteration 2 we edit it to
+    // "stopped" (no fresh post).
+    expect(edits.some((e) => e.text === 'stopped')).toBe(true);
   });
 
   test('steering: mid-turn user message is injected before the next model call', async () => {
@@ -464,7 +466,7 @@ describe('runTurn with tools', () => {
   });
 
   test('steering on no-tool-calls path: would-be-final becomes intermediate, loop continues', async () => {
-    const { web, posts } = makeWebStub();
+    const { web, edits, posts } = makeWebStub();
     let n = 0;
     const callModel: CallModel = async () => {
       n++;
@@ -493,13 +495,20 @@ describe('runTurn with tools', () => {
 
     await runTurn(web, callModel, 'sys', input);
 
-    // The almost-final text should NOT have been posted as a clean final
-    // message — only the post-steering reply is.
-    const cleanFinals = posts.filter((p) => p.text === 'almost-final answer here');
-    expect(cleanFinals.length).toBe(0);
-    // The actual final after steering is posted clean.
-    const finalPost = posts[posts.length - 1]?.text;
-    expect(finalPost).toBe('final after steering');
+    // The would-be-final text was rendered into the live message as
+    // an italic intermediate. Because the live message didn't exist
+    // yet (no tools ran), it gets lazy-POSTED with the italic form
+    // here, then EDITED to the final reply on the next iteration.
+    const sawIntermediate =
+      posts.some((p) => p.text.includes('almost-final answer here')) ||
+      edits.some((e) => e.text.includes('almost-final answer here'));
+    expect(sawIntermediate).toBe(true);
+    // The actual final after steering is the last edit on the live
+    // message.
+    const finalEdit = edits[edits.length - 1]?.text;
+    expect(finalEdit).toBe('final after steering');
+    // No clean final POST: the live message is edited in place.
+    expect(posts.some((p) => p.text === 'final after steering')).toBe(false);
   });
 
   test('steering ignores /stop and /delete commands', async () => {
