@@ -7,13 +7,7 @@ import type { AgentaEvent } from '../persistence/events';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { readEvents } from '../persistence/store';
 import { ensureContainer, isSandboxReady, syncAttachmentsToSandbox } from '../sandbox';
-import {
-  addReaction,
-  deleteMessage,
-  editMessage,
-  postInThread,
-  removeReaction,
-} from '../slack/post';
+import { addReaction, editMessage, postInThread, removeReaction } from '../slack/post';
 import { parseCommand } from './commands';
 import { redact } from './redact';
 
@@ -37,8 +31,6 @@ const LIVE_EDIT_INTERVAL_MS = 800;
 // the round message is just the tool's rendering. No `thinking…` persists.
 //
 // Final replies (no tool_calls) post as a fresh plain message.
-const PLACEHOLDER = '*thinking…*';
-
 // Slack emoji shortcodes for in-flight UX. Reactions are added to the
 // originating user message(s) so the user sees at a glance what the
 // bot is doing, and removed when the turn finishes.
@@ -71,8 +63,6 @@ function liveLine(preview: string): string {
 }
 
 function renderRound(headerText: string, lines: string[]): string {
-  // headerText empty + no lines = the pre-model placeholder.
-  if (headerText.length === 0 && lines.length === 0) return PLACEHOLDER;
   const parts: string[] = [];
   if (headerText.length > 0) {
     // Italic the round header so intermediate reasoning reads as an
@@ -140,11 +130,22 @@ export async function runTurn(
   let liveHeader = '';
   let liveLines: string[] = [];
 
-  const repaint = (): Promise<void> => {
-    if (!liveTs) return Promise.resolve();
-    return editMessage(web, input.channel, liveTs, renderRound(liveHeader, liveLines)).catch(
-      () => {},
-    );
+  // Render the current round into Slack. Lazy: posts the message the
+  // first time renderRound returns non-empty content, edits thereafter.
+  // No-op when there's still nothing to show (empty header + empty
+  // lines) — Slack rejects empty posts, and there's nothing to update.
+  const repaint = async (): Promise<void> => {
+    const body = renderRound(liveHeader, liveLines);
+    if (body.length === 0) return;
+    if (liveTs) {
+      await editMessage(web, input.channel, liveTs, body).catch(() => {});
+    } else {
+      try {
+        liveTs = await postInThread(web, input.channel, input.threadTs, body);
+      } catch {
+        // best-effort; the next repaint will retry
+      }
+    }
   };
 
   // Track every reaction added so we can remove them all on turn end —
@@ -161,14 +162,11 @@ export async function runTurn(
     reactionsAdded.length = 0;
   };
 
-  // Initial placeholder so the user sees something land the moment they
-  // mention the bot. Gets overwritten by the first round's content.
-  liveTs = await postInThread(
-    web,
-    input.channel,
-    input.threadTs,
-    renderRound(liveHeader, liveLines),
-  );
+  // No pre-model placeholder. The 🤔 reaction on the user's mention
+  // (added inside the try block below) is the "I'm working on it"
+  // signal; we only post a round message when we have concrete
+  // content (a model response that emits tool calls, or an
+  // intermediate steered text).
 
   try {
     const messages: Message[] = await buildMessages(input.threadKey, systemPrompt);
@@ -215,51 +213,42 @@ export async function runTurn(
       });
 
       // No tool calls → model thinks it's done. But if user input landed
-      // mid-round, treat this as an intermediate response: render it as a
-      // round message (italic header, no tool block), inject the new user
-      // messages, and continue the loop so the model sees them.
+      // mid-round, treat this as an intermediate response: post it as a
+      // standalone italic round message, inject the new user messages,
+      // and continue the loop so the model sees them.
       if (toolCalls.length === 0) {
-        // Inject any new user messages that arrived during the round.
         const injected = await injectSteering(input.threadKey, messages, consumed);
         if (injected.length > 0) {
           onMidTurnConsume?.();
           for (const ts of injected) await reactOn(ts, REACTION_STEERING);
-          // Show the would-be-final text as an intermediate round header.
-          // If the model emitted nothing, still post the placeholder + new
-          // round (rare but possible).
           if (text.length > 0) {
             messages.push({ role: 'assistant', content: text });
-            liveHeader = text;
-            liveLines = [];
-            await repaint();
+            await postInThread(
+              web,
+              input.channel,
+              input.threadTs,
+              renderRound(text, []),
+            );
           }
-          // Finalize this round, start a new placeholder for the next.
-          liveHeader = '';
-          liveLines = [];
-          liveTs = await postInThread(
-            web,
-            input.channel,
-            input.threadTs,
-            renderRound(liveHeader, liveLines),
-          );
+          // Reset liveTs: there's no in-flight round message. Next
+          // iteration will lazily create one if it has tools.
+          liveTs = undefined;
           continue;
         }
         const reply = text.length > 0 ? text : '(empty reply)';
-        if (liveTs) {
-          await deleteMessage(web, input.channel, liveTs);
-          liveTs = undefined;
-        }
         await postInThread(web, input.channel, input.threadTs, reply);
         log.info('turn', `[${input.threadKey}] replied (${reply.length} chars)`);
         return;
       }
 
-      // Start of a new round. Set the header (empty if model emitted no
-      // reasoning text — we don't want a stranded "thinking…" line
-      // sitting above the tool) and reset the lines list.
+      // Has tool calls → prepare a new round. We DON'T post the round
+      // message yet: Slack rejects empty posts, so when the model
+      // emitted no reasoning text and we have no tool bullets yet,
+      // there's nothing to render. We lazy-create the post inside the
+      // tool loop the first time renderRound returns non-empty content
+      // (a provisioning line, a tool bullet, etc.).
       liveHeader = text;
       liveLines = [];
-      await repaint();
 
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
 
@@ -421,17 +410,14 @@ export async function runTurn(
         for (const ts of injectedMid) await reactOn(ts, REACTION_STEERING);
       }
 
-      // End of round. Leave this round's message frozen and post a fresh
-      // placeholder for the next round.
+      // End of round. Leave this round's message frozen. Clear liveTs
+      // so the next iteration lazy-creates its own round message — no
+      // intermediate placeholder posted while the next model call is
+      // in flight. The 🤔 reaction is the user-facing "still working".
       await repaint();
+      liveTs = undefined;
       liveHeader = '';
       liveLines = [];
-      liveTs = await postInThread(
-        web,
-        input.channel,
-        input.threadTs,
-        renderRound(liveHeader, liveLines),
-      );
     }
   } catch (err) {
     if (signal?.aborted) {

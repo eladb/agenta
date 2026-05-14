@@ -76,7 +76,7 @@ describe('session state machine', () => {
 
   test('session.json flips to stopping when /stop fires mid-turn', async () => {
     const { readSession } = await import('./session-store');
-    const { web, edits } = makeWebStub();
+    const { web, edits, posts } = makeWebStub();
     const callModel: CallModel = async (_msgs, opts) => {
       await new Promise<void>((_resolve, reject) => {
         opts?.signal?.addEventListener('abort', () =>
@@ -98,7 +98,11 @@ describe('session state machine', () => {
     const after = await readSession('k1');
     expect(after?.status).toBe('idle');
     expect(after?.system_prompt).toBe('sys');
-    expect(edits.some((e) => e.text === 'stopped')).toBe(true);
+    // "stopped" lands as a post (or an edit if a round message exists);
+    // either way it surfaces in the thread.
+    const stoppedSeen =
+      edits.some((e) => e.text === 'stopped') || posts.some((p) => p.text === 'stopped');
+    expect(stoppedSeen).toBe(true);
   });
 
   test('queues a concurrent mention and runs one extra turn after current', async () => {
@@ -127,7 +131,7 @@ describe('session state machine', () => {
   });
 
   test('signalStop aborts the in-flight turn', async () => {
-    const { web, edits } = makeWebStub();
+    const { web, edits, posts } = makeWebStub();
     let aborted = false;
     const callModel: CallModel = async (_messages, opts) => {
       await new Promise<void>((_resolve, reject) => {
@@ -143,7 +147,13 @@ describe('session state machine', () => {
     await signalStop(web, 'C', '1.0', 'k1');
     await run;
     expect(aborted).toBe(true);
-    expect(edits.some((e) => e.text === 'stopped')).toBe(true);
+    // "stopped" lands as a post (no live message exists at abort time
+    // since the round-message is lazy-created and we haven't seen a
+    // model response yet) — or, when an iteration has rendered, as an
+    // edit. Either surface is acceptable; both put it in the thread.
+    const stoppedSeen =
+      edits.some((e) => e.text === 'stopped') || posts.some((p) => p.text === 'stopped');
+    expect(stoppedSeen).toBe(true);
     expect(getStatus('k1')).toBe('idle');
   });
 

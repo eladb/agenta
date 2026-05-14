@@ -149,25 +149,21 @@ describe('runTurn with tools', () => {
 
     await runTurn(web, callModel, 'sys', input);
 
-    // First post is the round-1 placeholder: italicized 'thinking…'.
-    // mdToMrkdwn converts the standard *italic* form to Slack's _italic_.
-    expect(posts[0]?.text).toBe('_thinking…_');
+    // No pre-model placeholder is posted any more — the 🤔 reaction is
+    // the "I'm working on it" signal. The first thing in the thread is
+    // the round-1 message itself, with the tool's label as plain text
+    // (no bullet, no backticks, no leading "thinking…").
+    expect(posts[0]?.text.includes('thinking')).toBe(false);
+    expect(posts[0]?.text).toContain('get current time');
+    expect(posts[0]?.text.includes('• ')).toBe(false);
+    expect(posts[0]?.text.includes('`')).toBe(false);
 
-    // When the model emits no reasoning text, the placeholder is REPLACED
-    // by the tool rendering — no stranded "thinking…" line above the tool.
-    // The tool appears as plain text (no bullet, no backticks).
-    const toolEdit = edits.find((e) => e.text.includes('get current time'));
-    expect(toolEdit).toBeDefined();
-    expect(toolEdit?.text.includes('thinking')).toBe(false);
-    expect(toolEdit?.text.includes('• ')).toBe(false);
-    expect(toolEdit?.text.includes('`')).toBe(false);
-
-    // Final reply is posted as a fresh plain message (no arrow marker) and
-    // the in-flight placeholder was deleted.
+    // Final reply is posted as a fresh plain message (no leading marker).
+    // No placeholder is posted any more, so nothing is deleted.
     const lastPost = posts[posts.length - 1]?.text;
     expect(lastPost).toBe('final reply');
     expect(lastPost?.startsWith('→')).toBe(false);
-    expect(deletes.length).toBeGreaterThan(0);
+    expect(deletes.length).toBe(0);
   });
 
   test('multiple tool_calls in one response are executed in order', async () => {
@@ -298,8 +294,8 @@ describe('runTurn with tools', () => {
     expect(edits.some((e) => e.text.includes('workspace ready'))).toBe(false);
   });
 
-  test('abort signal during second model call edits checklist to "stopped"', async () => {
-    const { web, edits } = makeWebStub();
+  test('abort signal during second model call posts "stopped" to the thread', async () => {
+    const { web, posts } = makeWebStub();
     const controller = new AbortController();
     let n = 0;
     const callModel: CallModel = async (_messages, opts) => {
@@ -332,7 +328,10 @@ describe('runTurn with tools', () => {
     controller.abort();
     await run;
 
-    expect(edits[edits.length - 1]?.text).toBe('stopped');
+    // After iteration 1 completes, liveTs is cleared (no inter-round
+    // placeholder). On abort during iteration 2's model call there's
+    // no live message to edit, so "stopped" lands as a fresh post.
+    expect(posts.some((p) => p.text === 'stopped')).toBe(true);
   });
 
   test('steering: mid-turn user message is injected before the next model call', async () => {
