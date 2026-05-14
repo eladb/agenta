@@ -60,11 +60,11 @@ function renderRound(headerText: string, lines: string[]): string {
   if (headerText.length === 0 && lines.length === 0) return PLACEHOLDER;
   const parts: string[] = [];
   if (headerText.length > 0) {
-    // Bold the round header so intermediate reasoning is visually
-    // distinguishable from the final reply (which is plain text in a
-    // separate message). Authored as standard markdown; mdToMrkdwn
-    // translates **bold** → *bold* at the post boundary.
-    parts.push(`**${headerText}**`);
+    // Italic the round header so intermediate reasoning reads as an
+    // aside, distinct from the final reply which posts as plain text
+    // in a separate message. Authored as standard markdown;
+    // mdToMrkdwn translates *italic* → _italic_ at the post boundary.
+    parts.push(`*${headerText}*`);
     if (lines.length > 0) parts.push(''); // blank line between header and tool blocks
   }
   parts.push(...lines);
