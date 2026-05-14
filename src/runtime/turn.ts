@@ -19,16 +19,15 @@ const LIVE_PREVIEW_LEN = 150;
 const LIVE_EDIT_INTERVAL_MS = 800;
 
 // Visual conventions for an intermediate round message:
-//   - `→ {text}` at the top, only when the model emitted reasoning text
-//   - bash blocks shown as fenced code (` ``` `) for monospace + multi-line output
-//   - other tools shown as inline code (`tool args`) + a `→ result` follow-up
-//   - status lines (provisioning workspace, attachments synced) shown as
-//     plain italics so they read as informational, not equal weight to tools
+//   - The model's reasoning text at the top, plain (no prefix).
+//   - Tool blocks below — a plain label line + a result line (`→ result`).
+//   - Status lines (provisioning workspace, attachments synced) shown as
+//     plain italics so they read as informational, not equal weight to
+//     tool actions.
 // When the model emits no reasoning text, the header is omitted entirely —
 // the round message is just the tool's rendering. No `thinking…` persists.
 //
-// Final replies (no tool_calls) post as a fresh plain message — no marker.
-const HEADER_MARKER = '→ ';
+// Final replies (no tool_calls) post as a fresh plain message.
 const PLACEHOLDER = 'Thinking…';
 
 function toolLabel(tc: ToolCall): string {
@@ -61,7 +60,7 @@ function renderRound(headerText: string, lines: string[]): string {
   if (headerText.length === 0 && lines.length === 0) return PLACEHOLDER;
   const parts: string[] = [];
   if (headerText.length > 0) {
-    parts.push(`${HEADER_MARKER}${headerText}`);
+    parts.push(headerText);
     if (lines.length > 0) parts.push(''); // blank line between header and tool blocks
   }
   parts.push(...lines);
