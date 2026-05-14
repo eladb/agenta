@@ -84,13 +84,19 @@ function normalize(
     const msg = event.message;
     if (!msg?.ts) return null;
     if (msg.user === botUserId) return null;
+    // Drop no-op edits where the text didn't actually change. Slack
+    // re-emits message_changed for metadata-only updates (e.g. link
+    // unfurl enrichment); we don't want those polluting the JSONL.
+    const newText = msg.text ?? '';
+    const prevText = event.previous_message?.text ?? '';
+    if (newText === prevText) return null;
     return {
       kind: 'edit',
       eventId,
       channel: event.channel,
       threadTs: msg.thread_ts ?? msg.ts,
       editedTs: msg.ts,
-      newText: msg.text ?? '',
+      newText,
       previousText: event.previous_message?.text,
       user: msg.user ?? 'unknown',
     };
