@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
 import { threadKey } from '../../src/runtime/thread';
 import { containerName } from '../../src/sandbox';
@@ -8,6 +7,7 @@ import {
   type Agent,
   cleanupTempDataDir,
   deleteThread,
+  DOCKER_PROVIDER_ACTIVE,
   mention,
   requireEnv,
   setupTempDataDir,
@@ -23,16 +23,9 @@ import {
 // already on `sandbox-persistence-dead.test.ts` (which exercises the
 // dead-container + live-volume reattach path): here we focus on the
 // `/delete` lifecycle, making sure the named volume is destroyed alongside
-// the container so a `/delete` truly wipes the thread.
+// the container so a `/delete` truly wipes the thread. docker-only.
 
-function dockerAvailable(): boolean {
-  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
-    stdio: 'ignore',
-  });
-  return r.status === 0;
-}
-
-const HAS_DOCKER = dockerAvailable();
+const HAS_DOCKER = DOCKER_PROVIDER_ACTIVE;
 
 let channel: string;
 let tester: Tester;

@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
 import { threadKey } from '../../src/runtime/thread';
 import { containerName } from '../../src/sandbox';
@@ -8,6 +7,7 @@ import {
   type Agent,
   cleanupTempDataDir,
   deleteThread,
+  DOCKER_PROVIDER_ACTIVE,
   mention,
   requireEnv,
   setupTempDataDir,
@@ -19,14 +19,10 @@ import {
   waitForReply,
 } from './helpers';
 
-function dockerAvailable(): boolean {
-  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
-    stdio: 'ignore',
-  });
-  return r.status === 0;
-}
-
-const HAS_DOCKER = dockerAvailable();
+// These tests assert docker-specific behavior (egress block via iptables,
+// container teardown, uid=1000 checks). Skip when the configured sandbox
+// provider isn't docker — the same assertions don't hold on Fly.
+const HAS_DOCKER = DOCKER_PROVIDER_ACTIVE;
 
 let agent: Agent;
 let tester: Tester;

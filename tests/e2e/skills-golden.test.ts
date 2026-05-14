@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { dataRoot, messagesPath } from '../../src/persistence/store';
@@ -10,6 +9,7 @@ import {
   cleanupTempDataDir,
   createGoldenCallModel,
   deleteThread,
+  DOCKER_PROVIDER_ACTIVE,
   mention,
   requireEnv,
   setupTempDataDir,
@@ -20,22 +20,12 @@ import {
   waitForReply,
 } from './helpers';
 
-function dockerAvailable(): boolean {
-  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
-    stdio: 'ignore',
-  });
-  return r.status === 0;
-}
-
 // The recorded scenario expects a sandbox provider that can run python +
 // matplotlib reliably. Docker (with the local agenta-sandbox image) fits the
 // bill; Fly trial machines may auto-stop or have DNS/egress issues that flake
-// the live share_file step. The test is gated on both docker being available
-// AND the resolved provider being docker — set `SANDBOX_PROVIDER=docker`
-// before `bun test` to run it.
-const SANDBOX_PROVIDER = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
-const HAS_DOCKER = dockerAvailable();
-const ENABLED = HAS_DOCKER && SANDBOX_PROVIDER === 'docker';
+// the live share_file step. Set `SANDBOX_PROVIDER=docker` before `bun test`
+// to run it.
+const ENABLED = DOCKER_PROVIDER_ACTIVE;
 
 let agent: Agent;
 let tester: Tester;

@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
@@ -10,6 +9,7 @@ import {
   type Agent,
   cleanupTempDataDir,
   deleteThread,
+  DOCKER_PROVIDER_ACTIVE,
   getDataDir,
   mention,
   requireEnv,
@@ -28,15 +28,10 @@ import {
 // agent A's container should still be there — that's the value-add of
 // per-thread persistent volumes over the original sandbox-persistence work
 // (which only handled the bot-restart case, not container replacement).
+// docker-only: uses docker-specific `rm` to simulate the dead-container
+// state.
 
-function dockerAvailable(): boolean {
-  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
-    stdio: 'ignore',
-  });
-  return r.status === 0;
-}
-
-const HAS_DOCKER = dockerAvailable();
+const HAS_DOCKER = DOCKER_PROVIDER_ACTIVE;
 
 let channel: string;
 let tester: Tester;

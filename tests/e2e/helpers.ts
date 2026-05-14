@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,22 @@ import { threadKey as makeThreadKey } from '../../src/runtime/thread';
 import { removeContainer } from '../../src/sandbox';
 import { connect } from '../../src/slack/connect';
 import { listen } from '../../src/slack/events';
+
+// True iff `docker` is installed AND the sandbox layer is configured to
+// use it. Docker-specific assertions (egress block via iptables,
+// container teardown, named volumes, uid checks) only make sense when
+// docker is the active provider; on Fly the implementations differ and
+// these tests will fail spuriously. Standardized here so every test
+// file gates on the same condition. Resolve at module load so test.if
+// receives a boolean.
+function dockerInstalled(): boolean {
+  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
+    stdio: 'ignore',
+  });
+  return r.status === 0;
+}
+const _activeProvider = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
+export const DOCKER_PROVIDER_ACTIVE = dockerInstalled() && _activeProvider === 'docker';
 
 export const STUB_REPLY_PREFIX = 'stub: ';
 
