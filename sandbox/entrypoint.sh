@@ -34,11 +34,16 @@ iptables -P OUTPUT DROP
 # the botspace seed. Idempotent: on subsequent boots README.md is already
 # there and we skip the copy, preserving any state the thread has built up.
 #
-# Important: --cap-drop ALL strips CAP_DAC_OVERRIDE, so root can't actually
-# read/write inside /home/sandbox (owned 0750 sandbox:sandbox). Run the cp
-# as the sandbox user via setpriv (no need to grant the read-only seed dir
-# extra permissions). The /opt/botspace tree was COPY'd --chown=sandbox at
-# image-build time, and `cp -a` preserves ownership/mode.
+# Fly mounts fresh volumes as root:root mode 0755, which masks the
+# Dockerfile's `useradd --create-home` ownership. chown the mount back to
+# sandbox so subsequent operations work. On docker the volume already
+# inherits sandbox ownership and this is a no-op (or harmless failure
+# without CAP_CHOWN — ignored).
+chown sandbox:sandbox /home/sandbox 2>/dev/null || true
+
+# Run the cp as the sandbox user via setpriv: the /opt/botspace tree was
+# COPY'd --chown=sandbox at image-build time, and `cp -a` preserves
+# ownership/mode.
 if ! setpriv --reuid=sandbox --regid=sandbox --init-groups \
   test -e /home/sandbox/README.md; then
   setpriv --reuid=sandbox --regid=sandbox --init-groups \
