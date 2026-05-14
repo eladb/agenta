@@ -12,22 +12,25 @@
 
 set -euo pipefail
 
-if ! iptables -L -n >/dev/null 2>&1; then
-  echo "entrypoint: iptables unavailable — refusing to start without egress block" >&2
-  exit 1
+# Egress policy is configurable via SANDBOX_EGRESS env (default: allow).
+# Set SANDBOX_EGRESS=block in the host's .env to lock down outbound
+# traffic to RFC1918 + loopback only.
+if [ "${SANDBOX_EGRESS:-allow}" = "block" ]; then
+  if ! iptables -L -n >/dev/null 2>&1; then
+    echo "entrypoint: iptables unavailable — refusing to start with SANDBOX_EGRESS=block" >&2
+    exit 1
+  fi
+  # ACCEPT loopback, RELATED/ESTABLISHED, RFC1918 + link-local. DROP rest.
+  iptables -F OUTPUT
+  iptables -A OUTPUT -o lo -j ACCEPT
+  iptables -A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
+  iptables -A OUTPUT -d 10.0.0.0/8 -j ACCEPT
+  iptables -A OUTPUT -d 172.16.0.0/12 -j ACCEPT
+  iptables -A OUTPUT -d 192.168.0.0/16 -j ACCEPT
+  iptables -A OUTPUT -d 169.254.0.0/16 -j ACCEPT
+  iptables -P OUTPUT DROP
 fi
-
-# Egress policy: ACCEPT loopback, RELATED/ESTABLISHED, Docker DNS at
-# 127.0.0.11, RFC1918 + link-local. DROP everything else.
-iptables -F OUTPUT
-iptables -A OUTPUT -o lo -j ACCEPT
-iptables -A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
-iptables -A OUTPUT -d 10.0.0.0/8 -j ACCEPT
-iptables -A OUTPUT -d 172.16.0.0/12 -j ACCEPT
-iptables -A OUTPUT -d 192.168.0.0/16 -j ACCEPT
-iptables -A OUTPUT -d 169.254.0.0/16 -j ACCEPT
-iptables -P OUTPUT DROP
 
 # Seed the per-thread persistent volume on first boot. /home/sandbox is the
 # volume mount; if README.md doesn't exist we treat it as empty and copy in

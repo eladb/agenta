@@ -154,7 +154,12 @@ function machineConfig(
 ): Record<string, unknown> {
   return {
     image: `registry.fly.io/${appName()}:latest`,
-    env: { SANDBOX_TOKEN: sandboxToken },
+    env: {
+      SANDBOX_TOKEN: sandboxToken,
+      // Propagate the host's egress policy (default 'allow' if unset; the
+      // entrypoint reads SANDBOX_EGRESS and only blocks when it's 'block').
+      ...(process.env.SANDBOX_EGRESS ? { SANDBOX_EGRESS: process.env.SANDBOX_EGRESS } : {}),
+    },
     guest: { cpu_kind: 'shared', cpus: 1, memory_mb: 1024 },
     services: [
       {

@@ -199,6 +199,9 @@ function runArgs(name: string, vol: string, token: string): string[] {
     ...(process.env.SANDBOX_EXEC_TIMEOUT_MS
       ? ['-e', `SANDBOX_EXEC_TIMEOUT_MS=${process.env.SANDBOX_EXEC_TIMEOUT_MS}`]
       : []),
+    ...(process.env.SANDBOX_EGRESS
+      ? ['-e', `SANDBOX_EGRESS=${process.env.SANDBOX_EGRESS}`]
+      : []),
     '-w',
     '/home/sandbox',
     '-v',
