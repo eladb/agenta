@@ -1,4 +1,5 @@
 import type { WebClient } from '@slack/web-api';
+import { mdToMrkdwn } from './mrkdwn';
 
 // biome-ignore lint/suspicious/noExplicitAny: slack web-api types blocks as `any`
 type Blocks = any;
@@ -9,7 +10,11 @@ export async function postInThread(
   threadTs: string,
   text: string,
 ): Promise<string> {
-  const res = await web.chat.postMessage({ channel, thread_ts: threadTs, text });
+  const res = await web.chat.postMessage({
+    channel,
+    thread_ts: threadTs,
+    text: mdToMrkdwn(text),
+  });
   if (!res.ts) throw new Error('chat.postMessage returned no ts');
   return res.ts;
 }
@@ -24,7 +29,7 @@ export async function editMessage(
   // ask_user rendering interactive elements on the checklist message) gets
   // cleared when we switch back to plain text. Without this, Slack keeps
   // the old blocks and the buttons stay visible after the ask resolved.
-  await web.chat.update({ channel, ts, text, blocks: [] });
+  await web.chat.update({ channel, ts, text: mdToMrkdwn(text), blocks: [] });
 }
 
 export async function postBlocksInThread(
