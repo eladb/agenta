@@ -27,6 +27,36 @@ export async function deleteMessage(
   await web.chat.delete({ channel, ts }).catch(() => {});
 }
 
+export async function addReaction(
+  web: WebClient,
+  channel: string,
+  ts: string,
+  name: string,
+): Promise<void> {
+  // Slack returns 'already_reacted' if the bot already added this emoji
+  // to this message; that's harmless. We swallow all errors — reactions
+  // are best-effort UX, never block a turn. Wrap in try/catch (not just
+  // promise .catch) so we also tolerate stub webs that lack the API.
+  try {
+    await web.reactions.add({ channel, timestamp: ts, name });
+  } catch {
+    // best-effort
+  }
+}
+
+export async function removeReaction(
+  web: WebClient,
+  channel: string,
+  ts: string,
+  name: string,
+): Promise<void> {
+  try {
+    await web.reactions.remove({ channel, timestamp: ts, name });
+  } catch {
+    // best-effort
+  }
+}
+
 export async function editMessage(
   web: WebClient,
   channel: string,

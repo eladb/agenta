@@ -13,10 +13,14 @@ function makeWebStub(): {
   posts: Array<{ text: string }>;
   edits: Array<{ ts: string; text: string }>;
   deletes: Array<{ ts: string }>;
+  reactionsAdded: Array<{ ts: string; name: string }>;
+  reactionsRemoved: Array<{ ts: string; name: string }>;
 } {
   const posts: Array<{ text: string }> = [];
   const edits: Array<{ ts: string; text: string }> = [];
   const deletes: Array<{ ts: string }> = [];
+  const reactionsAdded: Array<{ ts: string; name: string }> = [];
+  const reactionsRemoved: Array<{ ts: string; name: string }> = [];
   let nextTs = 0;
   const web = {
     chat: {
@@ -34,8 +38,18 @@ function makeWebStub(): {
         return { ok: true };
       }),
     },
+    reactions: {
+      add: mock(async (args: { timestamp: string; name: string }) => {
+        reactionsAdded.push({ ts: args.timestamp, name: args.name });
+        return { ok: true };
+      }),
+      remove: mock(async (args: { timestamp: string; name: string }) => {
+        reactionsRemoved.push({ ts: args.timestamp, name: args.name });
+        return { ok: true };
+      }),
+    },
   };
-  return { web, posts, edits, deletes };
+  return { web, posts, edits, deletes, reactionsAdded, reactionsRemoved };
 }
 
 let dataDir: string;
@@ -380,6 +394,74 @@ describe('runTurn with tools', () => {
     ).toBe(true);
     // The bot signaled to session.ts that a mid-turn mention was consumed.
     expect(consumedSignals).toBeGreaterThan(0);
+  });
+
+  test('reactions: thinking_face on the originating message, removed on turn end', async () => {
+    const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
+    // Pre-record the originating slack mention so the turn finds a
+    // message to react on.
+    await record({
+      event_id: newEventId(),
+      thread_key: 'k1',
+      source: 'slack',
+      type: 'message',
+      ts: nowIso(),
+      ingested_at: nowIso(),
+      payload: {
+        slack_event_id: 'Ev-orig',
+        slack_ts: '1.5',
+        user: 'U1',
+        text: 'hi',
+      },
+    });
+    const callModel: CallModel = async () => ({ role: 'assistant', content: 'hello' });
+
+    await runTurn(web, callModel, 'sys', input);
+
+    expect(reactionsAdded.some((r) => r.ts === '1.5' && r.name === 'thinking_face')).toBe(true);
+    expect(reactionsRemoved.some((r) => r.ts === '1.5' && r.name === 'thinking_face')).toBe(true);
+  });
+
+  test('reactions: steering wheel on injected mid-turn messages', async () => {
+    const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        // Inject a mid-turn user message during iteration 1.
+        await record({
+          event_id: newEventId(),
+          thread_key: 'k1',
+          source: 'slack',
+          type: 'message',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: {
+            slack_event_id: 'Ev-mid',
+            slack_ts: '7.7',
+            user: 'U2',
+            text: 'also do X',
+          },
+        });
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 't1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'done' };
+    };
+
+    await runTurn(web, callModel, 'sys', input);
+
+    expect(reactionsAdded.some((r) => r.ts === '7.7' && r.name === 'wheel')).toBe(true);
+    expect(reactionsRemoved.some((r) => r.ts === '7.7' && r.name === 'wheel')).toBe(true);
   });
 
   test('steering on no-tool-calls path: would-be-final becomes intermediate, loop continues', async () => {

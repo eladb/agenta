@@ -7,7 +7,13 @@ import type { AgentaEvent } from '../persistence/events';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { readEvents } from '../persistence/store';
 import { ensureContainer, isSandboxReady, syncAttachmentsToSandbox } from '../sandbox';
-import { deleteMessage, editMessage, postInThread } from '../slack/post';
+import {
+  addReaction,
+  deleteMessage,
+  editMessage,
+  postInThread,
+  removeReaction,
+} from '../slack/post';
 import { parseCommand } from './commands';
 import { redact } from './redact';
 
@@ -32,6 +38,12 @@ const LIVE_EDIT_INTERVAL_MS = 800;
 //
 // Final replies (no tool_calls) post as a fresh plain message.
 const PLACEHOLDER = '*thinking…*';
+
+// Slack emoji shortcodes for in-flight UX. Reactions are added to the
+// originating user message(s) so the user sees at a glance what the
+// bot is doing, and removed when the turn finishes.
+const REACTION_THINKING = 'thinking_face';
+const REACTION_STEERING = 'wheel';
 
 function toolLabel(tc: ToolCall): string {
   // Short human-readable label from the tool's own describe(). Falls back
@@ -83,7 +95,7 @@ function pushSeparator(lines: string[]): void {
 // Drain any slack.message events that arrived since `consumed` was last
 // refreshed, append them to the in-process messages[] as `role: user`, and
 // add their event_ids to `consumed` so we don't double-inject. Returns the
-// number of injected events.
+// slack_ts of each injected message (so the caller can react on each).
 //
 // This is the "steering" path: between rounds, the model picks up any
 // user input that landed during the previous round and can adjust its
@@ -93,9 +105,9 @@ async function injectSteering(
   threadKey: string,
   messages: Message[],
   consumed: Set<string>,
-): Promise<number> {
+): Promise<string[]> {
   const events = await readEvents<AgentaEvent>(threadKey);
-  let n = 0;
+  const injectedTs: string[] = [];
   for (const e of events) {
     if (e.source !== 'slack' || e.type !== 'message') continue;
     if (consumed.has(e.event_id)) continue;
@@ -104,11 +116,12 @@ async function injectSteering(
     // The model shouldn't see "/stop" or "/delete" as user input.
     if (typeof text === 'string' && text.length > 0 && parseCommand(text) === null) {
       messages.push({ role: 'user', content: text });
-      n += 1;
+      const slackTs = e.payload.slack_ts;
+      if (typeof slackTs === 'string') injectedTs.push(slackTs);
     }
     consumed.add(e.event_id);
   }
-  return n;
+  return injectedTs;
 }
 
 export async function runTurn(
@@ -134,6 +147,20 @@ export async function runTurn(
     );
   };
 
+  // Track every reaction added so we can remove them all on turn end —
+  // success, abort, or error.
+  const reactionsAdded: Array<{ ts: string; name: string }> = [];
+  const reactOn = async (ts: string, name: string): Promise<void> => {
+    await addReaction(web, input.channel, ts, name);
+    reactionsAdded.push({ ts, name });
+  };
+  const clearAllReactions = async (): Promise<void> => {
+    await Promise.all(
+      reactionsAdded.map((r) => removeReaction(web, input.channel, r.ts, r.name)),
+    );
+    reactionsAdded.length = 0;
+  };
+
   // Initial placeholder so the user sees something land the moment they
   // mention the bot. Gets overwritten by the first round's content.
   liveTs = await postInThread(
@@ -149,12 +176,25 @@ export async function runTurn(
     // Initial set of slack.message event_ids that are already represented in
     // `messages` (via buildMessages). Anything that lands AFTER this is
     // unseen by the model until we inject it via injectSteering().
+    // While we're walking the events, also find the latest slack message
+    // (the one that triggered this turn) so we can react on it.
     const consumed = new Set<string>();
+    let originatingTs: string | undefined;
     {
       const initial = await readEvents<AgentaEvent>(input.threadKey);
       for (const e of initial) {
-        if (e.source === 'slack' && e.type === 'message') consumed.add(e.event_id);
+        if (e.source === 'slack' && e.type === 'message') {
+          consumed.add(e.event_id);
+          const slackTs = e.payload.slack_ts;
+          if (typeof slackTs === 'string') originatingTs = slackTs;
+        }
       }
+    }
+
+    // React 🤔 on the originating mention so the user sees the bot is
+    // working on it. Removed when the turn ends.
+    if (originatingTs) {
+      await reactOn(originatingTs, REACTION_THINKING);
     }
 
     while (true) {
@@ -181,8 +221,9 @@ export async function runTurn(
       if (toolCalls.length === 0) {
         // Inject any new user messages that arrived during the round.
         const injected = await injectSteering(input.threadKey, messages, consumed);
-        if (injected > 0) {
+        if (injected.length > 0) {
           onMidTurnConsume?.();
+          for (const ts of injected) await reactOn(ts, REACTION_STEERING);
           // Show the would-be-final text as an intermediate round header.
           // If the model emitted nothing, still post the placeholder + new
           // round (rare but possible).
@@ -373,10 +414,11 @@ export async function runTurn(
 
       // Steering: drain any user messages that arrived during this round
       // before the next model call. The model will see them on the next
-      // iteration and can adjust direction.
+      // iteration and can adjust direction. React 🛞 on each one.
       const injectedMid = await injectSteering(input.threadKey, messages, consumed);
-      if (injectedMid > 0) {
+      if (injectedMid.length > 0) {
         onMidTurnConsume?.();
+        for (const ts of injectedMid) await reactOn(ts, REACTION_STEERING);
       }
 
       // End of round. Leave this round's message frozen and post a fresh
@@ -408,5 +450,9 @@ export async function runTurn(
     } else {
       await postInThread(web, input.channel, input.threadTs, `error: ${msg}`).catch(() => {});
     }
+  } finally {
+    // Always clear reactions added during this turn — success, abort, or
+    // error. Best-effort: Slack errors here don't propagate.
+    await clearAllReactions();
   }
 }
