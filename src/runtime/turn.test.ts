@@ -87,8 +87,8 @@ describe('runTurn with tools', () => {
     // Final reply is plain — no leading arrow marker.
     expect(lastPost?.startsWith('→')).toBe(false);
     // At least one intermediate edit contains the tool's describe() label
-    // wrapped in inline backticks (no leading bullet under the new layout).
-    expect(edits.some((e) => e.text.includes('`get current time`'))).toBe(true);
+    // as plain text (no bullet, no backticks under the new layout).
+    expect(edits.some((e) => e.text.includes('get current time'))).toBe(true);
 
     const events = await readEvents<{
       source: string;
@@ -139,11 +139,12 @@ describe('runTurn with tools', () => {
 
     // When the model emits no reasoning text, the placeholder is REPLACED
     // by the tool rendering — no stranded "thinking…" line above the tool.
-    // The tool appears as inline-code (no bullet).
-    const toolEdit = edits.find((e) => e.text.includes('`get current time`'));
+    // The tool appears as plain text (no bullet, no backticks).
+    const toolEdit = edits.find((e) => e.text.includes('get current time'));
     expect(toolEdit).toBeDefined();
     expect(toolEdit?.text.includes('thinking')).toBe(false);
     expect(toolEdit?.text.includes('• ')).toBe(false);
+    expect(toolEdit?.text.includes('`')).toBe(false);
 
     // Final reply is posted as a fresh plain message (no arrow marker) and
     // the in-flight placeholder was deleted.

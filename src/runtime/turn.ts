@@ -183,27 +183,16 @@ export async function runTurn(
 
         pushSeparator(liveLines);
 
-        // Tool-specific rendering. bash gets a fenced code block so it
-        // renders in monospace and the multi-line output reads cleanly;
-        // every other tool gets a single inline-code line + result.
+        // Tool rendering: a label line + a mutable result/preview line
+        // underneath, both plain text (no inline-code / fenced backticks).
+        // bash gets the live preview behavior; everything else just shows
+        // a result placeholder until the tool returns.
         const isBash = tc.function.name === 'bash';
         const label = toolLabel(tc);
-        let liveIdx = -1; // index of the mutable preview/result line
-        let bulletIdx = -1; // index of the tool's label line (for ask_user inline answer)
-
-        if (isBash) {
-          liveLines.push('```');
-          bulletIdx = liveLines.length;
-          liveLines.push(label); // describe() returns "$ <cmd>" for bash
-          liveIdx = liveLines.length;
-          liveLines.push('…'); // mutable preview/result slot
-          liveLines.push('```');
-        } else {
-          bulletIdx = liveLines.length;
-          liveLines.push(`\`${label}\``);
-          liveIdx = liveLines.length;
-          liveLines.push('…');
-        }
+        const bulletIdx = liveLines.length;
+        liveLines.push(label);
+        const liveIdx = liveLines.length;
+        liveLines.push('…');
         await repaint();
 
         let liveBuffer = '';
