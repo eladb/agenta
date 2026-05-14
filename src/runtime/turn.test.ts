@@ -134,8 +134,9 @@ describe('runTurn with tools', () => {
 
     await runTurn(web, callModel, 'sys', input);
 
-    // First post is the round-1 placeholder: plain 'Thinking…'.
-    expect(posts[0]?.text).toBe('Thinking…');
+    // First post is the round-1 placeholder: italicized 'thinking…'.
+    // mdToMrkdwn converts the standard *italic* form to Slack's _italic_.
+    expect(posts[0]?.text).toBe('_thinking…_');
 
     // When the model emits no reasoning text, the placeholder is REPLACED
     // by the tool rendering — no stranded "thinking…" line above the tool.

@@ -28,7 +28,7 @@ const LIVE_EDIT_INTERVAL_MS = 800;
 // the round message is just the tool's rendering. No `thinking…` persists.
 //
 // Final replies (no tool_calls) post as a fresh plain message.
-const PLACEHOLDER = 'Thinking…';
+const PLACEHOLDER = '*thinking…*';
 
 function toolLabel(tc: ToolCall): string {
   // Short human-readable label from the tool's own describe(). Falls back
