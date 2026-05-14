@@ -29,7 +29,7 @@ const LIVE_EDIT_INTERVAL_MS = 800;
 //
 // Final replies (no tool_calls) post as a fresh plain message — no marker.
 const HEADER_MARKER = '→ ';
-const PLACEHOLDER = '→ thinking…';
+const PLACEHOLDER = 'Thinking…';
 
 function toolLabel(tc: ToolCall): string {
   // Short human-readable label from the tool's own describe(). Falls back
@@ -159,7 +159,17 @@ export async function runTurn(
           await repaint();
           try {
             await ensureContainer(input.threadKey);
-            liveLines[provIdx] = '_workspace ready_';
+            // Success: don't persist the status line. The tool block that
+            // follows is the meaningful content. Drop the trailing
+            // separator too if it was added just for this status line.
+            liveLines.splice(provIdx, 1);
+            if (
+              liveLines.length > 0 &&
+              liveLines[liveLines.length - 1] === '' &&
+              liveLines.length === provIdx
+            ) {
+              liveLines.pop();
+            }
           } catch (err) {
             const msg = (err as Error).message;
             provisionError = msg;
