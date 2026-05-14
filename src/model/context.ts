@@ -81,6 +81,15 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
         messages.push({ role: 'user', content: parts });
       }
     } else if (e.source === 'assistant' && e.type === 'message') {
+      // Skip share_file's internal record (assistant.message events with a
+      // `files` payload). They carry metadata about bot-uploaded files, not
+      // model speech; projecting their `[shared X]` text back as the
+      // model's own voice trains it to mimic the marker in future
+      // reasoning. The tool_result for the matching share_file call still
+      // gives the model the useful info ("shared X (N bytes, file_id=…)").
+      if (e.payload.files && e.payload.files.length > 0) {
+        continue;
+      }
       const tcs = toolCallsByParent.get(e.event_id);
       const tool_calls: ToolCall[] | undefined = tcs?.map((tc) => ({
         id: tc.payload.tool_call_id,
