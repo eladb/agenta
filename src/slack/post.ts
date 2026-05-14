@@ -19,6 +19,14 @@ export async function postInThread(
   return res.ts;
 }
 
+export async function deleteMessage(
+  web: WebClient,
+  channel: string,
+  ts: string,
+): Promise<void> {
+  await web.chat.delete({ channel, ts }).catch(() => {});
+}
+
 export async function editMessage(
   web: WebClient,
   channel: string,

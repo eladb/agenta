@@ -11,22 +11,30 @@ function makeWebStub(): {
   web: any;
   posts: Array<{ text: string }>;
   edits: Array<{ ts: string; text: string }>;
+  deletes: Array<{ ts: string }>;
 } {
   const posts: Array<{ text: string }> = [];
   const edits: Array<{ ts: string; text: string }> = [];
+  const deletes: Array<{ ts: string }> = [];
+  let nextTs = 0;
   const web = {
     chat: {
       postMessage: mock(async (args: { text: string }) => {
+        nextTs += 1;
         posts.push({ text: args.text });
-        return { ok: true, ts: 'TS1' };
+        return { ok: true, ts: `TS${nextTs}` };
       }),
       update: mock(async (args: { ts: string; text: string }) => {
         edits.push({ ts: args.ts, text: args.text });
         return { ok: true };
       }),
+      delete: mock(async (args: { ts: string }) => {
+        deletes.push({ ts: args.ts });
+        return { ok: true };
+      }),
     },
   };
-  return { web, posts, edits };
+  return { web, posts, edits, deletes };
 }
 
 let dataDir: string;
@@ -45,7 +53,7 @@ const input = { channel: 'C', threadTs: '1.0', threadKey: 'k1' };
 
 describe('runTurn with tools', () => {
   test('happy path: tool_call -> tool execution -> final reply', async () => {
-    const { web, edits } = makeWebStub();
+    const { web, edits, posts } = makeWebStub();
     let n = 0;
     const callModel: CallModel = async (messages) => {
       n++;
@@ -73,8 +81,10 @@ describe('runTurn with tools', () => {
     await runTurn(web, callModel, 'sys', input);
 
     expect(n).toBe(2);
-    // Final edit should be the reply text.
-    expect(edits[edits.length - 1]?.text).toBe('the time is now');
+    // Final reply is posted as a fresh clean message (no 💭 marker).
+    const lastPost = posts[posts.length - 1]?.text;
+    expect(lastPost).toBe('the time is now');
+    expect(lastPost?.startsWith('💭')).toBe(false);
     // At least one intermediate edit contains the tool's describe() bullet.
     expect(edits.some((e) => e.text.includes('• get current time'))).toBe(true);
 
@@ -99,8 +109,8 @@ describe('runTurn with tools', () => {
     expect(tcs[0]?.payload.parent_event_id).toBe(firstAssistant?.event_id);
   });
 
-  test('thinking… line is ephemeral: gone before tool bullet, back between tools, gone in final reply', async () => {
-    const { web, edits, posts } = makeWebStub();
+  test('rolling rounds: 💭 placeholder + tool bullets, then clean final post', async () => {
+    const { web, edits, posts, deletes } = makeWebStub();
     let n = 0;
     const callModel: CallModel = async () => {
       n++;
@@ -122,28 +132,22 @@ describe('runTurn with tools', () => {
 
     await runTurn(web, callModel, 'sys', input);
 
-    // Initial post is the thinking line.
+    // First post is the round-1 placeholder with the 💭 marker.
+    expect(posts[0]?.text.startsWith('💭')).toBe(true);
     expect(posts[0]?.text).toContain('thinking');
 
-    // No "calling model" anywhere — that's the old text.
-    expect(edits.some((e) => e.text.includes('calling model'))).toBe(false);
-
-    // Right after the model returns tool_calls, the thinking line is popped
-    // and the tool bullet replaces it. So we expect at least one edit that
-    // has the tool bullet but NO thinking line.
+    // At least one edit renders the tool bullet inside the live (💭)
+    // message — the round shows in-progress while the tool runs.
     expect(
-      edits.some((e) => e.text.includes('• get current time') && !e.text.includes('thinking')),
+      edits.some((e) => e.text.startsWith('💭') && e.text.includes('• get current time')),
     ).toBe(true);
 
-    // Between tools and the next model call, thinking is shown again, AFTER
-    // the tool bullet.
-    expect(
-      edits.some((e) => e.text.includes('• get current time') && e.text.endsWith('• thinking…')),
-    ).toBe(true);
-
-    // Final edit is just the reply — no checklist artifacts.
-    const last = edits[edits.length - 1]?.text;
-    expect(last).toBe('final reply');
+    // Final reply is posted as a separate clean message (no 💭 marker)
+    // and the in-flight placeholder was deleted.
+    const lastPost = posts[posts.length - 1]?.text;
+    expect(lastPost).toBe('final reply');
+    expect(lastPost?.startsWith('💭')).toBe(false);
+    expect(deletes.length).toBeGreaterThan(0);
   });
 
   test('multiple tool_calls in one response are executed in order', async () => {
@@ -198,7 +202,7 @@ describe('runTurn with tools', () => {
   });
 
   test('tool execution error is recorded and the loop recovers', async () => {
-    const { web, edits } = makeWebStub();
+    const { web, edits, posts } = makeWebStub();
     let n = 0;
     const callModel: CallModel = async (messages) => {
       n++;
@@ -224,7 +228,8 @@ describe('runTurn with tools', () => {
 
     await runTurn(web, callModel, 'sys', input);
 
-    expect(edits[edits.length - 1]?.text).toBe('I cannot do that, sorry');
+    // Final reply lands as a fresh post (not an edit) after the tool error.
+    expect(posts[posts.length - 1]?.text).toBe('I cannot do that, sorry');
 
     const events = await readEvents<{ type: string; payload: Record<string, unknown> }>('k1');
     const trs = events.filter((e) => e.type === 'tool_result');

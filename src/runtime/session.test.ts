@@ -25,6 +25,7 @@ function makeWebStub(): {
         edits.push({ ts: args.ts, text: args.text });
         return { ok: true };
       }),
+      delete: mock(async () => ({ ok: true })),
     },
   };
   return { web, posts, edits };
@@ -47,11 +48,14 @@ const input = { channel: 'C', threadTs: '1.0', threadKey: 'k1' };
 
 describe('session state machine', () => {
   test('runs a turn and returns to idle', async () => {
-    const { web, edits } = makeWebStub();
+    const { web, posts } = makeWebStub();
     const callModel: CallModel = async () => ({ role: 'assistant', content: 'hi' });
     await startOrQueue(web, callModel, 'sys', input);
     expect(getStatus('k1')).toBe('idle');
-    expect(edits.some((e) => e.text === 'hi')).toBe(true);
+    // Final reply is posted as a fresh clean message (not an edit) under the
+    // rolling-rounds UX. The 💭-prefixed placeholder is also posted, then
+    // deleted before the clean final reply lands.
+    expect(posts.some((p) => p.text === 'hi')).toBe(true);
   });
 
   test('session.json is running while in flight, flips to idle with system_prompt after', async () => {
