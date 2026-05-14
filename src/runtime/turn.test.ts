@@ -502,4 +502,162 @@ describe('runTurn with tools', () => {
     const finalPost = posts[posts.length - 1]?.text;
     expect(finalPost).toBe('final after steering');
   });
+
+  test('steering ignores /stop and /delete commands', async () => {
+    const { web } = makeWebStub();
+    let n = 0;
+    let secondCallMessages: Message[] | undefined;
+    const callModel: CallModel = async (messages) => {
+      n++;
+      if (n === 1) {
+        // Two messages land mid-turn: a /stop command and a steering one.
+        // The command should be filtered (it's handled by handler.ts);
+        // the steering text should be injected.
+        await record({
+          event_id: newEventId(),
+          thread_key: 'k1',
+          source: 'slack',
+          type: 'message',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: { slack_event_id: 'E1', slack_ts: '3.0', user: 'U2', text: '/stop' },
+        });
+        await record({
+          event_id: newEventId(),
+          thread_key: 'k1',
+          source: 'slack',
+          type: 'message',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: {
+            slack_event_id: 'E2',
+            slack_ts: '3.1',
+            user: 'U2',
+            text: 'really do X',
+          },
+        });
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 't1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      secondCallMessages = messages;
+      return { role: 'assistant', content: 'ok' };
+    };
+
+    await runTurn(web, callModel, 'sys', input);
+
+    const userTexts = (secondCallMessages ?? [])
+      .filter((m) => m.role === 'user' && typeof m.content === 'string')
+      .map((m) => m.content as string);
+    expect(userTexts.some((t) => t.includes('really do X'))).toBe(true);
+    expect(userTexts.some((t) => t === '/stop')).toBe(false);
+  });
+
+  test('multiple mid-turn messages: all injected, all reacted, all cleared', async () => {
+    const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        // Three steering messages land during iteration 1.
+        for (const slack_ts of ['9.1', '9.2', '9.3']) {
+          await record({
+            event_id: newEventId(),
+            thread_key: 'k1',
+            source: 'slack',
+            type: 'message',
+            ts: nowIso(),
+            ingested_at: nowIso(),
+            payload: {
+              slack_event_id: `E-${slack_ts}`,
+              slack_ts,
+              user: 'U2',
+              text: `update ${slack_ts}`,
+            },
+          });
+        }
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 't1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'done' };
+    };
+
+    await runTurn(web, callModel, 'sys', input);
+
+    for (const ts of ['9.1', '9.2', '9.3']) {
+      expect(reactionsAdded.some((r) => r.ts === ts && r.name === 'wheel')).toBe(true);
+      expect(reactionsRemoved.some((r) => r.ts === ts && r.name === 'wheel')).toBe(true);
+    }
+  });
+
+  test('reactions are cleared on abort path', async () => {
+    const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
+    // Originating message so a thinking reaction lands.
+    await record({
+      event_id: newEventId(),
+      thread_key: 'k1',
+      source: 'slack',
+      type: 'message',
+      ts: nowIso(),
+      ingested_at: nowIso(),
+      payload: {
+        slack_event_id: 'Ev-orig',
+        slack_ts: '4.4',
+        user: 'U1',
+        text: 'long task please',
+      },
+    });
+    const controller = new AbortController();
+    let n = 0;
+    const callModel: CallModel = async (_messages, opts) => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 't1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      // Hang the second call until aborted.
+      await new Promise<void>((_resolve, reject) => {
+        opts?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        );
+      });
+      return { role: 'assistant', content: 'unreached' };
+    };
+
+    const run = runTurn(web, callModel, 'sys', input, controller.signal);
+    await new Promise((r) => setTimeout(r, 30));
+    controller.abort();
+    await run;
+
+    // Thinking reaction was added on the originating message and then
+    // removed in the finally block, even though the turn was aborted.
+    expect(reactionsAdded.some((r) => r.ts === '4.4' && r.name === 'thinking_face')).toBe(true);
+    expect(reactionsRemoved.some((r) => r.ts === '4.4' && r.name === 'thinking_face')).toBe(true);
+  });
 });

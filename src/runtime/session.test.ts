@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CallModel } from '../model/gateway';
+import { newEventId, nowIso, record } from '../persistence/events';
 import { getStatus, resetSessions, signalStop, startOrQueue } from './session';
 
 // Minimal WebClient stub — runTurn uses postInThread/editMessage, which call
@@ -173,6 +174,57 @@ describe('session state machine', () => {
     await startOrQueue(web, callModel, 'sys', input);
     await run;
     expect(calls).toBe(2);
+    expect(getStatus('k1')).toBe('idle');
+  });
+
+  test('mid-turn steering clears pending and avoids a redundant follow-up turn', async () => {
+    const { web } = makeWebStub();
+    let n = 0;
+    // The model stub fires startOrQueue recursively at iteration 1 (this
+    // mirrors handler.ts: a new mention arrives mid-turn → calls
+    // startOrQueue → that call sees status='running' → sets pending=true
+    // and returns). The turn's steering hook should then clear pending so
+    // the post-turn loop exits cleanly without re-running.
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        await record({
+          event_id: newEventId(),
+          thread_key: 'k1',
+          source: 'slack',
+          type: 'message',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: {
+            slack_event_id: 'E-mid',
+            slack_ts: '5.5',
+            user: 'U2',
+            text: 'extra: also do X',
+          },
+        });
+        // Simulate the handler-level reentry that sets pending=true.
+        await startOrQueue(web, callModel, 'sys', input);
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 't1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'done' };
+    };
+
+    await startOrQueue(web, callModel, 'sys', input);
+
+    // Two model calls is enough: iteration 1 with tools + iteration 2
+    // final. If pending had survived the steering consume, the session
+    // would run another full turn → 4 model calls.
+    expect(n).toBe(2);
     expect(getStatus('k1')).toBe('idle');
   });
 });
