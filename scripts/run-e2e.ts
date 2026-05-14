@@ -17,6 +17,8 @@
 // the active list.
 
 import { spawn } from 'node:child_process';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { WebClient } from '@slack/web-api';
 
 function requireEnv(name: string): string {
@@ -87,20 +89,35 @@ try {
   await tester.conversations.invite({ channel: channelId, users: agentUser });
   console.log(`run-e2e: invited agent (${agentUser})`);
 
-  const exitCode: number = await new Promise((resolve) => {
-    const child = spawn('bun', ['test', '--timeout', '30000', 'tests/e2e'], {
-      stdio: 'inherit',
-      env: { ...process.env, TEST_CHANNEL_ID: channelId },
+  // Run each test file in its own bun process, sequentially. Bun's
+  // default test parallelism would have multiple files contending for
+  // the per-bot lockfile (and the underlying Slack socket) inside one
+  // process. One file per process = one lock holder at a time.
+  const testFiles = readdirSync(join(import.meta.dir, '..', 'tests/e2e'))
+    .filter((f) => f.endsWith('.test.ts'))
+    .sort();
+  console.log(`run-e2e: ${testFiles.length} test files to run sequentially`);
+
+  let firstFailExit = 0;
+  for (const file of testFiles) {
+    const relPath = `tests/e2e/${file}`;
+    console.log(`\nrun-e2e: → ${relPath}`);
+    const code: number = await new Promise((resolve) => {
+      const child = spawn('bun', ['test', '--timeout', '30000', relPath], {
+        stdio: 'inherit',
+        env: { ...process.env, TEST_CHANNEL_ID: channelId },
+      });
+      child.on('exit', (c) => resolve(c ?? 1));
+      child.on('error', (err) => {
+        console.error('run-e2e: child spawn error:', err.message);
+        resolve(1);
+      });
     });
-    child.on('exit', (code) => resolve(code ?? 1));
-    child.on('error', (err) => {
-      console.error('run-e2e: child spawn error:', err.message);
-      resolve(1);
-    });
-  });
+    if (code !== 0 && firstFailExit === 0) firstFailExit = code;
+  }
 
   await archiveOnce();
-  process.exit(exitCode);
+  process.exit(firstFailExit);
 } catch (err) {
   console.error('run-e2e: setup failed:', (err as Error).message);
   await archiveOnce();
