@@ -18,43 +18,60 @@ const ARGS_PREVIEW_LEN = 80;
 const LIVE_PREVIEW_LEN = 150;
 const LIVE_EDIT_INTERVAL_MS = 800;
 
-// Visual marker for intermediate ("in progress") thread messages. Final
-// replies post without it, so the user can distinguish a step-along-the-way
-// from the actual answer.
-const IN_PROGRESS_MARKER = '💭 ';
-const PLACEHOLDER_TEXT = 'thinking…';
+// Visual conventions for an intermediate round message:
+//   - `→ {text}` at the top, only when the model emitted reasoning text
+//   - bash blocks shown as fenced code (` ``` `) for monospace + multi-line output
+//   - other tools shown as inline code (`tool args`) + a `→ result` follow-up
+//   - status lines (provisioning workspace, attachments synced) shown as
+//     plain italics so they read as informational, not equal weight to tools
+// When the model emits no reasoning text, the header is omitted entirely —
+// the round message is just the tool's rendering. No `thinking…` persists.
+//
+// Final replies (no tool_calls) post as a fresh plain message — no marker.
+const HEADER_MARKER = '→ ';
+const PLACEHOLDER = '→ thinking…';
 
-function formatToolBullet(tc: ToolCall): string {
-  // Prefer the tool's own describe() — short, human-readable, e.g. "$ ls -la"
-  // instead of `bash({"command":"ls -la"})`. Falls back to the raw JSON when
-  // no describer is registered or it throws on weird args.
+function toolLabel(tc: ToolCall): string {
+  // Short human-readable label from the tool's own describe(). Falls back
+  // to a raw name(args) form if no describer is registered or it throws.
   const tool = TOOLS[tc.function.name];
   if (tool?.describe) {
     try {
       const parsed = tc.function.arguments.length > 0 ? JSON.parse(tc.function.arguments) : {};
       const desc = tool.describe(parsed);
-      if (desc) return `• ${desc}`;
+      if (desc) return desc;
     } catch {
-      // fall through to raw
+      // fall through
     }
   }
   const a = tc.function.arguments;
   const args = a.length > ARGS_PREVIEW_LEN ? `${a.slice(0, ARGS_PREVIEW_LEN - 1)}…` : a;
-  return `• tool: ${tc.function.name}(${args})`;
+  return `${tc.function.name}(${args})`;
 }
 
 function liveLine(preview: string): string {
-  // Collapse newlines so each tool's preview stays single-line.
+  // Collapse newlines so the live preview stays single-line inside the bash
+  // code fence. No leading indent — we're already inside a code block.
   const flat = preview.replace(/[\r\n]+/g, ' ⏎ ').slice(-LIVE_PREVIEW_LEN);
-  return `   ${flat}`;
+  return flat;
 }
 
 function renderRound(headerText: string, lines: string[]): string {
-  // Round message = leading marker + header text, then a blank line, then
-  // each bullet/preview line in order. If no bullets yet, just the header.
-  const head = `${IN_PROGRESS_MARKER}${headerText}`;
-  if (lines.length === 0) return head;
-  return `${head}\n\n${lines.join('\n')}`;
+  // headerText empty + no lines = the pre-model placeholder.
+  if (headerText.length === 0 && lines.length === 0) return PLACEHOLDER;
+  const parts: string[] = [];
+  if (headerText.length > 0) {
+    parts.push(`${HEADER_MARKER}${headerText}`);
+    if (lines.length > 0) parts.push(''); // blank line between header and tool blocks
+  }
+  parts.push(...lines);
+  return parts.join('\n');
+}
+
+// Push a blank separator before a new logical block if the current trailing
+// entry isn't already blank — keeps tool blocks visually separated.
+function pushSeparator(lines: string[]): void {
+  if (lines.length > 0 && lines[lines.length - 1] !== '') lines.push('');
 }
 
 export async function runTurn(
@@ -64,12 +81,12 @@ export async function runTurn(
   input: TurnInput,
   signal?: AbortSignal,
 ): Promise<void> {
-  // The "live" message tracks ONLY the current round. When the next round
+  // "Live" message tracks ONLY the current round. When the next round
   // begins (model returns more text + tool calls), we leave this message
   // frozen and post a new one. When the final reply lands, we post it as
   // a fresh clean message and delete any in-flight placeholder.
   let liveTs: string | undefined;
-  let liveHeader = PLACEHOLDER_TEXT;
+  let liveHeader = '';
   let liveLines: string[] = [];
 
   const repaint = (): Promise<void> => {
@@ -79,9 +96,8 @@ export async function runTurn(
     );
   };
 
-  // Post the round-1 placeholder up front so the user sees something land
-  // in the thread the instant they mention the bot. If the model replies
-  // directly (no tool calls), we delete this and post the clean final.
+  // Initial placeholder so the user sees something land the moment they
+  // mention the bot. Gets overwritten by the first round's content.
   liveTs = await postInThread(
     web,
     input.channel,
@@ -109,8 +125,8 @@ export async function runTurn(
         payload: { slack_ts: liveTs ?? '', text },
       });
 
-      // No tool calls → this is the final reply. Drop the placeholder/
-      // last-intermediate live message and post a clean final.
+      // No tool calls → final reply. Drop the placeholder/last live
+      // message and post a clean final message in its place.
       if (toolCalls.length === 0) {
         const reply = text.length > 0 ? text : '(empty reply)';
         if (liveTs) {
@@ -122,44 +138,42 @@ export async function runTurn(
         return;
       }
 
-      // Has tool calls → start a new round. The current liveTs already
-      // exists (placeholder for the first iteration, or pre-posted for
-      // subsequent iterations below). Stamp this round's header on it.
-      liveHeader = text.length > 0 ? text : PLACEHOLDER_TEXT;
+      // Start of a new round. Set the header (empty if model emitted no
+      // reasoning text — we don't want a stranded "thinking…" line
+      // sitting above the tool) and reset the lines list.
+      liveHeader = text;
       liveLines = [];
       await repaint();
 
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
 
       for (const tc of toolCalls) {
-        // Lazy sandbox provisioning. If this tool touches the sandbox and
-        // we haven't provisioned yet in this process, surface a status
-        // line BEFORE the tool bullet so the chronology in the round
-        // matches what actually happened.
+        // Lazy sandbox provisioning. Surfaced as an italicized status
+        // line before the tool that needs it so the chronology lines up.
         const tool = TOOLS[tc.function.name];
         let provisionError: string | undefined;
         if (tool?.requiresSandbox && !isSandboxReady(input.threadKey)) {
+          pushSeparator(liveLines);
           const provIdx = liveLines.length;
-          liveLines.push('• provisioning workspace…');
+          liveLines.push('_provisioning workspace…_');
           await repaint();
           try {
             await ensureContainer(input.threadKey);
-            liveLines[provIdx] = '• workspace ready';
+            liveLines[provIdx] = '_workspace ready_';
           } catch (err) {
             const msg = (err as Error).message;
             provisionError = msg;
-            liveLines[provIdx] = `• workspace provisioning failed: ${msg}`;
+            liveLines[provIdx] = `_workspace provisioning failed: ${msg}_`;
           }
           await repaint();
         }
 
-        // After provisioning, push ingested Slack attachments into the
-        // sandbox so tools can read them. Idempotent + cached.
+        // Lazy attachment sync. Same idempotent helper as before.
         if (tool?.requiresSandbox && !provisionError) {
           try {
             const { synced } = await syncAttachmentsToSandbox(input.threadKey);
             if (synced > 0) {
-              liveLines.push(`• synced ${synced} attachment(s) to workspace`);
+              liveLines.push(`_synced ${synced} attachment(s) to workspace_`);
               await repaint();
             }
           } catch (err) {
@@ -167,22 +181,35 @@ export async function runTurn(
           }
         }
 
-        const bulletIdx = liveLines.length;
-        liveLines.push(formatToolBullet(tc));
+        pushSeparator(liveLines);
+
+        // Tool-specific rendering. bash gets a fenced code block so it
+        // renders in monospace and the multi-line output reads cleanly;
+        // every other tool gets a single inline-code line + result.
+        const isBash = tc.function.name === 'bash';
+        const label = toolLabel(tc);
+        let liveIdx = -1; // index of the mutable preview/result line
+        let bulletIdx = -1; // index of the tool's label line (for ask_user inline answer)
+
+        if (isBash) {
+          liveLines.push('```');
+          bulletIdx = liveLines.length;
+          liveLines.push(label); // describe() returns "$ <cmd>" for bash
+          liveIdx = liveLines.length;
+          liveLines.push('…'); // mutable preview/result slot
+          liveLines.push('```');
+        } else {
+          bulletIdx = liveLines.length;
+          liveLines.push(`\`${label}\``);
+          liveIdx = liveLines.length;
+          liveLines.push('…');
+        }
         await repaint();
 
-        // Live-preview slot for bash. Other tools complete fast enough
-        // that streaming doesn't help; they don't add a preview line.
-        const isBash = tc.function.name === 'bash';
-        const liveIdx = isBash ? liveLines.length : -1;
-        if (liveIdx >= 0) {
-          liveLines.push('   …');
-          await repaint();
-        }
         let liveBuffer = '';
         let flushTimer: ReturnType<typeof setTimeout> | undefined;
         const scheduleFlush = (): void => {
-          if (flushTimer || liveIdx < 0) return;
+          if (flushTimer || liveIdx < 0 || !isBash) return;
           flushTimer = setTimeout(() => {
             flushTimer = undefined;
             liveLines[liveIdx] = liveLine(liveBuffer);
@@ -225,27 +252,28 @@ export async function runTurn(
                 web,
                 channel: input.channel,
                 threadTs: input.threadTs,
-                // The "checklist message" that ask_user renders blocks on is
-                // the current round's live message. Falls back to threadTs
-                // if for some reason there isn't a live one.
                 checklistTs: liveTs ?? input.threadTs,
               },
               signal,
             );
 
-        // Show the user's answer inline on the ask_user bullet so the
-        // resolved choice stays visible after the ask blocks are cleared.
+        // ask_user resolves inline on its label line (no separate result
+        // slot — the answer reads naturally next to the question).
         if (tc.function.name === 'ask_user' && !result.error) {
           liveLines[bulletIdx] = `${liveLines[bulletIdx]} → ${result.content}`;
-        }
-
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = undefined;
-        }
-        if (liveIdx >= 0) {
-          const firstLine = result.content.split('\n')[0] ?? '';
-          liveLines[liveIdx] = `   → ${firstLine}`;
+          // drop the unused result slot
+          if (liveIdx >= 0 && liveLines[liveIdx] === '…') {
+            liveLines.splice(liveIdx, 1);
+          }
+        } else {
+          if (flushTimer) {
+            clearTimeout(flushTimer);
+            flushTimer = undefined;
+          }
+          if (liveIdx >= 0) {
+            const firstLine = result.content.split('\n')[0] ?? '';
+            liveLines[liveIdx] = `→ ${firstLine}`;
+          }
         }
 
         await record({
@@ -267,11 +295,10 @@ export async function runTurn(
 
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
 
-      // End of this round. Repaint one last time so the frozen message
-      // shows its final state, then post a fresh placeholder for the
-      // NEXT round before we call the model again.
+      // End of round. Leave this round's message frozen and post a fresh
+      // placeholder for the next round.
       await repaint();
-      liveHeader = PLACEHOLDER_TEXT;
+      liveHeader = '';
       liveLines = [];
       liveTs = await postInThread(
         web,

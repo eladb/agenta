@@ -84,9 +84,11 @@ describe('runTurn with tools', () => {
     // Final reply is posted as a fresh clean message (no 💭 marker).
     const lastPost = posts[posts.length - 1]?.text;
     expect(lastPost).toBe('the time is now');
-    expect(lastPost?.startsWith('💭')).toBe(false);
-    // At least one intermediate edit contains the tool's describe() bullet.
-    expect(edits.some((e) => e.text.includes('• get current time'))).toBe(true);
+    // Final reply is plain — no leading arrow marker.
+    expect(lastPost?.startsWith('→')).toBe(false);
+    // At least one intermediate edit contains the tool's describe() label
+    // wrapped in inline backticks (no leading bullet under the new layout).
+    expect(edits.some((e) => e.text.includes('`get current time`'))).toBe(true);
 
     const events = await readEvents<{
       source: string;
@@ -109,7 +111,7 @@ describe('runTurn with tools', () => {
     expect(tcs[0]?.payload.parent_event_id).toBe(firstAssistant?.event_id);
   });
 
-  test('rolling rounds: 💭 placeholder + tool bullets, then clean final post', async () => {
+  test('rolling rounds: arrow placeholder, tool block, clean final post', async () => {
     const { web, edits, posts, deletes } = makeWebStub();
     let n = 0;
     const callModel: CallModel = async () => {
@@ -117,7 +119,7 @@ describe('runTurn with tools', () => {
       if (n === 1) {
         return {
           role: 'assistant',
-          content: null,
+          content: null, // no reasoning text → header should NOT persist
           tool_calls: [
             {
               id: 'c1',
@@ -132,21 +134,22 @@ describe('runTurn with tools', () => {
 
     await runTurn(web, callModel, 'sys', input);
 
-    // First post is the round-1 placeholder with the 💭 marker.
-    expect(posts[0]?.text.startsWith('💭')).toBe(true);
-    expect(posts[0]?.text).toContain('thinking');
+    // First post is the round-1 placeholder: a toned-down arrow line.
+    expect(posts[0]?.text).toBe('→ thinking…');
 
-    // At least one edit renders the tool bullet inside the live (💭)
-    // message — the round shows in-progress while the tool runs.
-    expect(
-      edits.some((e) => e.text.startsWith('💭') && e.text.includes('• get current time')),
-    ).toBe(true);
+    // When the model emits no reasoning text, the placeholder is REPLACED
+    // by the tool rendering — no stranded "thinking…" line above the tool.
+    // The tool appears as inline-code (no bullet).
+    const toolEdit = edits.find((e) => e.text.includes('`get current time`'));
+    expect(toolEdit).toBeDefined();
+    expect(toolEdit?.text.includes('thinking')).toBe(false);
+    expect(toolEdit?.text.includes('• ')).toBe(false);
 
-    // Final reply is posted as a separate clean message (no 💭 marker)
-    // and the in-flight placeholder was deleted.
+    // Final reply is posted as a fresh plain message (no arrow marker) and
+    // the in-flight placeholder was deleted.
     const lastPost = posts[posts.length - 1]?.text;
     expect(lastPost).toBe('final reply');
-    expect(lastPost?.startsWith('💭')).toBe(false);
+    expect(lastPost?.startsWith('→')).toBe(false);
     expect(deletes.length).toBeGreaterThan(0);
   });
 
