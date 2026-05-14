@@ -60,7 +60,11 @@ function renderRound(headerText: string, lines: string[]): string {
   if (headerText.length === 0 && lines.length === 0) return PLACEHOLDER;
   const parts: string[] = [];
   if (headerText.length > 0) {
-    parts.push(headerText);
+    // Bold the round header so intermediate reasoning is visually
+    // distinguishable from the final reply (which is plain text in a
+    // separate message). Authored as standard markdown; mdToMrkdwn
+    // translates **bold** → *bold* at the post boundary.
+    parts.push(`**${headerText}**`);
     if (lines.length > 0) parts.push(''); // blank line between header and tool blocks
   }
   parts.push(...lines);
@@ -177,13 +181,15 @@ export async function runTurn(
           await repaint();
         }
 
-        // Lazy attachment sync. Same idempotent helper as before.
+        // Lazy attachment sync. Same idempotent helper. We don't surface
+        // a status line in Slack — it's a harness detail, not something
+        // the user needs to track. If it fails, the next tool that tries
+        // to read the missing file will surface a real error.
         if (tool?.requiresSandbox && !provisionError) {
           try {
             const { synced } = await syncAttachmentsToSandbox(input.threadKey);
             if (synced > 0) {
-              liveLines.push(`_synced ${synced} attachment(s) to workspace_`);
-              await repaint();
+              log.info('turn', `[${input.threadKey}] synced ${synced} attachment(s)`);
             }
           } catch (err) {
             log.warn('turn', `[${input.threadKey}] attachment sync failed`, err);
