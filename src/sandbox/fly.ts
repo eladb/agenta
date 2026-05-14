@@ -42,13 +42,14 @@ function machineName(threadKey: string): string {
 // Volume names follow the same constraints as machine names (Fly: lowercase
 // alphanumeric + underscores, no hyphens for volumes; bot uses underscores
 // in the prefix so we don't get rejected). Reserve room for the prefix.
-function volumeNameFor(threadKey: string): string {
+export function _volumeNameFor(threadKey: string): string {
   const slug = threadKey
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
-  // Volumes also have a length cap (~30 chars). Trim aggressively.
-  const trimmed = slug.slice(0, 22);
+  // Volumes have a hard 30-char cap. Prefix is 11 chars, so the slug must
+  // be ≤19 chars; strip any trailing underscore the slice created.
+  const trimmed = slug.slice(0, 19).replace(/_+$/, '');
   return `agenta_vol_${trimmed}`;
 }
 
@@ -128,7 +129,7 @@ async function volumeById(id: string): Promise<FlyVolume | undefined> {
 
 async function createVolume(threadKey: string, region: string): Promise<FlyVolume> {
   const body = {
-    name: volumeNameFor(threadKey),
+    name: _volumeNameFor(threadKey),
     region,
     size_gb: VOLUME_SIZE_GB,
   };

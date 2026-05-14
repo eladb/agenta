@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readSession, writeSession } from '../runtime/session-store';
-import { _resetFlyState, flyProvider } from './fly';
+import { _resetFlyState, _volumeNameFor, flyProvider } from './fly';
 
 const ORIG_FETCH = globalThis.fetch;
 
@@ -526,5 +526,15 @@ describe('flyProvider', () => {
     });
     await flyProvider.destroyById('m-target');
     expect(deleted).toBe('m-target');
+  });
+
+  test('_volumeNameFor: respects fly 30-char limit + charset', () => {
+    // Realistic threadKey: 30-char Slack channel+ts pair.
+    const tk = 'C0B307LP274__1778732880_878239';
+    const name = _volumeNameFor(tk);
+    expect(name.length).toBeLessThanOrEqual(30);
+    expect(name).toMatch(/^[a-z0-9_]+$/);
+    expect(name.startsWith('agenta_vol_')).toBe(true);
+    expect(name.endsWith('_')).toBe(false);
   });
 });
