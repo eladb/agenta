@@ -1,19 +1,25 @@
 #!/usr/bin/env bun
-// Push slack-manifests/agent.json to the live Slack app via
+// Push slack-manifests/<name>.json to the live Slack app via
 // apps.manifest.update.
 //
-//   SLACK_CONFIG_ACCESS_TOKEN=xoxe-... bun scripts/update-agent-manifest.ts
+//   SLACK_CONFIG_ACCESS_TOKEN=xoxe-... bun scripts/update-manifest.ts <agent|tester>
 //
 // Config tokens rotate every 12h; generate a fresh one from
 // https://api.slack.com/authentication/config-tokens if needed.
 //
 // On success, Slack returns `permissions_updated: true` if new scopes
-// were added — that means you must REINSTALL the app for the bot token
-// to gain the new permissions. The bot token usually stays the same
-// across reinstalls.
+// were added — that means you must REINSTALL the app for the bot
+// token to gain the new permissions. The bot token usually stays the
+// same across reinstalls.
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+const name = process.argv[2];
+if (name !== 'agent' && name !== 'tester') {
+  console.error('usage: bun scripts/update-manifest.ts <agent|tester>');
+  process.exit(1);
+}
 
 const accessToken = process.env.SLACK_CONFIG_ACCESS_TOKEN;
 if (!accessToken) {
@@ -25,11 +31,13 @@ if (!accessToken) {
 }
 
 const repoRoot = join(import.meta.dir, '..');
-const manifest = JSON.parse(readFileSync(join(repoRoot, 'slack-manifests/agent.json'), 'utf8'));
+const manifest = JSON.parse(
+  readFileSync(join(repoRoot, `slack-manifests/${name}.json`), 'utf8'),
+);
 const cache = JSON.parse(readFileSync(join(repoRoot, '.slack-apps.json'), 'utf8'));
-const appId = cache.agent?.app_id;
+const appId = cache[name]?.app_id;
 if (typeof appId !== 'string') {
-  console.error('Could not find agent.app_id in .slack-apps.json');
+  console.error(`Could not find ${name}.app_id in .slack-apps.json`);
   process.exit(1);
 }
 
@@ -49,12 +57,12 @@ const body = (await res.json()) as {
 };
 
 if (!body.ok) {
-  console.error('apps.manifest.update failed:', body.error);
+  console.error(`apps.manifest.update failed for ${name}:`, body.error);
   process.exit(1);
 }
 
-console.log('manifest updated for app_id', appId);
+console.log(`manifest updated for ${name} (app_id ${appId})`);
 if (body.permissions_updated) {
   console.log('permissions changed — reinstall the app to grant new scopes');
-  console.log('install URL:', cache.agent?.install_url);
+  console.log('install URL:', cache[name]?.install_url);
 }
