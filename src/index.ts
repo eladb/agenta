@@ -1,3 +1,4 @@
+import { acquire } from './lockfile';
 import { log } from './log';
 import { createCallModel } from './model/gateway';
 import { makeEventHandler } from './runtime/handler';
@@ -21,6 +22,17 @@ if (!appToken || !botToken) {
 }
 if (!modelApiKey) {
   log.error('boot', 'MODEL_API_KEY (or ANTHROPIC_API_KEY) required (see .env.example)');
+  process.exit(1);
+}
+
+// Single-process lock: two agent instances using the same bot token would
+// split-brain Socket Mode delivery (Slack sends each event to exactly one
+// connected client). Fails fast with a clear error pointing at the running
+// pid, instead of silently dropping half of incoming events.
+try {
+  acquire('agent');
+} catch (err) {
+  log.error('boot', (err as Error).message);
   process.exit(1);
 }
 

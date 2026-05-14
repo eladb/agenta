@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
+import { acquire, type Lock } from '../../src/lockfile';
 import { type CallModel, createCallModel, type Message } from '../../src/model/gateway';
 import { withGolden } from '../../src/model/golden';
 import { makeEventHandler } from '../../src/runtime/handler';
@@ -50,12 +51,14 @@ export type Agent = {
   socket: SocketModeClient;
   web: WebClient;
   botUserId: string;
+  lock: Lock;
 };
 
 export type Tester = {
   socket: SocketModeClient;
   web: WebClient;
   botUserId: string;
+  lock: Lock;
 };
 
 let dataDir: string | undefined;
@@ -80,22 +83,40 @@ export function getDataDir(): string {
 export async function startAgent(callModel: CallModel = stubCallModel): Promise<Agent> {
   const appToken = requireEnv('SLACK_APP_TOKEN');
   const botToken = requireEnv('SLACK_BOT_TOKEN');
-  const agent = await connect(appToken, botToken);
-  listen(
-    agent.socket,
-    agent.botUserId,
-    makeEventHandler(agent.web, botToken, agent.botUserId, callModel),
-  );
-  return agent;
+  // Hold the same lock the production agent takes — kills Socket Mode
+  // split-brain (two clients on the same bot token each get ~50% of
+  // events). If production `bun start` is running, this throws with a
+  // pid pointer instead of letting tests flake silently.
+  const lock = acquire('agent');
+  try {
+    const agent = await connect(appToken, botToken);
+    listen(
+      agent.socket,
+      agent.botUserId,
+      makeEventHandler(agent.web, botToken, agent.botUserId, callModel),
+    );
+    return { ...agent, lock };
+  } catch (err) {
+    lock.release();
+    throw err;
+  }
 }
 
 export async function startTester(): Promise<Tester> {
-  const web = new WebClient(requireEnv('TEST_BOT_TOKEN'));
-  const auth = await web.auth.test();
-  if (!auth.user_id) throw new Error('tester auth.test returned no user_id');
-  const socket = new SocketModeClient({ appToken: requireEnv('TEST_APP_TOKEN') });
-  await socket.start();
-  return { web, socket, botUserId: auth.user_id };
+  // Same split-brain risk for the tester Slack app — only one tester
+  // process at a time on the same TEST_BOT_TOKEN.
+  const lock = acquire('tester');
+  try {
+    const web = new WebClient(requireEnv('TEST_BOT_TOKEN'));
+    const auth = await web.auth.test();
+    if (!auth.user_id) throw new Error('tester auth.test returned no user_id');
+    const socket = new SocketModeClient({ appToken: requireEnv('TEST_APP_TOKEN') });
+    await socket.start();
+    return { web, socket, botUserId: auth.user_id, lock };
+  } catch (err) {
+    lock.release();
+    throw err;
+  }
 }
 
 export async function mention(
@@ -194,6 +215,10 @@ export async function deleteThread(
 
 export async function shutdown(agent: Agent, tester: Tester): Promise<void> {
   await Promise.allSettled([agent.socket.disconnect(), tester.socket.disconnect()]);
+  // Release the per-bot locks so the next test file (in the same process)
+  // or the next `bun run e2e` invocation can acquire fresh.
+  agent.lock.release();
+  tester.lock.release();
 }
 
 export async function waitFor(
