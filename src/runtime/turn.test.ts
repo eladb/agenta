@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CallModel } from '../model/gateway';
+import type { CallModel, Message } from '../model/gateway';
+import { newEventId, nowIso, record } from '../persistence/events';
 import { readEvents } from '../persistence/store';
 import { runTurn } from './turn';
 
@@ -318,5 +319,105 @@ describe('runTurn with tools', () => {
     await run;
 
     expect(edits[edits.length - 1]?.text).toBe('stopped');
+  });
+
+  test('steering: mid-turn user message is injected before the next model call', async () => {
+    const { web } = makeWebStub();
+    let n = 0;
+    let secondCallMessages: Message[] | undefined;
+    const callModel: CallModel = async (messages) => {
+      n++;
+      if (n === 1) {
+        // Simulate a user mention landing AFTER the initial buildMessages /
+        // consumed-set snapshot but BEFORE the next iteration. Recording
+        // into JSONL is exactly what handler.ts does for incoming Slack
+        // messages, so this matches production wiring.
+        await record({
+          event_id: newEventId(),
+          thread_key: 'k1',
+          source: 'slack',
+          type: 'message',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: {
+            slack_event_id: 'Ev-mid',
+            slack_ts: '2.0',
+            user: 'U2',
+            text: 'actually wait — output JSON instead',
+          },
+        });
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 't1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      secondCallMessages = messages;
+      return { role: 'assistant', content: 'ok, returning JSON' };
+    };
+
+    let consumedSignals = 0;
+    await runTurn(web, callModel, 'sys', input, undefined, () => {
+      consumedSignals += 1;
+    });
+
+    expect(secondCallMessages).toBeDefined();
+    // The steering message landed in the messages array as a `user` role
+    // entry, after the tool flow from iteration 1.
+    expect(
+      secondCallMessages?.some(
+        (m) =>
+          m.role === 'user' &&
+          typeof m.content === 'string' &&
+          m.content.includes('actually wait'),
+      ),
+    ).toBe(true);
+    // The bot signaled to session.ts that a mid-turn mention was consumed.
+    expect(consumedSignals).toBeGreaterThan(0);
+  });
+
+  test('steering on no-tool-calls path: would-be-final becomes intermediate, loop continues', async () => {
+    const { web, posts } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        // Model thinks it's done — but inject a steering message just
+        // before this response is delivered, so the turn should NOT post
+        // a clean final reply.
+        await record({
+          event_id: newEventId(),
+          thread_key: 'k1',
+          source: 'slack',
+          type: 'message',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: {
+            slack_event_id: 'Ev-mid',
+            slack_ts: '2.0',
+            user: 'U2',
+            text: 'wait, also do X',
+          },
+        });
+        return { role: 'assistant', content: 'almost-final answer here' };
+      }
+      return { role: 'assistant', content: 'final after steering' };
+    };
+
+    await runTurn(web, callModel, 'sys', input);
+
+    // The almost-final text should NOT have been posted as a clean final
+    // message — only the post-steering reply is.
+    const cleanFinals = posts.filter((p) => p.text === 'almost-final answer here');
+    expect(cleanFinals.length).toBe(0);
+    // The actual final after steering is posted clean.
+    const finalPost = posts[posts.length - 1]?.text;
+    expect(finalPost).toBe('final after steering');
   });
 });

@@ -3,9 +3,12 @@ import { log } from '../log';
 import { buildMessages } from '../model/context';
 import type { CallModel, Message, ToolCall } from '../model/gateway';
 import { invokeTool, TOOL_DEFS, TOOLS } from '../model/tools';
+import type { AgentaEvent } from '../persistence/events';
 import { newEventId, nowIso, record } from '../persistence/events';
+import { readEvents } from '../persistence/store';
 import { ensureContainer, isSandboxReady, syncAttachmentsToSandbox } from '../sandbox';
 import { deleteMessage, editMessage, postInThread } from '../slack/post';
+import { parseCommand } from './commands';
 import { redact } from './redact';
 
 export type TurnInput = {
@@ -77,12 +80,44 @@ function pushSeparator(lines: string[]): void {
   if (lines.length > 0 && lines[lines.length - 1] !== '') lines.push('');
 }
 
+// Drain any slack.message events that arrived since `consumed` was last
+// refreshed, append them to the in-process messages[] as `role: user`, and
+// add their event_ids to `consumed` so we don't double-inject. Returns the
+// number of injected events.
+//
+// This is the "steering" path: between rounds, the model picks up any
+// user input that landed during the previous round and can adjust its
+// trajectory. (Real-time during a single model call is impossible — the
+// API is request/response.)
+async function injectSteering(
+  threadKey: string,
+  messages: Message[],
+  consumed: Set<string>,
+): Promise<number> {
+  const events = await readEvents<AgentaEvent>(threadKey);
+  let n = 0;
+  for (const e of events) {
+    if (e.source !== 'slack' || e.type !== 'message') continue;
+    if (consumed.has(e.event_id)) continue;
+    const text = e.payload.text;
+    // Skip slash-commands — they're consumed by handler.ts, not steering.
+    // The model shouldn't see "/stop" or "/delete" as user input.
+    if (typeof text === 'string' && text.length > 0 && parseCommand(text) === null) {
+      messages.push({ role: 'user', content: text });
+      n += 1;
+    }
+    consumed.add(e.event_id);
+  }
+  return n;
+}
+
 export async function runTurn(
   web: WebClient,
   callModel: CallModel,
   systemPrompt: string,
   input: TurnInput,
   signal?: AbortSignal,
+  onMidTurnConsume?: () => void,
 ): Promise<void> {
   // "Live" message tracks ONLY the current round. When the next round
   // begins (model returns more text + tool calls), we leave this message
@@ -111,6 +146,17 @@ export async function runTurn(
   try {
     const messages: Message[] = await buildMessages(input.threadKey, systemPrompt);
 
+    // Initial set of slack.message event_ids that are already represented in
+    // `messages` (via buildMessages). Anything that lands AFTER this is
+    // unseen by the model until we inject it via injectSteering().
+    const consumed = new Set<string>();
+    {
+      const initial = await readEvents<AgentaEvent>(input.threadKey);
+      for (const e of initial) {
+        if (e.source === 'slack' && e.type === 'message') consumed.add(e.event_id);
+      }
+    }
+
     while (true) {
       const response = await callModel(messages, { tools: TOOL_DEFS, signal });
 
@@ -128,9 +174,35 @@ export async function runTurn(
         payload: { slack_ts: liveTs ?? '', text },
       });
 
-      // No tool calls → final reply. Drop the placeholder/last live
-      // message and post a clean final message in its place.
+      // No tool calls → model thinks it's done. But if user input landed
+      // mid-round, treat this as an intermediate response: render it as a
+      // round message (italic header, no tool block), inject the new user
+      // messages, and continue the loop so the model sees them.
       if (toolCalls.length === 0) {
+        // Inject any new user messages that arrived during the round.
+        const injected = await injectSteering(input.threadKey, messages, consumed);
+        if (injected > 0) {
+          onMidTurnConsume?.();
+          // Show the would-be-final text as an intermediate round header.
+          // If the model emitted nothing, still post the placeholder + new
+          // round (rare but possible).
+          if (text.length > 0) {
+            messages.push({ role: 'assistant', content: text });
+            liveHeader = text;
+            liveLines = [];
+            await repaint();
+          }
+          // Finalize this round, start a new placeholder for the next.
+          liveHeader = '';
+          liveLines = [];
+          liveTs = await postInThread(
+            web,
+            input.channel,
+            input.threadTs,
+            renderRound(liveHeader, liveLines),
+          );
+          continue;
+        }
         const reply = text.length > 0 ? text : '(empty reply)';
         if (liveTs) {
           await deleteMessage(web, input.channel, liveTs);
@@ -298,6 +370,14 @@ export async function runTurn(
       }
 
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
+
+      // Steering: drain any user messages that arrived during this round
+      // before the next model call. The model will see them on the next
+      // iteration and can adjust direction.
+      const injectedMid = await injectSteering(input.threadKey, messages, consumed);
+      if (injectedMid > 0) {
+        onMidTurnConsume?.();
+      }
 
       // End of round. Leave this round's message frozen and post a fresh
       // placeholder for the next round.

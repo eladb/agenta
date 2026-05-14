@@ -71,10 +71,15 @@ export async function startOrQueue(
     system_prompt: systemPrompt,
     ...(prior?.sandbox !== undefined ? { sandbox: prior.sandbox } : {}),
   });
+  // Lets runTurn signal "I consumed a mid-turn mention" so the post-turn
+  // pending-check doesn't kick off a redundant follow-up turn.
+  const onMidTurnConsume = (): void => {
+    s.pending = false;
+  };
   try {
     while (true) {
       s.abort = new AbortController();
-      await runTurn(web, callModel, systemPrompt, input, s.abort.signal);
+      await runTurn(web, callModel, systemPrompt, input, s.abort.signal, onMidTurnConsume);
       if (!s.pending) break;
       s.pending = false;
       // If /stop fired during the turn we are now in 'stopping'; flip back
