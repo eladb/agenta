@@ -50,20 +50,27 @@ const callModel = createCallModel({
 const { socket, web, botUserId } = await connect(appToken, botToken);
 log.info('boot', `connected as bot user ${botUserId}`);
 
+// Register handlers BEFORE any slow boot work. Both reap and recovery
+// hit Slack/Fly HTTP APIs which can stall under throttling or transient
+// network issues — we don't want them to delay the bot from responding
+// to incoming mentions. Each runs as fire-and-forget; failures log a
+// warning and don't take the bot down.
+listen(socket, botUserId, makeEventHandler(web, botToken, botUserId, callModel));
+listenInteractive(socket);
+log.info('boot', 'listening for events');
+
+// Announce any in-flight sessions that died with the previous process.
+// listSessions() scans data/{thread_key}/session.json.
+recoverInterruptedSessions(web).catch((err) => {
+  log.warn('boot', `recovery failed: ${(err as Error).message}`);
+});
+
 // Sandboxes survive bot restart: per-thread routing info lives in
 // session.json, the provider re-hydrates from disk on the next mention.
 // Routine cleanup is `/delete`. This boot-time reap is a safety net for
 // orphans the bot lost track of (e.g. `rm -rf data/` without `/delete`,
-// or a thread dir nuked while the bot was down).
-await reapOrphanSandboxes().catch((err) => {
+// or a thread dir nuked while the bot was down). Slow under Fly
+// throttling, so run in the background.
+reapOrphanSandboxes().catch((err) => {
   log.warn('boot', `orphan reap failed: ${(err as Error).message}`);
 });
-
-// Announce any in-flight sessions that died with the previous process before
-// we start handling new events. listSessions() scans data/{thread_key}/session.json.
-await recoverInterruptedSessions(web).catch((err) => {
-  log.warn('boot', `recovery failed: ${(err as Error).message}`);
-});
-
-listen(socket, botUserId, makeEventHandler(web, botToken, botUserId, callModel));
-listenInteractive(socket);
