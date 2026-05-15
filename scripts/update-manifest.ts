@@ -2,10 +2,13 @@
 // Push slack-manifests/<name>.json to the live Slack app via
 // apps.manifest.update.
 //
-//   SLACK_CONFIG_ACCESS_TOKEN=xoxe-... bun scripts/update-manifest.ts <agent|tester>
+//   bun scripts/update-manifest.ts <agent|tester>
 //
-// Config tokens rotate every 12h; generate a fresh one from
-// https://api.slack.com/authentication/config-tokens if needed.
+// Config tokens are read from .slack-apps.json (cached from a prior run)
+// or — on first use — from SLACK_CONFIG_ACCESS_TOKEN +
+// SLACK_CONFIG_REFRESH_TOKEN env vars. The env-provided pair is persisted
+// into the cache on first use, and rotated automatically when expired
+// (Slack config tokens rotate every 12h).
 //
 // On success, Slack returns `permissions_updated: true` if new scopes
 // were added — that means you must REINSTALL the app for the bot
@@ -14,6 +17,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadCache, slackApi, withTokenRefresh } from './slack-config-tokens';
 
 const name = process.argv[2];
 if (name !== 'agent' && name !== 'tester') {
@@ -21,45 +25,25 @@ if (name !== 'agent' && name !== 'tester') {
   process.exit(1);
 }
 
-const accessToken = process.env.SLACK_CONFIG_ACCESS_TOKEN;
-if (!accessToken) {
-  console.error(
-    'SLACK_CONFIG_ACCESS_TOKEN is required. Generate one at',
-    'https://api.slack.com/authentication/config-tokens',
-  );
-  process.exit(1);
-}
-
 const repoRoot = join(import.meta.dir, '..');
 const manifest = JSON.parse(
   readFileSync(join(repoRoot, `slack-manifests/${name}.json`), 'utf8'),
 );
-const cache = JSON.parse(readFileSync(join(repoRoot, '.slack-apps.json'), 'utf8'));
+const cache = loadCache();
 const appId = cache[name]?.app_id;
 if (typeof appId !== 'string') {
   console.error(`Could not find ${name}.app_id in .slack-apps.json`);
   process.exit(1);
 }
 
-const res = await fetch('https://slack.com/api/apps.manifest.update', {
-  method: 'POST',
-  headers: {
-    Authorization: `Bearer ${accessToken}`,
-    'Content-Type': 'application/json; charset=utf-8',
-  },
-  body: JSON.stringify({ app_id: appId, manifest }),
-});
-
-const body = (await res.json()) as {
-  ok: boolean;
-  error?: string;
+type UpdateResp = {
+  ok: true;
   permissions_updated?: boolean;
 };
 
-if (!body.ok) {
-  console.error(`apps.manifest.update failed for ${name}:`, body.error);
-  process.exit(1);
-}
+const body = await withTokenRefresh(cache, (access) =>
+  slackApi<UpdateResp>('apps.manifest.update', access, { app_id: appId, manifest }, 'json'),
+);
 
 console.log(`manifest updated for ${name} (app_id ${appId})`);
 if (body.permissions_updated) {

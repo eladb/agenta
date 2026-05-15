@@ -3,70 +3,32 @@
 // Uses Slack configuration tokens to create apps from manifest, then prompts
 // you to install each app and paste back the resulting tokens.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import {
+  type Cache,
+  loadCache,
+  saveCache,
+  slackApi,
+  withTokenRefresh,
+} from './slack-config-tokens';
 
 const ROOT = join(import.meta.dir, '..');
 const MANIFESTS = {
   agent: join(ROOT, 'slack-manifests/agent.json'),
   tester: join(ROOT, 'slack-manifests/tester.json'),
 };
-const CACHE_PATH = join(ROOT, '.slack-apps.json');
 const ENV_PATH = join(ROOT, '.env');
 
 type AppKey = 'agent' | 'tester';
 
-type Cache = {
-  agent?: { app_id: string; install_url: string };
-  tester?: { app_id: string; install_url: string };
-  config_access_token?: string;
-  config_refresh_token?: string;
-};
-
-type SlackErr = { ok: false; error: string; errors?: unknown };
 type ManifestCreateResp = {
   ok: true;
   app_id: string;
   credentials: { client_id: string; client_secret: string; signing_secret: string };
   oauth_authorize_url: string;
 };
-type RefreshTokenResp = { ok: true; token: string; refresh_token: string; expires_in: number };
-
-function loadCache(): Cache {
-  if (!existsSync(CACHE_PATH)) return {};
-  return JSON.parse(readFileSync(CACHE_PATH, 'utf8')) as Cache;
-}
-
-function saveCache(c: Cache): void {
-  writeFileSync(CACHE_PATH, `${JSON.stringify(c, null, 2)}\n`);
-}
-
-async function slackApi<T>(
-  method: string,
-  token: string,
-  params: Record<string, string>,
-): Promise<T> {
-  const body = new URLSearchParams(params);
-  const res = await fetch(`https://slack.com/api/${method}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body,
-  });
-  const json = (await res.json()) as T | SlackErr;
-  if (!(json as { ok?: boolean }).ok) {
-    const err = json as SlackErr;
-    throw new Error(`slack ${method} failed: ${err.error} ${JSON.stringify(err.errors ?? '')}`);
-  }
-  return json as T;
-}
-
-async function refreshConfigToken(refresh: string): Promise<RefreshTokenResp> {
-  return slackApi<RefreshTokenResp>('tooling.tokens.rotate', '', { refresh_token: refresh });
-}
 
 async function createApp(access: string, manifestPath: string): Promise<ManifestCreateResp> {
   const manifest = readFileSync(manifestPath, 'utf8');
@@ -75,40 +37,6 @@ async function createApp(access: string, manifestPath: string): Promise<Manifest
 
 async function deleteApp(access: string, appId: string): Promise<void> {
   await slackApi('apps.manifest.delete', access, { app_id: appId });
-}
-
-function getConfigTokens(cache: Cache): { access: string; refresh: string } {
-  const access = process.env.SLACK_CONFIG_ACCESS_TOKEN ?? cache.config_access_token;
-  const refresh = process.env.SLACK_CONFIG_REFRESH_TOKEN ?? cache.config_refresh_token;
-  if (!access || !refresh) {
-    console.error(
-      'Missing config tokens.\n' +
-        '1. Visit https://api.slack.com/reference/manifests#config-tokens\n' +
-        '2. Click "Generate Token" for your workspace.\n' +
-        '3. Export them:\n' +
-        '     export SLACK_CONFIG_ACCESS_TOKEN=xoxe.xoxp-...\n' +
-        '     export SLACK_CONFIG_REFRESH_TOKEN=xoxe-...\n' +
-        '4. Re-run `bun run setup`.\n',
-    );
-    process.exit(1);
-  }
-  return { access, refresh };
-}
-
-async function withTokenRefresh<T>(cache: Cache, fn: (access: string) => Promise<T>): Promise<T> {
-  const tokens = getConfigTokens(cache);
-  try {
-    return await fn(tokens.access);
-  } catch (err) {
-    const msg = (err as Error).message;
-    if (!msg.includes('token_expired') && !msg.includes('invalid_auth')) throw err;
-    console.log('config token expired, refreshing...');
-    const rotated = await refreshConfigToken(tokens.refresh);
-    cache.config_access_token = rotated.token;
-    cache.config_refresh_token = rotated.refresh_token;
-    saveCache(cache);
-    return fn(rotated.token);
-  }
 }
 
 async function ensureCreated(
