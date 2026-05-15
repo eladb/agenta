@@ -30,6 +30,12 @@ export type SandboxRecord =
       machine_id: string;
       token: string;
       volume_id?: string;
+      // The Fly Machines `private_ip` field — a fdaa::/16 IPv6 address
+      // reachable over the user's WireGuard mesh. Used by the per-thread
+      // reverse-SSH tunnel (Phase 23). Optional for backwards compat with
+      // records written before this landed (consistent with how
+      // volume_id was rolled out in phase 16).
+      private_ip?: string;
     };
 
 // Per-thread git-backed-botspace routing. `pubkey_fp` is the SHA256

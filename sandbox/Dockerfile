@@ -14,6 +14,7 @@ RUN apt-get update \
       zip unzip \
       python3 python-is-python3 python3-pip python3-pil python3-matplotlib python3-numpy python3-pandas \
       imagemagick \
+      dropbear-bin \
  && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged user for everything except the iptables setup in entrypoint.sh.

@@ -30,12 +30,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeEntry as removeAuthorizedKeysEntry } from '../../src/git/authorized-keys';
+import { stopTunnel } from '../../src/git/tunnel';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
+import { removeContainer } from '../../src/sandbox';
 import {
   type Agent,
   cleanupTempDataDir,
   DOCKER_PROVIDER_ACTIVE,
   deleteThread,
+  FLY_TUNNEL_ACTIVE,
   mention,
   requireEnv,
   SSHD_REACHABLE,
@@ -326,5 +329,196 @@ if (!CAN_RUN) {
       const refsText = refs.stdout.toString('utf8');
       expect(refsText).not.toContain('evil.txt'); // sanity — just no match
     }, 180_000);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 23: Fly path with the reverse-SSH tunnel.
+//
+// Same shape as the docker path above, but uses the per-thread autossh
+// tunnel into the sandbox (via the user's WireGuard mesh) instead of
+// host.docker.internal.
+//
+// To run this block end-to-end the operator must:
+//   1. Run `bun run setup-tunnel` (one-time): generates the Mac-side
+//      ed25519 keypair and creates a Fly WireGuard peer for this Mac.
+//   2. Import the generated `agenta-mac.conf` into the macOS WireGuard
+//      app and activate the tunnel — `ping6 fdaa::1` must succeed.
+//   3. Set SANDBOX_PROVIDER=fly + FLY_API_TOKEN + FLY_APP_NAME in env.
+//   4. Set AGENTA_TEST_TUNNEL_OPT_IN=1.
+//
+// The test creates a fresh Fly machine per case (slow — ~30–60s of
+// provisioning + image pull) and cleans up after itself: stops the
+// tunnel, /delete-s the thread (which removes the Fly machine + volume
+// + authorized_keys line). Like the docker case it also touches the
+// real ~/.ssh/authorized_keys — same TEST_TK_PREFIX-based cleanup
+// machinery applies.
+// ---------------------------------------------------------------------------
+
+if (FLY_TUNNEL_ACTIVE) {
+  let agentFly: Agent;
+  let testerFly: Tester;
+  let channelFly: string;
+  let repoPathFly: string;
+  let originalRepoPathEnvFly: string | undefined;
+  let originalAuthKeysEnvFly: string | undefined;
+  const createdTkFly = new Set<string>();
+  const createdTsFly: string[] = [];
+  const realAuthorizedKeysFly = join(homedir(), '.ssh', 'authorized_keys');
+
+  const callsFly: Message[][] = [];
+  const scriptFly: AssistantMessage[] = [];
+  const scriptedCallModelFly: CallModel = async (messages) => {
+    callsFly.push(messages);
+    const next = scriptFly.shift();
+    if (next) return next;
+    return { role: 'assistant', content: 'done' };
+  };
+
+  function testTkFly(): string {
+    return `e2e-git-bs-fly-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  }
+
+  async function cleanupAuthKeysFly(): Promise<void> {
+    for (const tk of createdTkFly) {
+      await removeAuthorizedKeysEntry(tk).catch(() => {});
+    }
+  }
+
+  function exitHookFly(): void {
+    if (!existsSync(realAuthorizedKeysFly)) return;
+    try {
+      const body = readFileSync(realAuthorizedKeysFly, 'utf8');
+      const filtered = body
+        .split('\n')
+        .filter((l) => {
+          for (const tk of createdTkFly) if (l.endsWith(` agenta-${tk}`)) return false;
+          return true;
+        })
+        .join('\n');
+      if (filtered !== body) writeFileSync(realAuthorizedKeysFly, filtered, { mode: 0o600 });
+    } catch {
+      // best-effort
+    }
+  }
+  process.on('exit', exitHookFly);
+
+  beforeAll(async () => {
+    repoPathFly = mkdtempSync(join(tmpdir(), 'agenta-e2e-git-bs-fly-repo-'));
+    spawnSync('git', ['init', repoPathFly]);
+    spawnSync('git', ['-C', repoPathFly, 'config', 'user.email', 'e2e@agenta.test']);
+    spawnSync('git', ['-C', repoPathFly, 'config', 'user.name', 'agenta-e2e']);
+    writeFileSync(join(repoPathFly, 'README.md'), 'E2E TEST BOT BODY (fly)\n');
+    spawnSync('git', ['-C', repoPathFly, 'add', 'README.md']);
+    spawnSync('git', ['-C', repoPathFly, 'commit', '-m', 'initial']);
+
+    originalRepoPathEnvFly = process.env.AGENTA_REPO_PATH;
+    process.env.AGENTA_REPO_PATH = repoPathFly;
+    originalAuthKeysEnvFly = process.env.AGENTA_AUTHORIZED_KEYS_PATH;
+    process.env.AGENTA_AUTHORIZED_KEYS_PATH = realAuthorizedKeysFly;
+
+    setupTempDataDir();
+    channelFly = requireEnv('TEST_CHANNEL_ID');
+    [agentFly, testerFly] = await Promise.all([startAgent(scriptedCallModelFly), startTester()]);
+  });
+
+  afterEach(async () => {
+    await cleanupAuthKeysFly();
+  });
+
+  afterAll(async () => {
+    await cleanupAuthKeysFly();
+    // Tear down tunnels we spawned, then the Fly machines themselves via
+    // /delete equivalent operations on each thread.
+    for (const tk of createdTkFly) {
+      await stopTunnel(tk).catch(() => {});
+      await removeContainer(tk).catch(() => {});
+    }
+    for (const ts of createdTsFly) {
+      await deleteThread(testerFly, agentFly, channelFly, ts);
+    }
+    await shutdown(agentFly, testerFly);
+    cleanupTempDataDir();
+    rmSync(repoPathFly, { recursive: true, force: true });
+    if (originalRepoPathEnvFly === undefined) delete process.env.AGENTA_REPO_PATH;
+    else process.env.AGENTA_REPO_PATH = originalRepoPathEnvFly;
+    if (originalAuthKeysEnvFly === undefined) delete process.env.AGENTA_AUTHORIZED_KEYS_PATH;
+    else process.env.AGENTA_AUTHORIZED_KEYS_PATH = originalAuthKeysEnvFly;
+    process.removeListener('exit', exitHookFly);
+  });
+
+  describe('git-backed botspace on Fly (opt-in)', () => {
+    test('mention triggers tunneled bootstrap; sandbox can push back via the reverse tunnel', async () => {
+      const tk = testTkFly();
+      createdTkFly.add(tk);
+      const bashCmd = [
+        'set -eu',
+        'echo hello-from-fly-sandbox > greeting.txt',
+        'git add greeting.txt',
+        'git commit -m test-fly',
+        'git push origin HEAD',
+      ].join(' && ');
+      scriptFly.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_bash',
+            type: 'function',
+            function: { name: 'bash', arguments: JSON.stringify({ command: bashCmd }) },
+          },
+        ],
+      });
+      scriptFly.push({ role: 'assistant', content: 'pushed' });
+
+      const threadTs = await mention(
+        testerFly,
+        agentFly.botUserId,
+        channelFly,
+        undefined,
+        `e2e-git-bs-fly ${tk}`,
+      );
+      createdTsFly.push(threadTs);
+
+      await waitForReply(
+        testerFly,
+        channelFly,
+        threadTs,
+        agentFly.botUserId,
+        (t) => t === 'pushed' || t.startsWith(STUB_REPLY_PREFIX),
+        // Fly machine provisioning is slower than Docker; bump generously.
+        { timeoutMs: 240_000 },
+      );
+
+      const log = spawnSync(
+        'git',
+        ['-C', repoPathFly, 'log', '--format=%s', '--all', `refs/heads/agenta/sessions/${tk}`],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      expect(log.stdout.toString('utf8').trim().split('\n')).toContain('test-fly');
+
+      const show = spawnSync(
+        'git',
+        ['-C', repoPathFly, 'show', `refs/heads/agenta/sessions/${tk}:greeting.txt`],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      expect(show.status).toBe(0);
+      expect(show.stdout.toString('utf8')).toContain('hello-from-fly-sandbox');
+
+      const body = readFileSync(realAuthorizedKeysFly, 'utf8');
+      expect(body).toContain(`agenta-${tk}`);
+    }, 300_000);
+  });
+} else if (process.env.SANDBOX_PROVIDER === 'fly') {
+  // If we're on Fly but the operator hasn't opted into the tunnel test,
+  // emit a hint so they know how.
+  test('git-botspace on Fly (skipped)', () => {
+    console.log(
+      '[git-botspace fly] skipped. Opt in by:\n' +
+        '  1. bun run setup-tunnel\n' +
+        '  2. import + activate ./agenta-mac.conf in WireGuard.app\n' +
+        '  3. export AGENTA_TEST_TUNNEL_OPT_IN=1 SANDBOX_PROVIDER=fly FLY_API_TOKEN=…',
+    );
+    expect(true).toBe(true);
   });
 }

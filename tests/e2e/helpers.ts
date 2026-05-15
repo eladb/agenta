@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
@@ -43,6 +43,23 @@ function sshdReachable(): boolean {
   return r.status === 0;
 }
 export const SSHD_REACHABLE = sshdReachable();
+
+// True iff the Phase 23 Fly tunnel test can run end-to-end. Requires:
+//   - SANDBOX_PROVIDER=fly                    (we're actually using Fly)
+//   - AGENTA_TEST_TUNNEL_OPT_IN=1             (touches real ~/.ssh + Fly machines)
+//   - ~/.ssh/agenta_tunnel_id_ed25519 exists  (bot's tunnel keypair)
+//   - FLY_API_TOKEN set                       (bot can create machines)
+//   - WireGuard tunnel active                 (ping6 fdaa::1 succeeds within 2s)
+function flyTunnelActive(): boolean {
+  if ((process.env.SANDBOX_PROVIDER ?? '').toLowerCase() !== 'fly') return false;
+  if (process.env.AGENTA_TEST_TUNNEL_OPT_IN !== '1') return false;
+  if (!process.env.FLY_API_TOKEN) return false;
+  const keyPath = join(homedir(), '.ssh', 'agenta_tunnel_id_ed25519');
+  if (!existsSync(keyPath)) return false;
+  const r = spawnSync('ping6', ['-c', '1', '-W', '2', 'fdaa::1'], { stdio: 'ignore' });
+  return r.status === 0;
+}
+export const FLY_TUNNEL_ACTIVE = flyTunnelActive();
 
 export const STUB_REPLY_PREFIX = 'stub: ';
 

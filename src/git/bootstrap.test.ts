@@ -12,14 +12,15 @@
 //     entries, the loop falls into the fast-path probe.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readSession, writeSession } from '../runtime/session-store';
+import { readSession, setSandbox, writeSession } from '../runtime/session-store';
 import { _resetImageReadyCache, dockerProvider } from '../sandbox/docker';
 import { _resetFlyState, flyProvider } from '../sandbox/fly';
 import { addEntry, listEntries, _resetForTests as resetAuthKeys } from './authorized-keys';
 import { ensureRepoBootstrap } from './bootstrap';
+import { _getHandle, _setSpawnImpl, _resetForTests as resetTunnel } from './tunnel';
 
 const hasSshKeygen = Bun.which('ssh-keygen') !== null;
 
@@ -52,6 +53,7 @@ beforeEach(async () => {
   process.env.AGENTA_AUTHORIZED_KEYS_PATH = authKeysPath;
   _resetImageReadyCache();
   _resetFlyState();
+  resetTunnel();
   await resetAuthKeys();
   const fakeEndpoint = async (): Promise<{
     baseUrl: string;
@@ -69,9 +71,13 @@ afterEach(() => {
   delete process.env.AGENTA_DATA_DIR;
   delete process.env.AGENTA_AUTHORIZED_KEYS_PATH;
   delete process.env.AGENTA_REPO_PATH;
+  delete process.env.SANDBOX_PROVIDER;
+  delete process.env.AGENTA_HOST_SSH_HOSTNAME;
+  delete process.env.AGENTA_HOST_SSH_PORT;
   rmSync(dataDir, { recursive: true, force: true });
   _resetImageReadyCache();
   _resetFlyState();
+  resetTunnel();
   (dockerProvider as { getEndpoint: GetEndpointFn }).getEndpoint = origDocker;
   (flyProvider as { getEndpoint: GetEndpointFn }).getEndpoint = origFly;
 });
@@ -225,6 +231,160 @@ describe('ensureRepoBootstrap', () => {
       expect(cmds.some((c) => c.includes('config user.name'))).toBe(true);
       expect(cmds.some((c) => c.includes('symbolic-ref'))).toBe(true);
       expect(cmds.some((c) => c.includes(`checkout -B agenta/sessions/${tk}`))).toBe(true);
+    },
+  );
+
+  test.skipIf(!hasSshKeygen)(
+    'docker mode (default): ssh config uses host.docker.internal:22, no tunnel pubkey install, no autossh spawn',
+    async () => {
+      process.env.AGENTA_REPO_PATH = repoPath;
+      delete process.env.SANDBOX_PROVIDER;
+      seedKnownHostsCache();
+      const tk = 'tk-docker';
+
+      const execReplies = [
+        { exitCode: 0 }, // mkdir
+        { exitCode: 0 }, // chmod
+        { exitCode: 0 }, // clone
+        { exitCode: 0 }, // user.email
+        { exitCode: 0 }, // user.name
+        { exitCode: 0, stdout: `refs/heads/agenta/sessions/${tk}` }, // already on branch
+      ];
+      const calls: RecordedCall[] = [];
+      globalThis.fetch = makeFetchStub({ calls, execReplies });
+      let spawnCount = 0;
+      _setSpawnImpl(() => {
+        spawnCount += 1;
+        return 12345;
+      });
+
+      await ensureRepoBootstrap(tk);
+
+      const cfg = calls
+        .filter((c) => c.url.endsWith('/write'))
+        .map((c) => JSON.parse(c.body ?? '{}') as { path: string; content: string })
+        .find((w) => w.path === '.ssh/config');
+      expect(cfg?.content).toContain('HostName host.docker.internal');
+      expect(cfg?.content).toContain('Port 22');
+
+      // No tunnel-pubkey install, no autossh spawned in docker mode.
+      const execBodies = calls
+        .filter((c) => c.url.endsWith('/exec'))
+        .map((c) => JSON.parse(c.body ?? '{}') as { command: string });
+      expect(execBodies.some((b) => b.command.includes('/root/.ssh/authorized_keys'))).toBe(false);
+      expect(spawnCount).toBe(0);
+      expect(_getHandle(tk)).toBeUndefined();
+    },
+  );
+
+  test.skipIf(!hasSshKeygen)(
+    'fly mode: ssh config uses localhost:2222, tunnel pubkey installed via runBash, ensureTunnel called with private_ip',
+    async () => {
+      process.env.AGENTA_REPO_PATH = repoPath;
+      process.env.SANDBOX_PROVIDER = 'fly';
+      seedKnownHostsCache();
+      const tk = 'tk-fly';
+
+      // Pre-create a Fly sandbox record on the thread so the bootstrap
+      // finds a private_ip. ensureRepoBootstrap doesn't call into the
+      // provider itself — it just reads from session.json.
+      await setSandbox(tk, {
+        provider: 'fly',
+        machine_id: 'm-abc',
+        token: 't-abc',
+        volume_id: 'vol_abc',
+        private_ip: 'fdaa::deadbeef',
+      });
+
+      // Pre-create the Mac tunnel pubkey so getTunnelPublicKeyPath() resolves.
+      const mockPubPath = join(homedir(), '.ssh', 'agenta_tunnel_id_ed25519');
+      let cleanupPubKey = false;
+      if (!existsSync(mockPubPath)) {
+        try {
+          mkdirSync(join(homedir(), '.ssh'), { recursive: true, mode: 0o700 });
+        } catch {
+          // dir exists
+        }
+        writeFileSync(mockPubPath, 'TEST-ONLY-PLACEHOLDER\n', { mode: 0o600 });
+        writeFileSync(`${mockPubPath}.pub`, 'ssh-ed25519 AAAAtestpub agenta-tunnel-mac\n', {
+          mode: 0o644,
+        });
+        cleanupPubKey = true;
+      }
+
+      try {
+        // /exec sequence in fly path:
+        //   1. grep -qF <pubkey> /root/.ssh/authorized_keys  → not present (1)
+        //   2. echo <pubkey> >> /root/.ssh/authorized_keys   → OK
+        //   3. ... waitForReverseForward probes (exec):
+        //        - bash -c "exec 3<>/dev/tcp/localhost/2222" → first poll OK (0)
+        //   4. mkdir -p ~/.ssh && chmod 700
+        //   5. chmod 600 ~/.ssh/...
+        //   6. clone-dance
+        //   7. user.email / user.name
+        //   8. symbolic-ref / checkout
+        const execReplies = [
+          { exitCode: 1 }, // grep — not found
+          { exitCode: 0 }, // append pubkey
+          { exitCode: 0 }, // waitForReverseForward probe
+          { exitCode: 0 }, // mkdir
+          { exitCode: 0 }, // chmod 600
+          { exitCode: 0 }, // clone-dance
+          { exitCode: 0 }, // user.email
+          { exitCode: 0 }, // user.name
+          { exitCode: 0, stdout: `refs/heads/agenta/sessions/${tk}` },
+        ];
+        const calls: RecordedCall[] = [];
+        globalThis.fetch = makeFetchStub({ calls, execReplies });
+
+        const spawnArgs: string[][] = [];
+        _setSpawnImpl((args) => {
+          spawnArgs.push(args);
+          return 67890;
+        });
+
+        await ensureRepoBootstrap(tk);
+
+        // SSH config wired to localhost:2222.
+        const cfg = calls
+          .filter((c) => c.url.endsWith('/write'))
+          .map((c) => JSON.parse(c.body ?? '{}') as { path: string; content: string })
+          .find((w) => w.path === '.ssh/config');
+        expect(cfg?.content).toContain('HostName localhost');
+        expect(cfg?.content).toContain('Port 2222');
+
+        // Tunnel pubkey installation hit /root/.ssh/authorized_keys.
+        const execBodies = calls
+          .filter((c) => c.url.endsWith('/exec'))
+          .map((c) => JSON.parse(c.body ?? '{}') as { command: string });
+        expect(
+          execBodies.some(
+            (b) =>
+              b.command.includes('/root/.ssh/authorized_keys') && b.command.includes('grep -qF'),
+          ),
+        ).toBe(true);
+        expect(
+          execBodies.some(
+            (b) => b.command.includes('/root/.ssh/authorized_keys') && b.command.includes('echo '),
+          ),
+        ).toBe(true);
+
+        // autossh spawned with root@<private_ip>.
+        expect(spawnArgs.length).toBe(1);
+        const args = spawnArgs[0] ?? [];
+        expect(args[args.length - 1]).toBe('root@fdaa::deadbeef');
+        // The handle is tracked under the thread key.
+        expect(_getHandle(tk)?.flyIp).toBe('fdaa::deadbeef');
+      } finally {
+        if (cleanupPubKey) {
+          try {
+            rmSync(mockPubPath, { force: true });
+            rmSync(`${mockPubPath}.pub`, { force: true });
+          } catch {
+            // best-effort
+          }
+        }
+      }
     },
   );
 

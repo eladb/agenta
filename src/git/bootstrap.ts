@@ -24,9 +24,11 @@ import { basename, join } from 'node:path';
 import { log } from '../log';
 import { readSession, setGit } from '../runtime/session-store';
 import { runBash, writeFile as sbWriteFile } from '../sandbox';
+import { loadSandbox } from '../sandbox/persistence';
 import { addEntry, listEntries } from './authorized-keys';
 import { generateKeypair } from './keys';
 import { ensureKnownHostsCache } from './known-hosts';
+import { ensureTunnel, getTunnelPublicKeyPath } from './tunnel';
 
 // agenta-git-shell lives at <repo_root>/bin/agenta-git-shell. This module
 // lives at <repo_root>/src/git/bootstrap.ts so two `..` resolves the root.
@@ -58,6 +60,24 @@ export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
   const repoPath = process.env.AGENTA_REPO_PATH;
   if (!repoPath || repoPath.length === 0) {
     throw new Error('AGENTA_REPO_PATH must be set to a non-bare git repo');
+  }
+
+  // Provider-aware transport. Docker reaches the host's sshd directly via
+  // Docker Desktop's loopback alias; Fly reaches it over a per-thread
+  // reverse-SSH tunnel terminated at localhost:2222 inside the sandbox.
+  // Both can be overridden via env for testing — the defaults match the
+  // production setups.
+  const provider = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
+  const tunneled = provider === 'fly';
+  const hostSshHostname =
+    process.env.AGENTA_HOST_SSH_HOSTNAME ?? (tunneled ? 'localhost' : 'host.docker.internal');
+  const hostSshPort = process.env.AGENTA_HOST_SSH_PORT ?? (tunneled ? '2222' : '22');
+
+  // On Fly we have to install the bot's pubkey into the sandbox's dropbear
+  // authorized_keys BEFORE we can start the tunnel — otherwise autossh
+  // can't log in. Do this first.
+  if (tunneled) {
+    await ensureTunnelAuthorizedAndUp(threadKey);
   }
 
   const session = await readSession(threadKey);
@@ -115,14 +135,17 @@ export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
   if (privateKeyPem) {
     await writeKeyFiles(threadKey, privateKeyPem, publicKeyOpenssh ?? '');
   }
-  // ssh config: pin the alias `agenta-repo` to the host's sshd. On docker we
-  // use host.docker.internal (Docker Desktop's loopback alias for the host);
-  // on fly the same hostname is provided in the machine env. The user under
-  // which the agenta bot is running owns the authorized_keys line we wrote.
+  // ssh config: pin the alias `agenta-repo` to the host's sshd. On docker
+  // that's host.docker.internal:22 (Docker Desktop's loopback alias for the
+  // host). On fly we go through the per-thread reverse-SSH tunnel at
+  // localhost:2222 (Phase 23). Hostname + port are configurable via
+  // AGENTA_HOST_SSH_HOSTNAME / AGENTA_HOST_SSH_PORT so a host with a
+  // different sshd port can still bootstrap. The user under which the
+  // agenta bot is running owns the authorized_keys line we wrote.
   const sshConfig = [
     'Host agenta-repo',
-    '  HostName host.docker.internal',
-    '  Port 22',
+    `  HostName ${hostSshHostname}`,
+    `  Port ${hostSshPort}`,
     `  User ${sshUser}`,
     '  IdentityFile ~/.ssh/id_ed25519',
     '  IdentitiesOnly yes',
@@ -194,4 +217,52 @@ async function sbWrite(threadKey: string, path: string, content: string): Promis
 // which we don't trust to be shell-safe.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// Fly-only: install the Mac-side tunnel pubkey into the sandbox's
+// /root/.ssh/authorized_keys (where dropbear reads it), then spawn the
+// per-thread autossh that creates the localhost:2222 reverse-forward. The
+// helper is idempotent — repeated /write calls are cheap and ensureTunnel
+// already handles "already running" itself.
+async function ensureTunnelAuthorizedAndUp(threadKey: string): Promise<void> {
+  // 1. Load sandbox record to find the machine's private_ip.
+  const sb = await loadSandbox(threadKey);
+  if (!sb || sb.provider !== 'fly') {
+    throw new Error(
+      `tunnel: no Fly sandbox record for ${threadKey}; ensureContainer must run before bootstrap`,
+    );
+  }
+  const flyIp = sb.private_ip;
+  if (!flyIp || flyIp.length === 0) {
+    throw new Error(
+      `tunnel: Fly sandbox record for ${threadKey} has no private_ip; cannot reach over WireGuard`,
+    );
+  }
+
+  // 2. Read the Mac tunnel pubkey and install it into the sandbox's
+  //    /root/.ssh/authorized_keys. Append-if-missing rather than overwrite
+  //    so the same authorized_keys file can carry future operator keys if
+  //    we ever need them. The sandbox's entrypoint.sh pre-chowns this file
+  //    to sandbox:sandbox + 644 so the uid-1000 sandbox-server can append
+  //    to it; dropbear still reads it as root.
+  const pubKey = (await readFile(getTunnelPublicKeyPath(), 'utf8')).trim();
+  const haveKey = await runBash(
+    threadKey,
+    `grep -qF ${shellQuote(pubKey)} /root/.ssh/authorized_keys 2>/dev/null`,
+  );
+  if (haveKey.exitCode !== 0) {
+    const append = await runBash(
+      threadKey,
+      `echo ${shellQuote(pubKey)} >> /root/.ssh/authorized_keys`,
+    );
+    if (append.exitCode !== 0) {
+      throw new Error(
+        `tunnel: failed to install Mac tunnel pubkey into sandbox: ${append.stderr || append.stdout}`,
+      );
+    }
+    log.info('git', `[${threadKey}] installed Mac tunnel pubkey into sandbox`);
+  }
+
+  // 3. Spawn (or adopt) the per-thread autossh.
+  await ensureTunnel(threadKey, flyIp);
 }

@@ -9,6 +9,7 @@
     "e2e": "bun scripts/run-e2e.ts",
     "canary": "bun scripts/canary.ts",
     "setup": "bun run scripts/setup-slack-apps.ts",
+    "setup-tunnel": "bun scripts/setup-tunnel.ts",
     "lint": "biome check .",
     "format": "biome format --write ."
   },

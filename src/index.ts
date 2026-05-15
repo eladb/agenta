@@ -1,4 +1,5 @@
 import { reapOrphanAuthorizedKeys } from './git/authorized-keys';
+import { stopAllTunnels } from './git/tunnel';
 import { acquire } from './lockfile';
 import { log } from './log';
 import { createCallModel } from './model/gateway';
@@ -83,3 +84,14 @@ reapOrphanSandboxes().catch((err) => {
 reapOrphanAuthorizedKeys().catch((err) => {
   log.warn('boot', `authorized_keys reap failed: ${(err as Error).message}`);
 });
+
+// Reverse-SSH tunnel cleanup. autossh children are spawned `detached` so
+// they survive the bot crashing without cleanup — but on a clean
+// shutdown / Ctrl-C we should reap them so we don't accumulate one
+// orphan autossh per restart.
+const tunnelCleanup = (): void => {
+  void stopAllTunnels();
+};
+process.on('exit', tunnelCleanup);
+process.on('SIGINT', tunnelCleanup);
+process.on('SIGTERM', tunnelCleanup);

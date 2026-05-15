@@ -68,9 +68,15 @@ async function flyFetch(method: string, path: string, body?: unknown): Promise<R
   });
 }
 
-type MachineSummary = { id: string; name: string; state: string; region?: string };
+type MachineSummary = {
+  id: string;
+  name: string;
+  state: string;
+  region?: string;
+  private_ip?: string;
+};
 type FlyVolume = { id: string; name: string; region: string; state?: string };
-type SandboxState = { machineId: string; token: string; volumeId?: string };
+type SandboxState = { machineId: string; token: string; volumeId?: string; privateIp?: string };
 const state = new Map<string, SandboxState>();
 
 async function machineByName(name: string): Promise<MachineSummary | undefined> {
@@ -192,10 +198,11 @@ async function waitForHealth(machineId: string, timeoutMs = 60_000): Promise<voi
   throw new Error(`fly sandbox not healthy after ${timeoutMs}ms: ${String(lastErr)}`);
 }
 
-// Liveness check for a persisted record. Returns true iff the machine
-// exists and is in the 'started' state. ~3s timeout to match the Docker
-// path.
-async function verifyAlive(machineId: string): Promise<boolean> {
+// Liveness check for a persisted record. Returns the machine's private_ip
+// when alive (so the caller can refresh the persisted record — private_ip
+// changes on Fly machine recreation), undefined otherwise. ~3s timeout to
+// match the Docker path.
+async function verifyAlive(machineId: string): Promise<string | undefined> {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), 3_000);
   try {
@@ -204,11 +211,12 @@ async function verifyAlive(machineId: string): Promise<boolean> {
       headers: { Authorization: `Bearer ${token()}` },
       signal: ac.signal,
     });
-    if (!res.ok) return false;
-    const body = (await res.json()) as { state?: string };
-    return body.state === 'started';
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { state?: string; private_ip?: string };
+    if (body.state !== 'started') return undefined;
+    return body.private_ip ?? '';
   } catch {
-    return false;
+    return undefined;
   } finally {
     clearTimeout(t);
   }
@@ -232,73 +240,92 @@ async function ensure(threadKey: string): Promise<void> {
         `[${threadKey}] persisted sandbox is ${persisted.provider}; SANDBOX_PROVIDER=fly — ignoring`,
       );
       await clearSandbox(threadKey);
-    } else if (await verifyAlive(persisted.machine_id)) {
-      state.set(threadKey, {
-        machineId: persisted.machine_id,
-        token: persisted.token,
-        ...(persisted.volume_id ? { volumeId: persisted.volume_id } : {}),
-      });
-      log.info('sandbox', `re-hydrated fly machine ${persisted.machine_id} from session.json`);
-      return;
-    } else if (persisted.volume_id) {
-      const vol = await volumeById(persisted.volume_id);
-      if (vol) {
-        log.info(
-          'sandbox',
-          `[${threadKey}] persisted machine ${persisted.machine_id} dead; reattaching to volume ${persisted.volume_id}`,
-        );
-        // Tear down the stale machine record (best-effort) before creating
-        // the replacement so the machine-by-name lookup below stays clean.
-        await flyFetch(
-          'DELETE',
-          `/apps/${appName()}/machines/${persisted.machine_id}?force=true`,
-        ).catch(() => {});
-        const existing = await machineByName(name);
-        if (existing) {
-          await flyFetch('DELETE', `/apps/${appName()}/machines/${existing.id}?force=true`).catch(
-            () => {},
-          );
-        }
-        const sandboxToken = persisted.token;
-        const create = await flyFetch('POST', `/apps/${appName()}/machines`, {
-          name,
-          config: machineConfig(sandboxToken, vol.region, persisted.volume_id),
-        });
-        if (!create.ok) {
-          throw new Error(
-            `fly create machine (reattach) failed: ${create.status} ${await create.text()}`,
-          );
-        }
-        const machine = (await create.json()) as { id: string };
-        state.set(threadKey, {
-          machineId: machine.id,
-          token: sandboxToken,
-          volumeId: persisted.volume_id,
-        });
-        await saveSandbox(threadKey, {
-          provider: 'fly',
-          machine_id: machine.id,
-          token: sandboxToken,
-          volume_id: persisted.volume_id,
-        });
-        await waitForHealth(machine.id);
-        log.info(
-          'sandbox',
-          `fly machine ${name} (${machine.id}) ready — reattached volume ${persisted.volume_id}`,
-        );
-        return;
-      }
-      log.info(
-        'sandbox',
-        `[${threadKey}] persisted machine ${persisted.machine_id} dead and volume ${persisted.volume_id} gone; re-provisioning`,
-      );
-      await clearSandbox(threadKey);
     } else {
-      log.info(
-        'sandbox',
-        `[${threadKey}] persisted machine ${persisted.machine_id} not alive; re-provisioning`,
-      );
-      await clearSandbox(threadKey);
+      const livePrivateIp = await verifyAlive(persisted.machine_id);
+      if (livePrivateIp !== undefined) {
+        // Live machine — adopt it. private_ip is stable for the lifetime of
+        // a Fly machine; only a re-creation can change it. We refresh the
+        // persisted record so older records (pre-phase-23) gain the field.
+        const ip = livePrivateIp || persisted.private_ip;
+        state.set(threadKey, {
+          machineId: persisted.machine_id,
+          token: persisted.token,
+          ...(persisted.volume_id ? { volumeId: persisted.volume_id } : {}),
+          ...(ip ? { privateIp: ip } : {}),
+        });
+        if (livePrivateIp && livePrivateIp !== persisted.private_ip) {
+          await saveSandbox(threadKey, {
+            provider: 'fly',
+            machine_id: persisted.machine_id,
+            token: persisted.token,
+            ...(persisted.volume_id ? { volume_id: persisted.volume_id } : {}),
+            private_ip: livePrivateIp,
+          });
+        }
+        log.info('sandbox', `re-hydrated fly machine ${persisted.machine_id} from session.json`);
+        return;
+      } else if (persisted.volume_id) {
+        const vol = await volumeById(persisted.volume_id);
+        if (vol) {
+          log.info(
+            'sandbox',
+            `[${threadKey}] persisted machine ${persisted.machine_id} dead; reattaching to volume ${persisted.volume_id}`,
+          );
+          // Tear down the stale machine record (best-effort) before creating
+          // the replacement so the machine-by-name lookup below stays clean.
+          await flyFetch(
+            'DELETE',
+            `/apps/${appName()}/machines/${persisted.machine_id}?force=true`,
+          ).catch(() => {});
+          const existing = await machineByName(name);
+          if (existing) {
+            await flyFetch('DELETE', `/apps/${appName()}/machines/${existing.id}?force=true`).catch(
+              () => {},
+            );
+          }
+          const sandboxToken = persisted.token;
+          const create = await flyFetch('POST', `/apps/${appName()}/machines`, {
+            name,
+            config: machineConfig(sandboxToken, vol.region, persisted.volume_id),
+          });
+          if (!create.ok) {
+            throw new Error(
+              `fly create machine (reattach) failed: ${create.status} ${await create.text()}`,
+            );
+          }
+          const machine = (await create.json()) as { id: string; private_ip?: string };
+          state.set(threadKey, {
+            machineId: machine.id,
+            token: sandboxToken,
+            volumeId: persisted.volume_id,
+            ...(machine.private_ip ? { privateIp: machine.private_ip } : {}),
+          });
+          await saveSandbox(threadKey, {
+            provider: 'fly',
+            machine_id: machine.id,
+            token: sandboxToken,
+            volume_id: persisted.volume_id,
+            ...(machine.private_ip ? { private_ip: machine.private_ip } : {}),
+          });
+          await waitForHealth(machine.id);
+          log.info(
+            'sandbox',
+            `fly machine ${name} (${machine.id}) ready — reattached volume ${persisted.volume_id}`,
+          );
+          return;
+        }
+        log.info(
+          'sandbox',
+          `[${threadKey}] persisted machine ${persisted.machine_id} dead and volume ${persisted.volume_id} gone; re-provisioning`,
+        );
+        await clearSandbox(threadKey);
+      } else {
+        log.info(
+          'sandbox',
+          `[${threadKey}] persisted machine ${persisted.machine_id} not alive; re-provisioning`,
+        );
+        await clearSandbox(threadKey);
+      }
     }
   }
 
@@ -326,13 +353,19 @@ async function ensure(threadKey: string): Promise<void> {
     await destroyVolume(vol.id).catch(() => {});
     throw new Error(`fly create machine failed: ${create.status} ${await create.text()}`);
   }
-  const machine = (await create.json()) as { id: string };
-  state.set(threadKey, { machineId: machine.id, token: sandboxToken, volumeId: vol.id });
+  const machine = (await create.json()) as { id: string; private_ip?: string };
+  state.set(threadKey, {
+    machineId: machine.id,
+    token: sandboxToken,
+    volumeId: vol.id,
+    ...(machine.private_ip ? { privateIp: machine.private_ip } : {}),
+  });
   await saveSandbox(threadKey, {
     provider: 'fly',
     machine_id: machine.id,
     token: sandboxToken,
     volume_id: vol.id,
+    ...(machine.private_ip ? { private_ip: machine.private_ip } : {}),
   });
   await waitForHealth(machine.id);
   log.info('sandbox', `fly machine ${name} (${machine.id}) ready (volume ${vol.id})`);
@@ -345,14 +378,22 @@ async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
     // If alive, adopt it; otherwise clear and throw so caller knows to
     // `ensure` first.
     const persisted = await loadSandbox(threadKey);
-    if (persisted && persisted.provider === 'fly' && (await verifyAlive(persisted.machine_id))) {
-      s = {
-        machineId: persisted.machine_id,
-        token: persisted.token,
-        ...(persisted.volume_id ? { volumeId: persisted.volume_id } : {}),
-      };
-      state.set(threadKey, s);
-      log.info('sandbox', `[${threadKey}] re-hydrated fly endpoint from session.json`);
+    if (persisted && persisted.provider === 'fly') {
+      const livePrivateIp = await verifyAlive(persisted.machine_id);
+      if (livePrivateIp !== undefined) {
+        const ip = livePrivateIp || persisted.private_ip;
+        s = {
+          machineId: persisted.machine_id,
+          token: persisted.token,
+          ...(persisted.volume_id ? { volumeId: persisted.volume_id } : {}),
+          ...(ip ? { privateIp: ip } : {}),
+        };
+        state.set(threadKey, s);
+        log.info('sandbox', `[${threadKey}] re-hydrated fly endpoint from session.json`);
+      } else {
+        await clearSandbox(threadKey);
+        throw new Error(`sandbox not initialized for ${threadKey}`);
+      }
     } else {
       if (persisted) await clearSandbox(threadKey);
       throw new Error(`sandbox not initialized for ${threadKey}`);

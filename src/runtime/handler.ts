@@ -1,5 +1,6 @@
 import type { WebClient } from '@slack/web-api';
 import { removeEntry as removeAuthorizedKeysEntry } from '../git/authorized-keys';
+import { stopTunnel } from '../git/tunnel';
 import { log } from '../log';
 import type { CallModel } from '../model/gateway';
 import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attachments';
@@ -105,6 +106,13 @@ async function handleMessage(
     // intentionally NOT deleted.
     await removeAuthorizedKeysEntry(tk).catch((err) => {
       log.warn('handler', `[${tk}] removeAuthorizedKeysEntry failed: ${(err as Error).message}`);
+    });
+    // Tear down the per-thread reverse-SSH tunnel before removing the
+    // sandbox — if we destroyed the sandbox first, autossh would just
+    // retry against a dead machine until we got around to killing it.
+    // No-op on docker (the docker bootstrap never spawns a tunnel).
+    await stopTunnel(tk).catch((err) => {
+      log.warn('handler', `[${tk}] stopTunnel failed: ${(err as Error).message}`);
     });
     await Promise.all([deleteThreadData(tk), removeContainer(tk)]);
     log.info('handler', `[${tk}] /delete done`);
