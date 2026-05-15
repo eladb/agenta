@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# agenta-git-shell — restricted shell wired into ~/.ssh/authorized_keys for
+# per-session sandbox git access. One authorized_keys line per thread invokes
+# this script via `command="…"`, restricting that key to:
+#   - one specific repo path (--repo)
+#   - one specific ref namespace for pushes (--allowed-ref, enforced by the
+#     pre-receive hook injected via core.hooksPath below)
+#   - only the git-upload-pack / git-receive-pack verbs (no other commands)
+#
+# sshd sets $SSH_ORIGINAL_COMMAND to the client's intended command before
+# invoking us. We parse it, validate, and exec the appropriate git binary.
+
+set -euo pipefail
+
+session=""
+repo=""
+allowed_ref=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)
+      session="$2"; shift 2 ;;
+    --repo)
+      repo="$2"; shift 2 ;;
+    --allowed-ref)
+      allowed_ref="$2"; shift 2 ;;
+    *)
+      echo "agenta-git-shell: unknown arg: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$session" ] || [ -z "$repo" ] || [ -z "$allowed_ref" ]; then
+  echo "agenta-git-shell: --session, --repo, --allowed-ref are all required" >&2
+  exit 1
+fi
+
+original="${SSH_ORIGINAL_COMMAND:-}"
+if [ -z "$original" ]; then
+  echo "agenta-git-shell: SSH_ORIGINAL_COMMAND unset; this key is restricted to git pack verbs" >&2
+  exit 1
+fi
+
+# Resolve the directory holding the pre-receive hook. Script lives at
+# <repo_root>/bin/agenta-git-shell; hooks live at <repo_root>/git-hooks/.
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+hooks_dir="$(cd "$script_dir/.." && pwd)/git-hooks"
+
+# Accept either `git-upload-pack '<path>'` / `git-receive-pack '<path>'`
+# (sshd-style) or `git upload-pack '<path>'` / `git receive-pack '<path>'`
+# (some clients send a space). Tolerate single or double quotes around the path.
+verb=""
+raw_path=""
+if [[ "$original" =~ ^git[-\ ](upload-pack|receive-pack)[[:space:]]+(.+)$ ]]; then
+  verb="${BASH_REMATCH[1]}"
+  raw_path="${BASH_REMATCH[2]}"
+else
+  echo "agenta-git-shell: refusing command: $original" >&2
+  exit 1
+fi
+
+# Strip a single layer of surrounding quotes (' or ") from the path.
+path="$raw_path"
+if [[ "$path" =~ ^\'(.*)\'$ ]]; then
+  path="${BASH_REMATCH[1]}"
+elif [[ "$path" =~ ^\"(.*)\"$ ]]; then
+  path="${BASH_REMATCH[1]}"
+fi
+
+if [ "$path" != "$repo" ]; then
+  echo "agenta-git-shell: path '$path' does not match configured repo '$repo'" >&2
+  exit 1
+fi
+
+export AGENTA_ALLOWED_REF="$allowed_ref"
+export AGENTA_SESSION="$session"
+# Inject the agenta-owned pre-receive hook via per-invocation git config so
+# we don't need to touch the customer repo's own .git/hooks/ tree.
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=core.hooksPath
+export GIT_CONFIG_VALUE_0="$hooks_dir"
+
+case "$verb" in
+  upload-pack)
+    exec git-upload-pack "$path"
+    ;;
+  receive-pack)
+    exec git-receive-pack "$path"
+    ;;
+esac

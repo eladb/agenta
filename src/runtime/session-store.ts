@@ -32,6 +32,17 @@ export type SandboxRecord =
       volume_id?: string;
     };
 
+// Per-thread git-backed-botspace routing. `pubkey_fp` is the SHA256
+// fingerprint of the public key (as returned by `ssh-keygen -lf`); it's the
+// stable identifier we use to match an `authorized_keys` line to a thread
+// when the volume — which actually holds the private key — is gone. `ref`
+// is the agenta/sessions/<thread_key> branch the pre-receive hook restricts
+// pushes to.
+export type GitRecord = {
+  pubkey_fp: string;
+  ref: string;
+};
+
 // Per-thread runtime state. The file now persists even when the thread is
 // idle — it carries the frozen `system_prompt` across turns so each thread's
 // prompt is stable for its lifetime. Recovery filters on status !== 'idle'.
@@ -40,6 +51,7 @@ export type SessionState = {
   updated_at: string;
   system_prompt?: string;
   sandbox?: SandboxRecord;
+  git?: GitRecord;
 };
 
 const RUNTIME_FILENAME = 'session.json';
@@ -91,6 +103,7 @@ export async function clearSession(threadKey: string): Promise<void> {
     updated_at: new Date().toISOString(),
     ...(existing?.system_prompt !== undefined ? { system_prompt: existing.system_prompt } : {}),
     ...(existing?.sandbox !== undefined ? { sandbox: existing.sandbox } : {}),
+    ...(existing?.git !== undefined ? { git: existing.git } : {}),
   });
 }
 
@@ -124,6 +137,29 @@ export async function setSandbox(
     ...(sandbox !== undefined ? { sandbox } : {}),
   };
   if (sandbox === undefined) delete next.sandbox;
+  await writeSession(threadKey, next);
+}
+
+// Atomic read-modify-write of the `git` record (symmetric with setSandbox).
+// Called by `ensureRepoBootstrap` once it's generated a keypair + added it
+// to authorized_keys. `undefined` clears the record (used for cleanup).
+export async function setGit(threadKey: string, git: GitRecord | undefined): Promise<void> {
+  const existing = await readSession(threadKey);
+  if (!existing) {
+    if (git === undefined) return;
+    await writeSession(threadKey, {
+      status: 'idle',
+      updated_at: new Date().toISOString(),
+      git,
+    });
+    return;
+  }
+  const next: SessionState = {
+    ...existing,
+    updated_at: new Date().toISOString(),
+    ...(git !== undefined ? { git } : {}),
+  };
+  if (git === undefined) delete next.git;
   await writeSession(threadKey, next);
 }
 

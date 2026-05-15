@@ -29,6 +29,21 @@ function dockerInstalled(): boolean {
 const _activeProvider = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
 export const DOCKER_PROVIDER_ACTIVE = dockerInstalled() && _activeProvider === 'docker';
 
+// True iff localhost sshd is reachable from this process (best-effort). The
+// git-botspace e2e tests need to drive a real SSH+git push round-trip;
+// `host.docker.internal:22` from inside the sandbox resolves to whatever
+// the host's sshd is listening on. If sshd isn't reachable here, the test
+// can't possibly work, so we skip it.
+function sshdReachable(): boolean {
+  const r = spawnSync(
+    'ssh',
+    ['-p', '22', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=2', 'localhost', 'true'],
+    { stdio: 'ignore' },
+  );
+  return r.status === 0;
+}
+export const SSHD_REACHABLE = sshdReachable();
+
 export const STUB_REPLY_PREFIX = 'stub: ';
 
 // Recording stub: captures every call so tests can assert on the messages

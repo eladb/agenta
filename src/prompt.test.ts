@@ -109,6 +109,20 @@ describe('buildSystemPrompt', () => {
     expect(out).toBe('BOT only');
   });
 
+  test('throws when AGENTA_REPO_PATH and BOTSPACE_DIR are both unset (no default location any more)', async () => {
+    const priorRepo = process.env.AGENTA_REPO_PATH;
+    const priorBotspace = process.env.BOTSPACE_DIR;
+    delete process.env.AGENTA_REPO_PATH;
+    delete process.env.BOTSPACE_DIR;
+    try {
+      // Call with no positional arg so the default-resolver runs.
+      await expect(buildSystemPrompt()).rejects.toThrow(/AGENTA_REPO_PATH/);
+    } finally {
+      if (priorRepo !== undefined) process.env.AGENTA_REPO_PATH = priorRepo;
+      if (priorBotspace !== undefined) process.env.BOTSPACE_DIR = priorBotspace;
+    }
+  });
+
   test('skill without frontmatter delimiters is skipped', async () => {
     writeBot('BOT');
     // No `---` opener.

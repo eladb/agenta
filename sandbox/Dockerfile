@@ -23,14 +23,10 @@ RUN apt-get update \
 RUN userdel -r ubuntu 2>/dev/null || true \
  && useradd --create-home --shell /bin/bash --uid 1000 sandbox
 
-# Bot identity + skills library: a fresh sandbox starts with README.md and
-# skills/* seeded into the volume by entrypoint.sh. We ship the seed at
-# /opt/botspace/ in the image (instead of populating /home/sandbox directly)
-# because /home/sandbox is overlaid by the per-thread volume mount at run
-# time — any image-time content there would be hidden. Build context is
-# `sandbox/` (see src/sandbox/docker.ts:DOCKERFILE_DIR), so `botspace` here
-# resolves to `sandbox/botspace/` in the repo.
-COPY --chown=sandbox:sandbox botspace /opt/botspace/
+# Botspace is no longer baked into the image. Each session shallow-clones
+# the configured host-side repo over SSH on first sandbox-touching tool —
+# see src/git/bootstrap.ts. /home/sandbox is the working tree and the
+# botspace (README.md + skills/) all at once.
 
 COPY --from=builder /build/sandbox-server /usr/local/bin/sandbox-server
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

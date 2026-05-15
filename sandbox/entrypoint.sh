@@ -2,10 +2,15 @@
 # Sets up the sandbox container, then drops to an unprivileged user before
 # exec'ing the server. Runs as root inside the container so it can:
 #   1. Install iptables OUTPUT rules (egress block; requires NET_ADMIN cap).
-#   2. Seed /home/sandbox from /opt/botspace/ on first boot (copy-if-missing).
-#   3. Drop privs and exec the server.
+#   2. Drop privs and exec the server.
 #
-# After step 3, the server — and any bash command it spawns via /exec —
+# The botspace (README.md + skills/) is no longer baked into the image —
+# the host-side bot bootstraps a per-session git clone over SSH on the
+# first sandbox-touching tool. So this script just preps capabilities and
+# launches the server; the workspace starts empty until ensureRepoBootstrap
+# fills it.
+#
+# After step 2, the server — and any bash command it spawns via /exec —
 # runs as uid 1000 (`sandbox`) with no capabilities. So a malicious shell
 # command can't `iptables -F` to undo the egress block, and can't acquire
 # caps via setuid (--security-opt no-new-privileges blocks that too).
@@ -32,26 +37,12 @@ if [ "${SANDBOX_EGRESS:-allow}" = "block" ]; then
   iptables -P OUTPUT DROP
 fi
 
-# Seed the per-thread persistent volume on first boot. /home/sandbox is the
-# volume mount; if README.md doesn't exist we treat it as empty and copy in
-# the botspace seed. Idempotent: on subsequent boots README.md is already
-# there and we skip the copy, preserving any state the thread has built up.
-#
 # Fly mounts fresh volumes as root:root mode 0755, which masks the
 # Dockerfile's `useradd --create-home` ownership. chown the mount back to
 # sandbox so subsequent operations work. On docker the volume already
 # inherits sandbox ownership and this is a no-op (or harmless failure
 # without CAP_CHOWN — ignored).
 chown sandbox:sandbox /home/sandbox 2>/dev/null || true
-
-# Run the cp as the sandbox user via setpriv: the /opt/botspace tree was
-# COPY'd --chown=sandbox at image-build time, and `cp -a` preserves
-# ownership/mode.
-if ! setpriv --reuid=sandbox --regid=sandbox --init-groups \
-  test -e /home/sandbox/README.md; then
-  setpriv --reuid=sandbox --regid=sandbox --init-groups \
-    cp -a /opt/botspace/. /home/sandbox/
-fi
 
 export HOME=/home/sandbox
 export USER=sandbox

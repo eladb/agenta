@@ -1,4 +1,5 @@
 import type { WebClient } from '@slack/web-api';
+import { ensureRepoBootstrap } from '../git/bootstrap';
 import { log } from '../log';
 import { buildMessages } from '../model/context';
 import type { CallModel, Message, ToolCall } from '../model/gateway';
@@ -156,9 +157,7 @@ export async function runTurn(
     reactionsAdded.push({ ts, name });
   };
   const clearAllReactions = async (): Promise<void> => {
-    await Promise.all(
-      reactionsAdded.map((r) => removeReaction(web, input.channel, r.ts, r.name)),
-    );
+    await Promise.all(reactionsAdded.map((r) => removeReaction(web, input.channel, r.ts, r.name)));
     reactionsAdded.length = 0;
   };
 
@@ -283,6 +282,25 @@ export async function runTurn(
             liveLines[provIdx] = `_workspace provisioning failed: ${msg}_`;
           }
           await repaint();
+        }
+
+        // Git-backed botspace bootstrap. Runs AFTER ensureContainer (it
+        // talks to the sandbox over the existing HTTP API) and BEFORE the
+        // attachment sync (so the clone-into-empty-home dance plays out
+        // before we copy stuff into ~). Idempotent: short-circuits when
+        // the session already has a registered key + ~/.git is present.
+        // Failures synthesize a tool_result (same shape as a sandbox-
+        // provision failure) so the model can recover.
+        if (tool?.requiresSandbox && !provisionError) {
+          try {
+            await ensureRepoBootstrap(input.threadKey);
+          } catch (err) {
+            const msg = (err as Error).message;
+            provisionError = msg;
+            pushSeparator(liveLines);
+            liveLines.push(`_git bootstrap failed: ${msg}_`);
+            await repaint();
+          }
         }
 
         // Lazy attachment sync. Same idempotent helper. We don't surface

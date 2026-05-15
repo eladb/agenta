@@ -15,22 +15,36 @@ export type SkillEntry = {
   [extra: string]: unknown;
 };
 
+// Resolve the host-side path to read README.md + skills/ from. The repo at
+// AGENTA_REPO_PATH is the single source of truth — the sandbox shallow-
+// clones it, and the host reads the same working tree directly when
+// composing the system prompt for a new thread.
+//
+// BOTSPACE_DIR is honored only as a test override (it's the only way the
+// e2e/unit tests can point at an isolated tmpdir without standing up a real
+// git repo). If neither is set we throw — there's no "default location"
+// any more.
 function defaultBotspaceDir(): string {
-  return process.env.BOTSPACE_DIR ?? join(process.cwd(), 'sandbox/botspace');
+  const dir = process.env.BOTSPACE_DIR ?? process.env.AGENTA_REPO_PATH;
+  if (!dir || dir.length === 0) {
+    throw new Error(
+      'AGENTA_REPO_PATH must be set to a git working tree (BOTSPACE_DIR override allowed for tests)',
+    );
+  }
+  return dir;
 }
 
 // Compose the system prompt for a new thread from a botspace directory.
 //
-// `botspaceDir` defaults to `process.env.BOTSPACE_DIR ?? <cwd>/sandbox/botspace`.
+// `botspaceDir` defaults to `process.env.BOTSPACE_DIR ?? process.env.AGENTA_REPO_PATH`.
 // `envPrefix` defaults to `process.env.SYSTEM_PROMPT` — when set, it is
 // prepended (with a blank-line separator) to the README.md body. This is the
 // only behavior delta from the legacy const prompt: SYSTEM_PROMPT used to
 // replace, it now prepends.
 //
-// Layout:
-//   botspace/
-//     README.md
-//     skills/<slug>/SKILL.md  (YAML frontmatter parsed for the skills map)
+// Layout (inside `botspaceDir`):
+//   README.md
+//   skills/<slug>/SKILL.md  (YAML frontmatter parsed for the skills map)
 export async function buildSystemPrompt(
   botspaceDir: string = defaultBotspaceDir(),
   envPrefix: string | undefined = process.env.SYSTEM_PROMPT,

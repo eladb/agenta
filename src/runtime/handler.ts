@@ -1,4 +1,5 @@
 import type { WebClient } from '@slack/web-api';
+import { removeEntry as removeAuthorizedKeysEntry } from '../git/authorized-keys';
 import { log } from '../log';
 import type { CallModel } from '../model/gateway';
 import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attachments';
@@ -12,8 +13,8 @@ import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
-import { readSession, writeSession } from './session-store';
 import { signalStop, startOrQueue } from './session';
+import { readSession, writeSession } from './session-store';
 import { threadKey } from './thread';
 
 const isDuplicate = createDedupe();
@@ -97,6 +98,14 @@ async function handleMessage(
 
   if (cmd === 'delete') {
     await postInThread(web, e.channel, e.threadTs, 'deleted (stub)').catch(() => {});
+    // Drop the host-side authorized_keys entry first — it's the only piece
+    // of agenta state living outside the thread dir + sandbox. Best-effort:
+    // a missing file or missing entry isn't an error. The model's work
+    // product on the host repo (the agenta/sessions/<thread_key> branch) is
+    // intentionally NOT deleted.
+    await removeAuthorizedKeysEntry(tk).catch((err) => {
+      log.warn('handler', `[${tk}] removeAuthorizedKeysEntry failed: ${(err as Error).message}`);
+    });
     await Promise.all([deleteThreadData(tk), removeContainer(tk)]);
     log.info('handler', `[${tk}] /delete done`);
     return;

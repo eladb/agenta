@@ -1,3 +1,4 @@
+import { reapOrphanAuthorizedKeys } from './git/authorized-keys';
 import { acquire } from './lockfile';
 import { log } from './log';
 import { createCallModel } from './model/gateway';
@@ -73,4 +74,12 @@ recoverInterruptedSessions(web).catch((err) => {
 // throttling, so run in the background.
 reapOrphanSandboxes().catch((err) => {
   log.warn('boot', `orphan reap failed: ${(err as Error).message}`);
+});
+
+// Symmetric authorized_keys reap. Drops per-session SSH lines whose thread
+// no longer has a session.json (or whose session.json doesn't carry a git
+// record any more). Same safety-net role as reapOrphanSandboxes — routine
+// cleanup is `/delete`.
+reapOrphanAuthorizedKeys().catch((err) => {
+  log.warn('boot', `authorized_keys reap failed: ${(err as Error).message}`);
 });

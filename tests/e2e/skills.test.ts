@@ -1,11 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
+import type { CallModel, Message } from '../../src/model/gateway';
 import { threadKey } from '../../src/runtime/thread';
-import { ensureImage } from '../../src/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -23,15 +21,6 @@ import {
   waitForReply,
 } from './helpers';
 
-function dockerAvailable(): boolean {
-  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
-    stdio: 'ignore',
-  });
-  return r.status === 0;
-}
-
-const HAS_DOCKER = dockerAvailable();
-
 let agent: Agent;
 let tester: Tester;
 let channel: string;
@@ -39,35 +28,23 @@ const createdThreads: string[] = [];
 let botspaceDir: string;
 let originalBotspaceEnv: string | undefined;
 
-type Scripted = { kind: 'reply'; message: AssistantMessage };
-const script: Scripted[] = [];
 const calls: Message[][] = [];
 
 const scriptedCallModel: CallModel = async (messages) => {
   calls.push(messages);
-  const next = script.shift();
-  if (!next) {
-    // Fall back to the simple echo stub if the script ran dry — keeps the
-    // freeze test happy without scripting a reply per turn.
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m?.role !== 'user') continue;
-      const text =
-        typeof m.content === 'string'
-          ? m.content
-          : m.content.find((p) => p.type === 'text')?.type === 'text'
-            ? (m.content.find((p) => p.type === 'text') as { type: 'text'; text: string }).text
-            : '(multipart)';
-      return { role: 'assistant', content: `${STUB_REPLY_PREFIX}${text}` };
-    }
-    return { role: 'assistant', content: `${STUB_REPLY_PREFIX}(no user message)` };
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role !== 'user') continue;
+    const text =
+      typeof m.content === 'string'
+        ? m.content
+        : m.content.find((p) => p.type === 'text')?.type === 'text'
+          ? (m.content.find((p) => p.type === 'text') as { type: 'text'; text: string }).text
+          : '(multipart)';
+    return { role: 'assistant', content: `${STUB_REPLY_PREFIX}${text}` };
   }
-  return next.message;
+  return { role: 'assistant', content: `${STUB_REPLY_PREFIX}(no user message)` };
 };
-
-function scriptReply(message: AssistantMessage): void {
-  script.push({ kind: 'reply', message });
-}
 
 beforeAll(async () => {
   // Build a fresh, isolated botspace dir so the test isn't affected by the
@@ -80,11 +57,6 @@ beforeAll(async () => {
 
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  if (HAS_DOCKER) {
-    // Only the docker-gated test needs the image; build it up front so the
-    // first sandbox-touching turn doesn't time out.
-    await ensureImage();
-  }
   [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
 });
 
@@ -100,7 +72,6 @@ afterAll(async () => {
 });
 
 test('two mentions in one thread -> system message is byte-identical (frozen prompt)', async () => {
-  script.length = 0;
   calls.length = 0;
 
   const seed = `e2e-skills-freeze-${Date.now()}`;
@@ -154,7 +125,6 @@ test('two mentions in one thread -> system message is byte-identical (frozen pro
 }, 120_000);
 
 test('new thread after README.md edit -> system prompt reflects the new README.md', async () => {
-  script.length = 0;
   calls.length = 0;
   // Drop the mutated body into README.md (the previous test's mutation persists
   // here intentionally; if it doesn't, re-write it).
@@ -176,7 +146,6 @@ test('new thread after README.md edit -> system prompt reflects the new README.m
 });
 
 test('/delete removes session.json (and the rest of the thread dir)', async () => {
-  script.length = 0;
   calls.length = 0;
 
   const seed = `e2e-skills-delete-${Date.now()}`;
@@ -215,50 +184,41 @@ test('/delete removes session.json (and the rest of the thread dir)', async () =
   );
 });
 
-test.if(HAS_DOCKER)(
-  'model can read_file a skill SKILL.md inside the sandbox (botspace seeded into ~)',
-  async () => {
-    script.length = 0;
-    calls.length = 0;
-    // The host BOTSPACE_DIR only controls what the prompt builder sees,
-    // not what the sandbox image carries. The shipped botspace (the repo's
-    // `sandbox/botspace/`) is what got COPYed into the image. So we script
-    // a read_file against the python-charts skill that the repo actually
-    // ships.
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_read',
-          type: 'function',
-          function: {
-            name: 'read_file',
-            arguments: JSON.stringify({ path: 'skills/python-charts/SKILL.md' }),
-          },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'skill read' });
+test('a skill in BOTSPACE_DIR shows up in the system prompt for a new thread', async () => {
+  calls.length = 0;
 
-    const threadTs = await mention(
-      tester,
-      agent.botUserId,
-      channel,
-      undefined,
-      `e2e-skills-read-${Date.now()}`,
-    );
-    createdThreads.push(threadTs);
+  // Drop a fresh skill into the host-side botspace BEFORE the next mention
+  // — the prompt builder reads from the BOTSPACE_DIR working tree
+  // directly, so a new thread sees it. (Existing threads keep their frozen
+  // prompt; see the "frozen prompt" test above.)
+  mkdirSync(join(botspaceDir, 'skills', 'demo-skill'), { recursive: true });
+  writeFileSync(
+    join(botspaceDir, 'skills', 'demo-skill', 'SKILL.md'),
+    [
+      '---',
+      'name: demo-skill',
+      'description: A demo skill added by the e2e suite.',
+      '---',
+      '',
+      'Body text for the demo skill.',
+      '',
+    ].join('\n'),
+  );
 
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'skill read');
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 60_000 });
+  const seed = `e2e-skills-prompt-${Date.now()}`;
+  const threadTs = await mention(tester, agent.botUserId, channel, undefined, seed);
+  createdThreads.push(threadTs);
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
+    t.startsWith(STUB_REPLY_PREFIX),
+  );
+  await waitFor(() => calls.length >= 1, { what: 'one model call', timeoutMs: 30_000 });
 
-    const second = calls[1];
-    if (!second) throw new Error('expected second call');
-    const toolMsg = second.find((m) => m.role === 'tool' && m.tool_call_id === 'call_read');
-    if (toolMsg?.role !== 'tool') throw new Error('expected read tool result');
-    expect(toolMsg.content).toContain('name: python-charts');
-    expect(toolMsg.content).toContain('Python charts');
-  },
-  90_000,
-);
+  const first = calls[0];
+  if (!first) throw new Error('expected a recorded model call');
+  const sys = first[0];
+  if (sys?.role !== 'system') throw new Error('expected system message first');
+  // The composed prompt advertises skills as a JSON block. We assert
+  // both the registration metadata and the path the model would read.
+  expect(typeof sys.content === 'string' && sys.content).toContain('demo-skill');
+  expect(typeof sys.content === 'string' && sys.content).toContain('skills/demo-skill/SKILL.md');
+});
