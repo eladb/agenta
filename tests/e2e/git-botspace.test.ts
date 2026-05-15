@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
+import { threadKey } from '../../src/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -141,11 +142,11 @@ if (!DOCKER_PROVIDER_ACTIVE) {
       );
 
       // The push created the session ref + greeting.txt blob on the host
-      // repo.
-      // Compute the actual threadKey used by the bot, which is
-      // <channel>:<thread_ts>; the bot's bootstrap calls
-      // refs/heads/agenta/sessions/<that-tk>.
-      const sessionTk = `${channel}:${threadTs}`;
+      // repo. The bot's bootstrap names the ref
+      // refs/heads/agenta/sessions/<threadKey>, where threadKey(channel,
+      // threadTs) = `${channel}__${threadTs.replace(/\./g, '_')}` (see
+      // src/runtime/thread.ts).
+      const sessionTk = threadKey(channel, threadTs);
       const log = spawnSync(
         'git',
         ['-C', repoPath, 'log', '--format=%s', '--all', `refs/heads/agenta/sessions/${sessionTk}`],
