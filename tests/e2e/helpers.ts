@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
@@ -28,38 +28,6 @@ function dockerInstalled(): boolean {
 }
 const _activeProvider = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
 export const DOCKER_PROVIDER_ACTIVE = dockerInstalled() && _activeProvider === 'docker';
-
-// True iff localhost sshd is reachable from this process (best-effort). The
-// git-botspace e2e tests need to drive a real SSH+git push round-trip;
-// `host.docker.internal:22` from inside the sandbox resolves to whatever
-// the host's sshd is listening on. If sshd isn't reachable here, the test
-// can't possibly work, so we skip it.
-function sshdReachable(): boolean {
-  const r = spawnSync(
-    'ssh',
-    ['-p', '22', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=2', 'localhost', 'true'],
-    { stdio: 'ignore' },
-  );
-  return r.status === 0;
-}
-export const SSHD_REACHABLE = sshdReachable();
-
-// True iff the Phase 23 Fly tunnel test can run end-to-end. Requires:
-//   - SANDBOX_PROVIDER=fly                    (we're actually using Fly)
-//   - AGENTA_TEST_TUNNEL_OPT_IN=1             (touches real ~/.ssh + Fly machines)
-//   - ~/.ssh/agenta_tunnel_id_ed25519 exists  (bot's tunnel keypair)
-//   - FLY_API_TOKEN set                       (bot can create machines)
-//   - WireGuard tunnel active                 (ping6 fdaa::1 succeeds within 2s)
-function flyTunnelActive(): boolean {
-  if ((process.env.SANDBOX_PROVIDER ?? '').toLowerCase() !== 'fly') return false;
-  if (process.env.AGENTA_TEST_TUNNEL_OPT_IN !== '1') return false;
-  if (!process.env.FLY_API_TOKEN) return false;
-  const keyPath = join(homedir(), '.ssh', 'agenta_tunnel_id_ed25519');
-  if (!existsSync(keyPath)) return false;
-  const r = spawnSync('ping6', ['-c', '1', '-W', '2', 'fdaa::1'], { stdio: 'ignore' });
-  return r.status === 0;
-}
-export const FLY_TUNNEL_ACTIVE = flyTunnelActive();
 
 export const STUB_REPLY_PREFIX = 'stub: ';
 

@@ -13,6 +13,9 @@
 //   POST /grep         { pattern, path?, glob? }        -> JSON DockerResult
 //   POST /glob         { pattern, path? }               -> JSON DockerResult
 //   POST /ls           { path? }                        -> JSON DockerResult
+//   GET  /tunnel       (WebSocket upgrade)              -> stream-multiplex TCP
+//                                                          loopback:6000 over
+//                                                          binary WS frames
 //   GET  /health                                        -> 200 "ok"
 //
 // On /exec disconnect, the spawned child is SIGTERM'd. uncaughtException is
@@ -27,7 +30,9 @@ import {
   readdir,
   stat,
 } from 'node:fs/promises';
+import { createServer, type Server as NetServer, type Socket as TcpSocket } from 'node:net';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import type { ServerWebSocket } from 'bun';
 
 const PORT = Number(process.env.SANDBOX_PORT ?? 9000);
 const TOKEN = process.env.SANDBOX_TOKEN;
@@ -38,6 +43,12 @@ const WORKSPACE = '/home/sandbox';
 // host waiting on TCP timeout) would otherwise block the model's turn
 // indefinitely. The model sees a clean error in stderr and can adjust.
 const EXEC_TIMEOUT_MS = Number(process.env.SANDBOX_EXEC_TIMEOUT_MS ?? 60_000);
+
+// Loopback port the /tunnel WS multiplexer binds to inside the sandbox. Git
+// inside the sandbox dials http://localhost:6000/<repo>.git — every TCP
+// accept is multiplexed across the WS as a new stream so the bot's local
+// git HTTP server (on the Mac) serves the request.
+const TUNNEL_TCP_PORT = 6000;
 
 if (!TOKEN || TOKEN.length < 16) {
   console.error('SANDBOX_TOKEN env var is required (min 16 chars)');
@@ -350,14 +361,102 @@ async function handleLs(req: Request): Promise<Response> {
   }
 }
 
+// Tunnel state, per active WS connection. The map is keyed on the
+// ServerWebSocket itself so we can find the per-connection state from any of
+// Bun's WS callbacks. One TCP listener per WS; each accepted TCP connection
+// becomes one multiplexed stream identified by a u32 streamId.
+type TunnelData = {
+  server: NetServer;
+  streams: Map<number, TcpSocket>;
+  nextStreamId: number;
+};
+const tunnels = new WeakMap<ServerWebSocket<unknown>, TunnelData>();
+
+// Wire format. 5-byte header:
+//   bytes 0..3   streamId (u32 BE)
+//   byte  4      type (0 = data, 1 = close)
+// Sending data with a fresh streamId implicitly opens a stream — both ends
+// allocate a TCP socket on first sight. Close signals end-of-stream from
+// either side.
+const FRAME_HEADER = 5;
+const TYPE_DATA = 0;
+const TYPE_CLOSE = 1;
+
+function encodeFrame(streamId: number, type: number, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(FRAME_HEADER + payload.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, streamId >>> 0, false);
+  out[4] = type;
+  if (payload.length > 0) out.set(payload, FRAME_HEADER);
+  return out;
+}
+
+function sendClose(ws: ServerWebSocket<unknown>, streamId: number): void {
+  try {
+    ws.sendBinary(encodeFrame(streamId, TYPE_CLOSE, new Uint8Array(0)));
+  } catch {
+    // WS may already be closed.
+  }
+}
+
+// Start the per-WS TCP listener and wire each accept() up to a fresh streamId
+// that frames bytes back through the WS.
+function startTunnelListener(ws: ServerWebSocket<unknown>): TunnelData {
+  const streams = new Map<number, TcpSocket>();
+  const data: TunnelData = { server: createServer(), streams, nextStreamId: 1 };
+  data.server.on('connection', (sock) => {
+    const id = data.nextStreamId++;
+    streams.set(id, sock);
+    sock.on('data', (chunk: Buffer) => {
+      try {
+        ws.sendBinary(encodeFrame(id, TYPE_DATA, new Uint8Array(chunk)));
+      } catch {
+        sock.destroy();
+      }
+    });
+    sock.on('error', () => {
+      streams.delete(id);
+      sendClose(ws, id);
+    });
+    sock.on('close', () => {
+      if (streams.delete(id)) sendClose(ws, id);
+    });
+  });
+  data.server.on('error', (err) => {
+    console.error('tunnel: listener error:', err);
+  });
+  // 127.0.0.1 only — the WS auth (Bearer) is the only thing gating access;
+  // we don't want this port reachable from outside the sandbox.
+  data.server.listen(TUNNEL_TCP_PORT, '127.0.0.1');
+  return data;
+}
+
+function closeTunnel(ws: ServerWebSocket<unknown>): void {
+  const data = tunnels.get(ws);
+  if (!data) return;
+  tunnels.delete(ws);
+  for (const sock of data.streams.values()) {
+    sock.destroy();
+  }
+  data.streams.clear();
+  data.server.close();
+}
+
 Bun.serve({
   port: PORT,
   hostname: '0.0.0.0',
-  async fetch(req): Promise<Response> {
+  async fetch(req, server): Promise<Response | undefined> {
     try {
       const url = new URL(req.url);
       if (url.pathname === '/health') return new Response('ok');
       if (!authorized(req)) return new Response('unauthorized', { status: 401 });
+      if (url.pathname === '/tunnel') {
+        // Bun upgrades the request to a WebSocket and routes subsequent
+        // events to the `websocket` handlers below. Return undefined when
+        // upgrade succeeds; Bun handles the rest.
+        if (server.upgrade(req)) return undefined;
+        return new Response('upgrade failed', { status: 400 });
+      }
       if (req.method !== 'POST') return new Response('not found', { status: 404 });
       switch (url.pathname) {
         case '/exec':
@@ -385,6 +484,53 @@ Bun.serve({
       console.error('handler error:', err);
       return new Response((err as Error).message ?? 'internal error', { status: 500 });
     }
+  },
+  websocket: {
+    open(ws) {
+      try {
+        const data = startTunnelListener(ws);
+        tunnels.set(ws, data);
+        console.log(`tunnel: bound 127.0.0.1:${TUNNEL_TCP_PORT}`);
+      } catch (err) {
+        console.error('tunnel open failed:', err);
+        ws.close(1011, 'tunnel-init-failed');
+      }
+    },
+    message(ws, message) {
+      const data = tunnels.get(ws);
+      if (!data) return;
+      // Bun delivers binary messages as Buffer. Defensive: stringify-mode
+      // clients would land here as string — ignore.
+      if (typeof message === 'string') return;
+      const buf = Buffer.from(message);
+      if (buf.length < FRAME_HEADER) return;
+      const streamId = buf.readUInt32BE(0);
+      const type = buf[4];
+      if (type === TYPE_CLOSE) {
+        const sock = data.streams.get(streamId);
+        if (sock) {
+          data.streams.delete(streamId);
+          sock.destroy();
+        }
+        return;
+      }
+      if (type !== TYPE_DATA) {
+        // Unknown type; drop the connection to surface protocol mismatch.
+        console.error(`tunnel: unknown frame type ${type} from client; closing`);
+        ws.close(1002, 'protocol-error');
+        return;
+      }
+      // Every stream is sandbox-initiated (a TCP accept on port 6000 opens
+      // it; the bot responds with data frames bound to the same streamId).
+      // An unknown streamId from the bot is either late data after we
+      // already closed the stream or a protocol bug — drop on the floor.
+      const sock = data.streams.get(streamId);
+      if (!sock) return;
+      sock.write(buf.subarray(FRAME_HEADER));
+    },
+    close(ws) {
+      closeTunnel(ws);
+    },
   },
 });
 

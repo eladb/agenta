@@ -14,7 +14,6 @@ RUN apt-get update \
       zip unzip \
       python3 python-is-python3 python3-pip python3-pil python3-matplotlib python3-numpy python3-pandas \
       imagemagick \
-      dropbear-bin \
  && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged user for everything except the iptables setup in entrypoint.sh.
@@ -25,9 +24,9 @@ RUN userdel -r ubuntu 2>/dev/null || true \
  && useradd --create-home --shell /bin/bash --uid 1000 sandbox
 
 # Botspace is no longer baked into the image. Each session shallow-clones
-# the configured host-side repo over SSH on first sandbox-touching tool —
-# see src/git/bootstrap.ts. /home/sandbox is the working tree and the
-# botspace (README.md + skills/) all at once.
+# the configured host-side repo over the WS-tunnel transport on first
+# sandbox-touching tool — see src/git/bootstrap.ts. /home/sandbox is the
+# working tree and the botspace (README.md + skills/) all at once.
 
 COPY --from=builder /build/sandbox-server /usr/local/bin/sandbox-server
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

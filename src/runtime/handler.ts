@@ -1,6 +1,5 @@
 import type { WebClient } from '@slack/web-api';
-import { removeEntry as removeAuthorizedKeysEntry } from '../git/authorized-keys';
-import { stopTunnel } from '../git/tunnel';
+import { teardownSession } from '../git/bootstrap';
 import { log } from '../log';
 import type { CallModel } from '../model/gateway';
 import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attachments';
@@ -99,20 +98,13 @@ async function handleMessage(
 
   if (cmd === 'delete') {
     await postInThread(web, e.channel, e.threadTs, 'deleted (stub)').catch(() => {});
-    // Drop the host-side authorized_keys entry first — it's the only piece
-    // of agenta state living outside the thread dir + sandbox. Best-effort:
-    // a missing file or missing entry isn't an error. The model's work
-    // product on the host repo (the agenta/sessions/<thread_key> branch) is
-    // intentionally NOT deleted.
-    await removeAuthorizedKeysEntry(tk).catch((err) => {
-      log.warn('handler', `[${tk}] removeAuthorizedKeysEntry failed: ${(err as Error).message}`);
-    });
-    // Tear down the per-thread reverse-SSH tunnel before removing the
-    // sandbox — if we destroyed the sandbox first, autossh would just
-    // retry against a dead machine until we got around to killing it.
-    // No-op on docker (the docker bootstrap never spawns a tunnel).
-    await stopTunnel(tk).catch((err) => {
-      log.warn('handler', `[${tk}] stopTunnel failed: ${(err as Error).message}`);
+    // Tear down the per-thread WS tunnel + bot-side git HTTP server
+    // BEFORE removing the sandbox: closing the tunnel cleanly stops the
+    // sandbox-side TCP listener and the git server exits without active
+    // requests in flight. The model's work product on the host repo (the
+    // agenta/sessions/<thread_key> branch) is intentionally NOT deleted.
+    await teardownSession(tk).catch((err) => {
+      log.warn('handler', `[${tk}] teardownSession failed: ${(err as Error).message}`);
     });
     await Promise.all([deleteThreadData(tk), removeContainer(tk)]);
     log.info('handler', `[${tk}] /delete done`);

@@ -1,5 +1,4 @@
-import { reapOrphanAuthorizedKeys } from './git/authorized-keys';
-import { stopAllTunnels } from './git/tunnel';
+import { teardownAllSessions } from './git/bootstrap';
 import { acquire } from './lockfile';
 import { log } from './log';
 import { createCallModel } from './model/gateway';
@@ -77,20 +76,12 @@ reapOrphanSandboxes().catch((err) => {
   log.warn('boot', `orphan reap failed: ${(err as Error).message}`);
 });
 
-// Symmetric authorized_keys reap. Drops per-session SSH lines whose thread
-// no longer has a session.json (or whose session.json doesn't carry a git
-// record any more). Same safety-net role as reapOrphanSandboxes — routine
-// cleanup is `/delete`.
-reapOrphanAuthorizedKeys().catch((err) => {
-  log.warn('boot', `authorized_keys reap failed: ${(err as Error).message}`);
-});
-
-// Reverse-SSH tunnel cleanup. autossh children are spawned `detached` so
-// they survive the bot crashing without cleanup — but on a clean
-// shutdown / Ctrl-C we should reap them so we don't accumulate one
-// orphan autossh per restart.
+// WS tunnels + per-session git HTTP servers live in-process only — they
+// don't survive a bot restart and there's nothing to reap on boot. We
+// just make sure we stop them on a clean shutdown so the loopback ports
+// are released and the WS half-closes propagate to the sandbox.
 const tunnelCleanup = (): void => {
-  void stopAllTunnels();
+  void teardownAllSessions();
 };
 process.on('exit', tunnelCleanup);
 process.on('SIGINT', tunnelCleanup);

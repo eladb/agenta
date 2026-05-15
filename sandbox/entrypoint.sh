@@ -5,10 +5,10 @@
 #   2. Drop privs and exec the server.
 #
 # The botspace (README.md + skills/) is no longer baked into the image —
-# the host-side bot bootstraps a per-session git clone over SSH on the
-# first sandbox-touching tool. So this script just preps capabilities and
-# launches the server; the workspace starts empty until ensureRepoBootstrap
-# fills it.
+# the host-side bot bootstraps a per-session git clone over the WS-tunnel
+# transport on the first sandbox-touching tool. So this script just preps
+# capabilities and launches the server; the workspace starts empty until
+# ensureRepoBootstrap fills it.
 #
 # After step 2, the server — and any bash command it spawns via /exec —
 # runs as uid 1000 (`sandbox`) with no capabilities. So a malicious shell
@@ -43,31 +43,6 @@ fi
 # inherits sandbox ownership and this is a no-op (or harmless failure
 # without CAP_CHOWN — ignored).
 chown sandbox:sandbox /home/sandbox 2>/dev/null || true
-
-# Dropbear (sshd) for the Fly reverse-tunnel path. The bot's autossh client
-# on the Mac dials in and creates a remote port-forward so the sandbox can
-# reach the Mac's git over `ssh user@localhost -p 2222`. On Docker this
-# whole block still runs but the tunnel is never spawned, so dropbear just
-# idles harmlessly (it listens on 2200 which is not exposed by `docker run`).
-# Pubkey auth only: -s (root no-password), -g (no-password globally),
-# -w (no root password). Host key is generated once per volume's life.
-mkdir -p /etc/dropbear
-if [ ! -f /etc/dropbear/dropbear_ed25519_host_key ]; then
-  dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null
-fi
-mkdir -p /root/.ssh
-chmod 755 /root/.ssh
-touch /root/.ssh/authorized_keys
-# Owned by sandbox so the post-drop sandbox-server (uid 1000) can append the
-# Mac-side tunnel pubkey via /exec. Dropbear reads as root regardless of
-# ownership; it does NOT enforce a strict-mode check on this file. Mode 644
-# (publicly readable, writable by owner only) keeps the auth file from being
-# tampered with by other processes if any ever land in the container.
-chown sandbox:sandbox /root/.ssh/authorized_keys 2>/dev/null || true
-chmod 644 /root/.ssh/authorized_keys
-# Daemonize (no -F); -E sends logs to stderr so `flyctl logs` / `docker logs`
-# can show auth failures during debugging.
-dropbear -p 2200 -E -s -g -w
 
 export HOME=/home/sandbox
 export USER=sandbox

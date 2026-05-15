@@ -1,53 +1,58 @@
-// Per-session git-backed botspace bootstrap.
+// Per-session git-backed botspace bootstrap (WS-tunnel transport, phase 24).
 //
-// On the first sandbox-touching tool of a turn (called from turn.ts right
-// after ensureContainer succeeds), this:
-//   1. Generates a fresh ed25519 keypair on the host if the thread doesn't
-//      already have one.
-//   2. Adds an authorized_keys line tagged with the thread key, with
-//      `command="<agenta-git-shell> --session … --repo … --allowed-ref …"`
-//      so the key is restricted to git push/pull against ONE repo and ONE
-//      ref namespace.
-//   3. Records {pubkey_fp, ref} on session.json so /delete and the boot
-//      reap know which authorized_keys line belongs to this thread.
-//   4. Writes the private key + ssh config + known_hosts into the sandbox
-//      volume via the existing sandbox HTTP API.
-//   5. Shallow-clones the host repo into /home/sandbox (the workspace =
-//      sandbox home), checks out a per-session branch.
+// Replaces the phase-22 per-session SSH keypairs + authorized_keys + Mac
+// sshd transport and the phase-23 Fly reverse-SSH tunnel.
 //
-// Idempotent: most steps short-circuit if their pre-state already holds.
-// Designed so a partial failure can be retried by re-running the function.
+// The bot owns one git HTTP server per session, listening on loopback at
+// 127.0.0.1:<random-port>. A WebSocket tunnel from the bot to the
+// sandbox's /tunnel endpoint multiplexes loopback TCP between git (inside
+// the sandbox, talking to http://localhost:6000/<repo>.git) and the
+// per-session git server on the bot. Reachability is provided by the
+// existing sandbox HTTP API direction — the bot already reaches the
+// sandbox over Bearer-auth'd HTTP, so the tunnel uses the same path.
+//
+// Bootstrap is called from `turn.ts` right after `ensureContainer`
+// succeeds, before `syncAttachmentsToSandbox`. Idempotent: re-running on
+// the same thread is cheap when the sandbox already has `~/.git`.
 
-import { readFile } from 'node:fs/promises';
-import { userInfo } from 'node:os';
 import { basename, join } from 'node:path';
 import { log } from '../log';
 import { readSession, setGit } from '../runtime/session-store';
-import { runBash, writeFile as sbWriteFile } from '../sandbox';
-import { loadSandbox } from '../sandbox/persistence';
-import { addEntry, listEntries } from './authorized-keys';
-import { generateKeypair } from './keys';
-import { ensureKnownHostsCache } from './known-hosts';
-import { ensureTunnel, getTunnelPublicKeyPath } from './tunnel';
+import { runBash } from '../sandbox';
+import { dockerProvider } from '../sandbox/docker';
+import { flyProvider } from '../sandbox/fly';
+import { type GitServerHandle, startGitServer } from './git-server';
+import { startTunnel, stopTunnel, type TunnelHandle } from './ws-tunnel';
 
-// agenta-git-shell lives at <repo_root>/bin/agenta-git-shell. This module
-// lives at <repo_root>/src/git/bootstrap.ts so two `..` resolves the root.
+// pre-receive hook lives at <repo_root>/git-hooks/pre-receive.
 const AGENTA_ROOT = join(import.meta.dir, '..', '..');
-const GIT_SHELL_PATH = join(AGENTA_ROOT, 'bin', 'agenta-git-shell');
+const HOOKS_DIR = join(AGENTA_ROOT, 'git-hooks');
+
+// Loopback port the sandbox-side TCP listener binds inside the container.
+// Must match `TUNNEL_TCP_PORT` in sandbox/server/server.ts.
+const SANDBOX_TUNNEL_PORT = 6000;
+
+// Per-thread handles. Tracked at module level so they survive across
+// runTurn invocations and so /delete + shutdown can reach them.
+type SessionHandles = {
+  gitServer: GitServerHandle;
+  tunnel: TunnelHandle;
+};
+const handles = new Map<string, SessionHandles>();
 
 function refFor(threadKey: string): string {
   return `refs/heads/agenta/sessions/${threadKey}`;
 }
 
-function commandFor(threadKey: string, repoPath: string): string {
-  // The authorized_keys `command=` field. agenta-git-shell parses these
-  // flags out of $0/$@ once sshd invokes it.
-  return `${GIT_SHELL_PATH} --session ${threadKey} --repo ${repoPath} --allowed-ref ${refFor(threadKey)}`;
+function selectProviderForEndpoint(): { getEndpoint: typeof dockerProvider.getEndpoint } {
+  const name = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
+  if (name === 'fly') return flyProvider;
+  return dockerProvider;
 }
 
-// Run a command inside the sandbox, throw on non-zero. The bootstrap is a
-// linear sequence of small ops; the model never sees these directly, so we
-// don't want to bury a failure in a tool_result.
+// Run a command inside the sandbox, throw on non-zero. Bootstrap is a
+// linear sequence of small ops — the model never sees them directly so a
+// raw throw is the right surface.
 async function sb(threadKey: string, cmd: string): Promise<string> {
   const res = await runBash(threadKey, cmd);
   if (res.exitCode !== 0) {
@@ -62,207 +67,152 @@ export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
     throw new Error('AGENTA_REPO_PATH must be set to a non-bare git repo');
   }
 
-  // Provider-aware transport. Docker reaches the host's sshd directly via
-  // Docker Desktop's loopback alias; Fly reaches it over a per-thread
-  // reverse-SSH tunnel terminated at localhost:2222 inside the sandbox.
-  // Both can be overridden via env for testing — the defaults match the
-  // production setups.
-  const provider = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
-  const tunneled = provider === 'fly';
-  const hostSshHostname =
-    process.env.AGENTA_HOST_SSH_HOSTNAME ?? (tunneled ? 'localhost' : 'host.docker.internal');
-  const hostSshPort = process.env.AGENTA_HOST_SSH_PORT ?? (tunneled ? '2222' : '22');
-
-  // On Fly we have to install the bot's pubkey into the sandbox's dropbear
-  // authorized_keys BEFORE we can start the tunnel — otherwise autossh
-  // can't log in. Do this first.
-  if (tunneled) {
-    await ensureTunnelAuthorizedAndUp(threadKey);
-  }
-
+  const allowedRef = refFor(threadKey);
   const session = await readSession(threadKey);
-  const existing = session?.git;
 
-  // Fast path: pubkey is registered AND the line is present in
-  // authorized_keys AND the sandbox already has ~/.git.
-  if (existing?.pubkey_fp) {
-    const entries = await listEntries();
-    if (entries.includes(threadKey)) {
-      const probe = await runBash(threadKey, 'test -d ~/.git');
-      if (probe.exitCode === 0) return;
-      // Sandbox is fresh (new container/volume) but the host-side key is
-      // still good. Fall through to the SSH-config + clone path below,
-      // reusing the existing fingerprint+ref.
-      log.info('git', `[${threadKey}] sandbox missing ~/.git; re-seeding clone with existing key`);
-    }
+  // Fast path: tunnel + git server already up for this thread, and the
+  // sandbox already has a clone. Probe ~/.git to confirm — the sandbox
+  // may have been wiped (rare, but possible if the volume was reset).
+  const existing = handles.get(threadKey);
+  if (existing && session?.git?.ref === allowedRef) {
+    const probe = await runBash(threadKey, 'test -d ~/.git');
+    if (probe.exitCode === 0) return;
+    log.info('git', `[${threadKey}] sandbox missing ~/.git; re-cloning over existing tunnel`);
+    await cloneAndCheckout(threadKey, repoPath);
+    return;
   }
 
-  // Generate-and-register branch. Only fires when we don't already have a
-  // matching pubkey_fp + authorized_keys line.
-  let pubkeyFp = existing?.pubkey_fp;
-  let privateKeyPem: string | undefined;
-  let publicKeyOpenssh: string | undefined;
-  const needsKey =
-    !pubkeyFp ||
-    !(await listEntries()).includes(threadKey) ||
-    !(await sandboxHasKeyFile(threadKey));
-  if (needsKey) {
-    const kp = await generateKeypair();
-    pubkeyFp = kp.fingerprint;
-    privateKeyPem = kp.private;
-    publicKeyOpenssh = kp.public;
-    await addEntry({
-      threadKey,
-      publicKey: kp.public,
-      command: commandFor(threadKey, repoPath),
+  // Tear down any stale handle (e.g. from a prior turn where the tunnel
+  // died mid-flight) before re-provisioning.
+  if (existing) {
+    await teardownSession(threadKey).catch((err) => {
+      log.warn('git', `[${threadKey}] stale teardown failed: ${(err as Error).message}`);
     });
-    await setGit(threadKey, { pubkey_fp: kp.fingerprint, ref: refFor(threadKey) });
-    log.info('git', `[${threadKey}] generated keypair ${kp.fingerprint}`);
   }
 
-  // Always (re-)seed the SSH config and known_hosts into the sandbox. If
-  // the key was rotated above, drop in the matching private key; otherwise
-  // we leave the existing one alone (the model is allowed to touch
-  // ~/.ssh/id_ed25519 only via the bootstrap — there's no good reason for
-  // it to rewrite the key, but if it did we'd rather not stomp on it
-  // silently here).
-  const knownHostsPath = await ensureKnownHostsCache();
-  const knownHostsBody = await readFile(knownHostsPath, 'utf8');
-  const sshUser = userInfo().username;
+  // 1. Start the per-session git HTTP server on loopback.
+  const gitServer = await startGitServer({
+    repoPath,
+    allowedRef,
+    hooksDir: HOOKS_DIR,
+  });
+  log.info('git', `[${threadKey}] git server on 127.0.0.1:${gitServer.port}`);
+
+  // 2. Open the WS tunnel to the sandbox's /tunnel route. We pull the
+  //    sandbox base URL + bearer token straight from the active provider's
+  //    endpoint — same path as every other sandbox HTTP call.
+  const provider = selectProviderForEndpoint();
+  const ep = await provider.getEndpoint(threadKey);
+  const auth = ep.headers.Authorization ?? ep.headers.authorization;
+  if (!auth?.startsWith('Bearer ')) {
+    await gitServer.stop();
+    throw new Error('sandbox endpoint missing Bearer auth header');
+  }
+  const token = auth.slice('Bearer '.length);
+
+  let tunnel: TunnelHandle;
+  try {
+    tunnel = await startTunnel({
+      threadKey,
+      sandboxBaseUrl: ep.baseUrl,
+      sandboxToken: token,
+      localTargetPort: gitServer.port,
+    });
+  } catch (err) {
+    await gitServer.stop();
+    throw err;
+  }
+  handles.set(threadKey, { gitServer, tunnel });
+
+  // 3. Probe the in-sandbox loopback port. /dev/tcp is a bash builtin so
+  //    we don't depend on `nc`. Cap at ~5s — the WS handshake itself
+  //    blocks startTunnel, so the listener should be up by now; this is
+  //    just belt-and-suspenders against startup races.
+  await waitForSandboxPort(threadKey);
+
+  // 4. Persist the session's allowed ref. We tolerate (but don't write)
+  //    the old phase-22 pubkey_fp field.
+  await setGit(threadKey, { ref: allowedRef });
+
+  // 5. Clone into the sandbox and check out the session branch.
+  await cloneAndCheckout(threadKey, repoPath);
+}
+
+async function waitForSandboxPort(threadKey: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  const probe = `bash -c "exec 3<>/dev/tcp/localhost/${SANDBOX_TUNNEL_PORT}" 2>/dev/null`;
+  while (Date.now() < deadline) {
+    const res = await runBash(threadKey, probe);
+    if (res.exitCode === 0) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(
+    `WS tunnel for ${threadKey} not reachable inside sandbox on localhost:${SANDBOX_TUNNEL_PORT} within 5s`,
+  );
+}
+
+async function cloneAndCheckout(threadKey: string, repoPath: string): Promise<void> {
   const repoName = basename(repoPath);
+  const remoteUrl = `http://localhost:${SANDBOX_TUNNEL_PORT}/${repoName}.git`;
+  const allowedRef = refFor(threadKey);
+  const branchName = `agenta/sessions/${threadKey}`;
 
-  await sb(threadKey, 'mkdir -p ~/.ssh && chmod 700 ~/.ssh');
-  if (privateKeyPem) {
-    await writeKeyFiles(threadKey, privateKeyPem, publicKeyOpenssh ?? '');
-  }
-  // ssh config: pin the alias `agenta-repo` to the host's sshd. On docker
-  // that's host.docker.internal:22 (Docker Desktop's loopback alias for the
-  // host). On fly we go through the per-thread reverse-SSH tunnel at
-  // localhost:2222 (Phase 23). Hostname + port are configurable via
-  // AGENTA_HOST_SSH_HOSTNAME / AGENTA_HOST_SSH_PORT so a host with a
-  // different sshd port can still bootstrap. The user under which the
-  // agenta bot is running owns the authorized_keys line we wrote.
-  const sshConfig = [
-    'Host agenta-repo',
-    `  HostName ${hostSshHostname}`,
-    `  Port ${hostSshPort}`,
-    `  User ${sshUser}`,
-    '  IdentityFile ~/.ssh/id_ed25519',
-    '  IdentitiesOnly yes',
-    '  StrictHostKeyChecking yes',
-    '  UserKnownHostsFile ~/.ssh/known_hosts',
-    '',
-  ].join('\n');
-  await sbWrite(threadKey, '.ssh/config', sshConfig);
-  await sbWrite(threadKey, '.ssh/known_hosts', knownHostsBody);
-  await sb(threadKey, 'chmod 600 ~/.ssh/id_ed25519 ~/.ssh/config ~/.ssh/known_hosts');
-
-  // Clone (idempotent). The remote URL embeds the literal repo path because
-  // agenta-git-shell validates it against --repo.
-  const cloneCmd = `[ -d ~/.git ] || (cd ~ && git clone --depth 1 ssh://agenta-repo${repoPath} ${shellQuote(repoName)}-tmp && mv ${shellQuote(repoName)}-tmp/.git .git && cp -an ${shellQuote(repoName)}-tmp/. . && rm -rf ${shellQuote(repoName)}-tmp)`;
-  // Why the dance: `git clone … .` refuses an existing non-empty dir
-  // (the volume has botspace seed or prior state). We clone into a temp
-  // subdir, then move .git into ~ and copy any working-tree files over
-  // without clobbering existing ones (`cp -an`).
+  // Idempotent clone: `git clone … .` refuses an existing non-empty dir,
+  // so clone into /tmp then move .git + copy-if-missing over the existing
+  // workspace tree. Skip entirely if ~/.git already exists.
+  const cloneCmd = [
+    `[ -d ~/.git ] || (`,
+    `cd /tmp &&`,
+    `rm -rf agenta-clone &&`,
+    `git clone --depth 1 ${shellQuote(remoteUrl)} agenta-clone &&`,
+    `mv agenta-clone/.git ~/ &&`,
+    `cp -an agenta-clone/. ~/ &&`,
+    `rm -rf agenta-clone`,
+    `)`,
+  ].join(' ');
   await sb(threadKey, cloneCmd);
 
-  // Identity + branch — both no-ops on the second call.
+  // Set the origin remote URL explicitly so it's stable for subsequent
+  // push/pull. `git clone` already set it but a re-bootstrap onto a
+  // different gitServer port (we don't pin the port across restarts)
+  // would otherwise still point at the old port.
+  await sb(threadKey, `git -C ~ remote set-url origin ${shellQuote(remoteUrl)}`);
+
   await sb(threadKey, 'git -C ~ config user.email "agenta@localhost"');
   await sb(threadKey, 'git -C ~ config user.name "agenta"');
-  const onRef = await runBash(threadKey, 'git -C ~ symbolic-ref --quiet HEAD');
-  const desired = refFor(threadKey);
-  const currentRef = onRef.stdout.trim();
-  if (currentRef !== desired) {
-    await sb(threadKey, `git -C ~ checkout -B agenta/sessions/${threadKey}`);
+
+  const head = await runBash(threadKey, 'git -C ~ symbolic-ref --quiet HEAD');
+  if (head.stdout.trim() !== allowedRef) {
+    await sb(threadKey, `git -C ~ checkout -B ${shellQuote(branchName)}`);
   }
 }
 
-async function sandboxHasKeyFile(threadKey: string): Promise<boolean> {
-  const res = await runBash(threadKey, 'test -f ~/.ssh/id_ed25519');
-  return res.exitCode === 0;
-}
-
-async function writeKeyFiles(
-  threadKey: string,
-  privatePem: string,
-  publicOpenssh: string,
-): Promise<void> {
-  // /write doesn't expose a mode argument; we chmod once everything is on
-  // disk (see the chmod 600 call in the caller).
-  const r1 = await sbWriteFile(threadKey, '.ssh/id_ed25519', privatePem);
-  if (r1.exitCode !== 0) {
-    throw new Error(`sandbox writeFile id_ed25519 failed: ${r1.stderr || r1.stdout}`);
-  }
-  if (publicOpenssh.length > 0) {
-    const r2 = await sbWriteFile(
-      threadKey,
-      '.ssh/id_ed25519.pub',
-      publicOpenssh.endsWith('\n') ? publicOpenssh : `${publicOpenssh}\n`,
-    );
-    if (r2.exitCode !== 0) {
-      log.warn('git', `[${threadKey}] write id_ed25519.pub: ${r2.stderr || r2.stdout}`);
-    }
-  }
-}
-
-async function sbWrite(threadKey: string, path: string, content: string): Promise<void> {
-  const r = await sbWriteFile(threadKey, path, content);
-  if (r.exitCode !== 0) {
-    throw new Error(`sandbox writeFile ${path} failed: ${r.stderr || r.stdout}`);
-  }
-}
-
-// Single-quote a path/word for safe inclusion in a bash command. Used for
-// the `mv`/`cp` calls in the clone dance; the input is the repo basename
-// which we don't trust to be shell-safe.
+// Single-quote a path/word for safe inclusion in a bash command.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-// Fly-only: install the Mac-side tunnel pubkey into the sandbox's
-// /root/.ssh/authorized_keys (where dropbear reads it), then spawn the
-// per-thread autossh that creates the localhost:2222 reverse-forward. The
-// helper is idempotent — repeated /write calls are cheap and ensureTunnel
-// already handles "already running" itself.
-async function ensureTunnelAuthorizedAndUp(threadKey: string): Promise<void> {
-  // 1. Load sandbox record to find the machine's private_ip.
-  const sb = await loadSandbox(threadKey);
-  if (!sb || sb.provider !== 'fly') {
-    throw new Error(
-      `tunnel: no Fly sandbox record for ${threadKey}; ensureContainer must run before bootstrap`,
-    );
+// Tear down the per-session git server + tunnel. Called from /delete and
+// from process-shutdown handlers. Safe to call when there's no handle.
+export async function teardownSession(threadKey: string): Promise<void> {
+  const h = handles.get(threadKey);
+  if (!h) {
+    // Best-effort: even with no in-process handle, the ws-tunnel module
+    // may still hold one (e.g. across a session that crashed mid-turn).
+    await stopTunnel(threadKey).catch(() => {});
+    return;
   }
-  const flyIp = sb.private_ip;
-  if (!flyIp || flyIp.length === 0) {
-    throw new Error(
-      `tunnel: Fly sandbox record for ${threadKey} has no private_ip; cannot reach over WireGuard`,
-    );
-  }
+  handles.delete(threadKey);
+  await h.tunnel.stop().catch(() => {});
+  await h.gitServer.stop().catch(() => {});
+}
 
-  // 2. Read the Mac tunnel pubkey and install it into the sandbox's
-  //    /root/.ssh/authorized_keys. Append-if-missing rather than overwrite
-  //    so the same authorized_keys file can carry future operator keys if
-  //    we ever need them. The sandbox's entrypoint.sh pre-chowns this file
-  //    to sandbox:sandbox + 644 so the uid-1000 sandbox-server can append
-  //    to it; dropbear still reads it as root.
-  const pubKey = (await readFile(getTunnelPublicKeyPath(), 'utf8')).trim();
-  const haveKey = await runBash(
-    threadKey,
-    `grep -qF ${shellQuote(pubKey)} /root/.ssh/authorized_keys 2>/dev/null`,
-  );
-  if (haveKey.exitCode !== 0) {
-    const append = await runBash(
-      threadKey,
-      `echo ${shellQuote(pubKey)} >> /root/.ssh/authorized_keys`,
-    );
-    if (append.exitCode !== 0) {
-      throw new Error(
-        `tunnel: failed to install Mac tunnel pubkey into sandbox: ${append.stderr || append.stdout}`,
-      );
-    }
-    log.info('git', `[${threadKey}] installed Mac tunnel pubkey into sandbox`);
-  }
+export async function teardownAllSessions(): Promise<void> {
+  const keys = [...handles.keys()];
+  await Promise.all(keys.map((k) => teardownSession(k)));
+}
 
-  // 3. Spawn (or adopt) the per-thread autossh.
-  await ensureTunnel(threadKey, flyIp);
+// For tests.
+export function _resetForTests(): void {
+  handles.clear();
 }

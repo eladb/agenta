@@ -38,15 +38,16 @@ export type SandboxRecord =
       private_ip?: string;
     };
 
-// Per-thread git-backed-botspace routing. `pubkey_fp` is the SHA256
-// fingerprint of the public key (as returned by `ssh-keygen -lf`); it's the
-// stable identifier we use to match an `authorized_keys` line to a thread
-// when the volume — which actually holds the private key — is gone. `ref`
-// is the agenta/sessions/<thread_key> branch the pre-receive hook restricts
-// pushes to.
+// Per-thread git-backed-botspace routing. `ref` is the
+// agenta/sessions/<thread_key> branch the pre-receive hook restricts pushes
+// to. The phase-22/23 `pubkey_fp` field is tolerated on read (sessions
+// written before the WS-tunnel transport landed may still carry it) but
+// the bootstrap no longer writes it.
 export type GitRecord = {
-  pubkey_fp: string;
   ref: string;
+  // Backwards-compat field. Phase 22 wrote the SHA256 fingerprint of the
+  // per-session ed25519 key here; phase 24 ignores it.
+  pubkey_fp?: string;
 };
 
 // Per-thread runtime state. The file now persists even when the thread is
