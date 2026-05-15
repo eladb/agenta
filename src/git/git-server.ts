@@ -133,9 +133,14 @@ export async function startGitServer(opts: StartGitServerOpts): Promise<GitServe
           QUERY_STRING: url.search.startsWith('?') ? url.search.slice(1) : url.search,
           // Pin core.hooksPath via GIT_CONFIG_* so the agenta pre-receive
           // policy runs without touching the customer repo's hook tree.
-          GIT_CONFIG_COUNT: '1',
+          // Also force http.receivepack on so non-bare repos accept
+          // pushes (the default for non-bare is to refuse; we don't want
+          // every customer repo to need this in its own config).
+          GIT_CONFIG_COUNT: '2',
           GIT_CONFIG_KEY_0: 'core.hooksPath',
           GIT_CONFIG_VALUE_0: opts.hooksDir,
+          GIT_CONFIG_KEY_1: 'http.receivepack',
+          GIT_CONFIG_VALUE_1: 'true',
           AGENTA_ALLOWED_REF: opts.allowedRef,
         };
         if (req.method === 'POST') {
