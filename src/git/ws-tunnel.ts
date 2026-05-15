@@ -19,9 +19,11 @@ export type StartTunnelOpts = {
   // Base URL of the sandbox HTTP API (http://...). The WS upgrade is
   // requested at <base>/tunnel; ws:// is derived by swapping the scheme.
   sandboxBaseUrl: string;
-  // Bearer token for /tunnel auth (same one used for the rest of the
-  // sandbox HTTP API).
-  sandboxToken: string;
+  // Headers needed to reach the sandbox HTTP API — same set returned by
+  // the active provider's getEndpoint(). On Fly this includes both the
+  // Authorization Bearer header and `fly-force-instance-id` for routing
+  // to the specific machine. On Docker it's just Authorization.
+  sandboxHeaders: Record<string, string>;
   // Loopback port the bot's git HTTP server is listening on. Every WS
   // stream maps to a fresh TCP connection here.
   localTargetPort: number;
@@ -153,7 +155,7 @@ export async function startTunnel(opts: StartTunnelOpts): Promise<TunnelHandle> 
     const url = toWsUrl(opts.sandboxBaseUrl);
     try {
       ws = new WebSocket(url, {
-        headers: { Authorization: `Bearer ${opts.sandboxToken}` },
+        headers: opts.sandboxHeaders,
       } as unknown as undefined);
     } catch (err) {
       log.warn('ws-tunnel', `[${opts.threadKey}] WS construct failed: ${(err as Error).message}`);

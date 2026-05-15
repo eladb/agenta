@@ -103,19 +103,13 @@ export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
   //    endpoint — same path as every other sandbox HTTP call.
   const provider = selectProviderForEndpoint();
   const ep = await provider.getEndpoint(threadKey);
-  const auth = ep.headers.Authorization ?? ep.headers.authorization;
-  if (!auth?.startsWith('Bearer ')) {
-    await gitServer.stop();
-    throw new Error('sandbox endpoint missing Bearer auth header');
-  }
-  const token = auth.slice('Bearer '.length);
 
   let tunnel: TunnelHandle;
   try {
     tunnel = await startTunnel({
       threadKey,
       sandboxBaseUrl: ep.baseUrl,
-      sandboxToken: token,
+      sandboxHeaders: ep.headers,
       localTargetPort: gitServer.port,
     });
   } catch (err) {

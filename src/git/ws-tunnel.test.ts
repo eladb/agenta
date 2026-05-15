@@ -129,7 +129,7 @@ describe('startTunnel', () => {
     const handle1 = await startTunnel({
       threadKey: 'tk-1',
       sandboxBaseUrl: `http://127.0.0.1:${sandbox.port}`,
-      sandboxToken: FAKE_TOKEN,
+      sandboxHeaders: { Authorization: `Bearer ${FAKE_TOKEN}` },
       localTargetPort: echo.port,
     });
     expect(sandbox.authChecked).toBe(true);
@@ -138,7 +138,7 @@ describe('startTunnel', () => {
     const handle2 = await startTunnel({
       threadKey: 'tk-1',
       sandboxBaseUrl: `http://127.0.0.1:${sandbox.port}`,
-      sandboxToken: FAKE_TOKEN,
+      sandboxHeaders: { Authorization: `Bearer ${FAKE_TOKEN}` },
       localTargetPort: echo.port,
     });
     expect(handle1).toBe(handle2);
@@ -150,7 +150,7 @@ describe('startTunnel', () => {
     await startTunnel({
       threadKey: 'tk-fwd',
       sandboxBaseUrl: `http://127.0.0.1:${sandbox.port}`,
-      sandboxToken: FAKE_TOKEN,
+      sandboxHeaders: { Authorization: `Bearer ${FAKE_TOKEN}` },
       localTargetPort: echo.port,
     });
     const ws = await waitFor(() => sandbox.ws);
@@ -176,7 +176,7 @@ describe('startTunnel', () => {
     await startTunnel({
       threadKey: 'tk-close',
       sandboxBaseUrl: `http://127.0.0.1:${sandbox.port}`,
-      sandboxToken: FAKE_TOKEN,
+      sandboxHeaders: { Authorization: `Bearer ${FAKE_TOKEN}` },
       localTargetPort: echo.port,
     });
     const ws = await waitFor(() => sandbox.ws);
@@ -199,7 +199,7 @@ describe('startTunnel', () => {
     await startTunnel({
       threadKey: 'tk-stop',
       sandboxBaseUrl: `http://127.0.0.1:${sandbox.port}`,
-      sandboxToken: FAKE_TOKEN,
+      sandboxHeaders: { Authorization: `Bearer ${FAKE_TOKEN}` },
       localTargetPort: echo.port,
     });
     await waitFor(() => sandbox.ws);
