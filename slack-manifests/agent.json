@@ -12,7 +12,7 @@
   },
   "oauth_config": {
     "scopes": {
-      "bot": ["app_mentions:read", "chat:write", "channels:history", "files:read", "files:write", "reactions:write"]
+      "bot": ["app_mentions:read", "chat:write", "channels:history", "files:read", "files:write", "reactions:write", "users:read", "users:read.email"]
     }
   },
   "settings": {

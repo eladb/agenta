@@ -48,6 +48,13 @@ export type GitRecord = {
   // Backwards-compat field. Phase 22 wrote the SHA256 fingerprint of the
   // per-session ed25519 key here; phase 24 ignores it.
   pubkey_fp?: string;
+  // Slack user who originated this thread (first mentioner). Resolved
+  // once on first mention via users.info and cached so we don't re-query
+  // on every bootstrap. Used to configure git user.email + user.name
+  // inside the sandbox so commits land under the human's identity.
+  // Optional — may be absent on threads created before phase 25, or when
+  // the lookup failed (denied scopes, deleted account, etc.).
+  creator?: { email: string; name: string };
 };
 
 // Per-thread runtime state. The file now persists even when the thread is

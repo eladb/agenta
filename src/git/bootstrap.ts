@@ -40,7 +40,7 @@ type SessionHandles = {
 };
 const handles = new Map<string, SessionHandles>();
 
-function refFor(threadKey: string): string {
+export function refFor(threadKey: string): string {
   return `refs/heads/agenta/sessions/${threadKey}`;
 }
 
@@ -124,9 +124,10 @@ export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
   //    just belt-and-suspenders against startup races.
   await waitForSandboxPort(threadKey);
 
-  // 4. Persist the session's allowed ref. We tolerate (but don't write)
-  //    the old phase-22 pubkey_fp field.
-  await setGit(threadKey, { ref: allowedRef });
+  // 4. Persist the session's allowed ref. Preserve the creator written
+  //    by handler.ts on first mention. We tolerate (but don't write) the
+  //    old phase-22 pubkey_fp field.
+  await setGit(threadKey, { ref: allowedRef, creator: session?.git?.creator });
 
   // 5. Clone into the sandbox and check out the session branch.
   await cloneAndCheckout(threadKey, repoPath);
@@ -150,6 +151,14 @@ async function cloneAndCheckout(threadKey: string, repoPath: string): Promise<vo
   const remoteUrl = `http://localhost:${SANDBOX_TUNNEL_PORT}/${repoName}.git`;
   const allowedRef = refFor(threadKey);
   const branchName = `agenta/sessions/${threadKey}`;
+  // Author identity: prefer the Slack thread creator resolved by
+  // handler.ts on first mention. Falls back to a static name/email when
+  // the lookup failed (denied scopes, deleted account, pre-phase-25
+  // threads, etc.) so we always have something committable.
+  const session = await readSession(threadKey);
+  const creator = session?.git?.creator;
+  const authorName = creator?.name ?? 'agenta';
+  const authorEmail = creator?.email ?? 'agenta@localhost';
 
   // Idempotent clone: `git clone … .` refuses an existing non-empty dir,
   // so clone into /tmp then move .git + copy-if-missing over the existing
@@ -172,8 +181,8 @@ async function cloneAndCheckout(threadKey: string, repoPath: string): Promise<vo
   // would otherwise still point at the old port.
   await sb(threadKey, `git -C ~ remote set-url origin ${shellQuote(remoteUrl)}`);
 
-  await sb(threadKey, 'git -C ~ config user.email "agenta@localhost"');
-  await sb(threadKey, 'git -C ~ config user.name "agenta"');
+  await sb(threadKey, `git -C ~ config user.email ${shellQuote(authorEmail)}`);
+  await sb(threadKey, `git -C ~ config user.name ${shellQuote(authorName)}`);
 
   const head = await runBash(threadKey, 'git -C ~ symbolic-ref --quiet HEAD');
   if (head.stdout.trim() !== allowedRef) {

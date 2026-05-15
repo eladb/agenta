@@ -1,5 +1,5 @@
 import type { WebClient } from '@slack/web-api';
-import { teardownSession } from '../git/bootstrap';
+import { refFor, teardownSession } from '../git/bootstrap';
 import { log } from '../log';
 import type { CallModel } from '../model/gateway';
 import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attachments';
@@ -116,7 +116,7 @@ async function handleMessage(
   // sees the same prompt even if README.md / skills change in the meantime.
   // `clearSession` writes idle (preserving system_prompt) so the file is
   // there across turns; only `/delete` removes it.
-  const prompt = await resolveSystemPrompt(tk);
+  const prompt = await resolveSystemPrompt(web, tk, e.user);
 
   // Sandbox provisioning is deferred — see turn.ts. The first tool that
   // sets requiresSandbox triggers `ensureContainer` and surfaces a
@@ -131,19 +131,60 @@ async function handleMessage(
   });
 }
 
-async function resolveSystemPrompt(tk: string): Promise<string> {
+async function resolveSystemPrompt(
+  web: WebClient,
+  tk: string,
+  userId: string,
+): Promise<string> {
   const existing = await readSession(tk);
   if (existing?.system_prompt !== undefined) return existing.system_prompt;
   const composed = await buildSystemPrompt();
+  // First-mention resolution: look up the originating Slack user once and
+  // cache their email + name into session.json. bootstrap.ts reads these
+  // back to configure git user.email / user.name inside the sandbox so
+  // commits land under the human's identity, not under the static
+  // "agenta@localhost".
+  const creator = await resolveCreator(web, userId);
   // Persist as idle so it survives this turn and any future ones. session.ts
   // will overwrite the file with running/stopping/idle as it transitions,
-  // always carrying `system_prompt` forward.
+  // always carrying `system_prompt` (and `git`) forward.
   await writeSession(tk, {
     status: 'idle',
     updated_at: nowIso(),
     system_prompt: composed,
+    git: creator ? { ref: refFor(tk), creator } : undefined,
   });
   return composed;
+}
+
+async function resolveCreator(
+  web: WebClient,
+  userId: string,
+): Promise<{ email: string; name: string } | undefined> {
+  try {
+    const info = await web.users.info({ user: userId });
+    if (!info.ok || !info.user) return undefined;
+    const u = info.user;
+    // Prefer real_name; fall back to display_name; last resort the user id
+    // so we always have *something* non-empty.
+    const name =
+      u.real_name ??
+      u.profile?.display_name ??
+      u.profile?.real_name ??
+      u.name ??
+      userId;
+    // Email may be hidden (guest accounts, missing scope, etc.). Synthesize
+    // a stable non-routable address so each Slack user still maps to a
+    // unique git author.
+    const email = u.profile?.email ?? `${userId}@agenta.slack`;
+    return { email, name };
+  } catch (err) {
+    log.warn(
+      'handler',
+      `users.info failed for ${userId}: ${(err as Error).message} — falling back to default git author`,
+    );
+    return undefined;
+  }
 }
 
 async function handleEdit(e: EditMessage): Promise<void> {
