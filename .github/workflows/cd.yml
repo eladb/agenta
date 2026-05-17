@@ -23,10 +23,15 @@ name: CD
 # canary regresses after a deploy. Manual rollback is
 # `flyctl releases rollback -a agenta-bot`.
 #
-# Concurrency: serialize runs without cancelling. Two reasons —
+# Concurrency: serialize runs AND preempt in-flight runs when a newer
+# commit lands. Reasons —
 # (a) only one agenta-ci Socket Mode client at a time, else two CI
-# runs would split events 50/50, and (b) interleaved deploys would
-# race each other.
+# runs would split events 50/50;
+# (b) interleaved deploys would race each other;
+# (c) we want the latest commit to reach prod fast — a flurry of merges
+#     shouldn't backlog 30+ min behind a stale run. Cancel-in-progress
+#     SIGTERMs the running job (bun's signal handlers fire cleanly,
+#     sockets disconnect) so only the newest commit gets to deploy.
 
 on:
   push:
@@ -34,7 +39,7 @@ on:
 
 concurrency:
   group: cd
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   cd:
