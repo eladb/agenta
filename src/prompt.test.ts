@@ -4,22 +4,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSystemPrompt } from './prompt';
 
-let botspace: string;
+let agentHome: string;
 
 beforeEach(() => {
-  botspace = mkdtempSync(join(tmpdir(), 'agenta-botspace-'));
+  agentHome = mkdtempSync(join(tmpdir(), 'agenta-agent-home-'));
 });
 
 afterEach(() => {
-  rmSync(botspace, { recursive: true, force: true });
+  rmSync(agentHome, { recursive: true, force: true });
 });
 
 function writeBot(text: string): void {
-  writeFileSync(join(botspace, 'README.md'), text);
+  writeFileSync(join(agentHome, 'README.md'), text);
 }
 
 function writeSkill(slug: string, frontmatter: string, body = ''): void {
-  const dir = join(botspace, 'skills', slug);
+  const dir = join(agentHome, 'skills', slug);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'SKILL.md'), `---\n${frontmatter}\n---\n${body}`);
 }
@@ -28,7 +28,7 @@ describe('buildSystemPrompt', () => {
   test('README.md alone (no skills dir) -> output is README.md verbatim', async () => {
     const body = 'You are a bot.\nBe nice.';
     writeBot(body);
-    const out = await buildSystemPrompt(botspace, undefined);
+    const out = await buildSystemPrompt(agentHome, undefined);
     expect(out).toBe(body);
   });
 
@@ -37,7 +37,7 @@ describe('buildSystemPrompt', () => {
     // Write in reverse alphabetical order to verify path sorting.
     writeSkill('zeta', 'name: zeta\ndescription: zeta-desc');
     writeSkill('alpha', 'name: alpha\ndescription: alpha-desc');
-    const out = await buildSystemPrompt(botspace, undefined);
+    const out = await buildSystemPrompt(agentHome, undefined);
 
     expect(out.startsWith('BOT\n\n')).toBe(true);
     expect(out).toContain('# Available skills');
@@ -60,7 +60,7 @@ describe('buildSystemPrompt', () => {
     // Missing required `name` key.
     writeSkill('bad', 'description: only desc here');
     writeSkill('good', 'name: good\ndescription: good-desc');
-    const out = await buildSystemPrompt(botspace, undefined);
+    const out = await buildSystemPrompt(agentHome, undefined);
     const start = out.indexOf('[');
     const end = out.lastIndexOf(']');
     const parsed = JSON.parse(out.slice(start, end + 1));
@@ -72,7 +72,7 @@ describe('buildSystemPrompt', () => {
   test('skill with extra frontmatter fields passes them through verbatim', async () => {
     writeBot('BOT');
     writeSkill('rich', 'name: rich\ndescription: r-d\nversion: 2\ntags: [a, b]');
-    const out = await buildSystemPrompt(botspace, undefined);
+    const out = await buildSystemPrompt(agentHome, undefined);
     const start = out.indexOf('[');
     const end = out.lastIndexOf(']');
     const parsed = JSON.parse(out.slice(start, end + 1));
@@ -89,48 +89,48 @@ describe('buildSystemPrompt', () => {
 
   test('SYSTEM_PROMPT env prefix is prepended with a blank line before README.md', async () => {
     writeBot('BOT body');
-    const out = await buildSystemPrompt(botspace, 'PREFIX TEXT');
+    const out = await buildSystemPrompt(agentHome, 'PREFIX TEXT');
     expect(out).toBe('PREFIX TEXT\n\nBOT body');
   });
 
   test('zero skills -> no "Available skills" section in output', async () => {
     writeBot('BOT only');
     // No skills dir at all.
-    const out = await buildSystemPrompt(botspace, undefined);
+    const out = await buildSystemPrompt(agentHome, undefined);
     expect(out).not.toContain('Available skills');
     expect(out).toBe('BOT only');
   });
 
   test('zero skills with empty skills dir present -> still omit Available skills', async () => {
     writeBot('BOT only');
-    mkdirSync(join(botspace, 'skills'), { recursive: true });
-    const out = await buildSystemPrompt(botspace, undefined);
+    mkdirSync(join(agentHome, 'skills'), { recursive: true });
+    const out = await buildSystemPrompt(agentHome, undefined);
     expect(out).not.toContain('Available skills');
     expect(out).toBe('BOT only');
   });
 
-  test('throws when AGENTA_REPO_PATH and BOTSPACE_DIR are both unset (no default location any more)', async () => {
-    const priorRepo = process.env.AGENTA_REPO_PATH;
-    const priorBotspace = process.env.BOTSPACE_DIR;
-    delete process.env.AGENTA_REPO_PATH;
-    delete process.env.BOTSPACE_DIR;
+  test('throws when AGENT_HOME and AGENT_HOME_DIR are both unset (no default location any more)', async () => {
+    const priorRepo = process.env.AGENT_HOME;
+    const priorAgentHomeDir = process.env.AGENT_HOME_DIR;
+    delete process.env.AGENT_HOME;
+    delete process.env.AGENT_HOME_DIR;
     try {
       // Call with no positional arg so the default-resolver runs.
-      await expect(buildSystemPrompt()).rejects.toThrow(/AGENTA_REPO_PATH/);
+      await expect(buildSystemPrompt()).rejects.toThrow(/AGENT_HOME/);
     } finally {
-      if (priorRepo !== undefined) process.env.AGENTA_REPO_PATH = priorRepo;
-      if (priorBotspace !== undefined) process.env.BOTSPACE_DIR = priorBotspace;
+      if (priorRepo !== undefined) process.env.AGENT_HOME = priorRepo;
+      if (priorAgentHomeDir !== undefined) process.env.AGENT_HOME_DIR = priorAgentHomeDir;
     }
   });
 
   test('skill without frontmatter delimiters is skipped', async () => {
     writeBot('BOT');
     // No `---` opener.
-    const dir = join(botspace, 'skills', 'plain');
+    const dir = join(agentHome, 'skills', 'plain');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'SKILL.md'), 'just a body, no frontmatter');
     writeSkill('ok', 'name: ok\ndescription: o');
-    const out = await buildSystemPrompt(botspace, undefined);
+    const out = await buildSystemPrompt(agentHome, undefined);
     const start = out.indexOf('[');
     const end = out.lastIndexOf(']');
     const parsed = JSON.parse(out.slice(start, end + 1));

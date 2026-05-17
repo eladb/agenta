@@ -19,8 +19,8 @@ primary_region = "iad"
 
 [env]
   AGENTA_DATA_DIR = "/data/agenta"
-  AGENTA_REPO_PATH = "/data/botspace"
-  BOTSPACE_REPO = "eladb/agenta-test-home"
+  AGENT_HOME = "/data/agent-home"
+  AGENT_HOME_REPO = "eladb/agenta-test-home"
   SANDBOX_PROVIDER = "fly"
   # Note: FLY_APP_NAME would be overridden by Fly's auto-injection of the
   # current app's name. entrypoint.sh `export`s the right value (from

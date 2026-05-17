@@ -24,7 +24,7 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
 - **Model Gateway:** plain `fetch` against an OpenAI-compatible `chat/completions` endpoint. Wire format is OpenAI; auth is `Authorization: Bearer <api-key>`. No SDK.
 - **Tool Execution Layer:** system-defined tools registered in `src/model/tools/`, one file per tool. Each tool declares its OpenAI schema, a human-readable `describe`, and an `invoke`. Tools that need a sandbox set `requiresSandbox: true`.
 - **Sandbox Subsystem:** pluggable provider (`docker` or `fly`) (#6, #10) exposing a uniform HTTP client. Each per-thread sandbox runs an in-container Bun HTTP server with Bearer-auth'd endpoints and a per-thread persistent volume (#16).
-- **Botspace + Git Transport:** the system prompt is composed from a host-side git working tree (`AGENTA_REPO_PATH`) consisting of `README.md` + `skills/<slug>/SKILL.md` files (#13). The same working tree is exposed inside the sandbox over a per-session WebSocket tunnel that multiplexes loopback TCP to a bot-local `git http-backend` (#24). The model can `git clone`, commit, and push back over `http://localhost:6000/<repo>.git` inside the sandbox.
+- **Agent Home + Git Transport:** the system prompt is composed from a host-side git working tree (`AGENT_HOME`) consisting of `README.md` + `skills/<slug>/SKILL.md` files (#13). The same working tree is exposed inside the sandbox over a per-session WebSocket tunnel that multiplexes loopback TCP to a bot-local `git http-backend` (#24). The model can `git clone`, commit, and push back over `http://localhost:6000/<repo>.git` inside the sandbox.
 - **Persistence Layer (Files):** per-thread directory under `data/{thread_key}/` containing `messages.jsonl`, `attachments/`, and `session.json`.
 
 ## 4) Tenancy and Identity
@@ -47,7 +47,7 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
 - Mentions trigger agent turns; non-mentions do not trigger turns.
 - On the first mention of a thread the bot:
   - resolves the originating Slack user via `users.info` and persists `{ email, name }` into `session.json.git.creator` so subsequent sandbox git commits are authored as that user (#25);
-  - composes the system prompt from the configured botspace directory (`AGENTA_REPO_PATH` or `BOTSPACE_DIR`) and freezes it into `session.json.system_prompt` — every subsequent turn in that thread uses the same prompt (#13).
+  - composes the system prompt from the configured agent home directory (`AGENT_HOME` or `AGENT_HOME_DIR`) and freezes it into `session.json.system_prompt` — every subsequent turn in that thread uses the same prompt (#13).
 
 ### Runtime States (Normative)
 - Persisted `session.json.status` is exactly one of: `idle` | `running` | `stopping`.
@@ -70,7 +70,7 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
   - destroy the sandbox container/machine **and** its per-thread persistent volume,
   - remove the entire `data/{thread_key}/` directory (including `session.json` and `attachments/`),
   - next mention starts a fresh timeline/session state.
-- `/delete` does **not** delete `agenta/sessions/<thread_key>` on the host botspace repo — that branch is the model's work product.
+- `/delete` does **not** delete `agenta/sessions/<thread_key>` on the host agent home repo — that branch is the model's work product.
 - `/delete` applies even when no active run exists.
 - `/delete` is thread/session scoped only.
 
@@ -177,11 +177,11 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
 - On Slack message deletion, corresponding local attachment files are physically deleted; the JSONL audit trail (including the delete event) remains intact.
 
 ## 13) Workspace-Configurable vs System-Defined
-### Workspace-Configurable (Dynamic — via the host-side botspace repo)
-- System prompt (`README.md` at the root of `AGENTA_REPO_PATH`).
+### Workspace-Configurable (Dynamic — via the host-side agent home repo)
+- System prompt (`README.md` at the root of `AGENT_HOME`).
 - Skills (`skills/<slug>/SKILL.md` with YAML frontmatter for `name` + `description`).
 - Model settings via env (`MODEL_NAME`, `MODEL_BASE_URL`, `MODEL_API_KEY`).
-- Botspace edits affect **new** threads only: the system prompt is frozen per-thread on first mention (#13), so README.md or skill changes do not propagate to threads that are already running.
+- Agent home edits affect **new** threads only: the system prompt is frozen per-thread on first mention (#13), so README.md or skill changes do not propagate to threads that are already running.
 
 ### System-Defined (Code, Not Workspace Runtime Config)
 - Tool/provider implementations (`src/model/tools/`).
@@ -206,7 +206,7 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
 - Bot↔sandbox authentication is per-container Bearer token. mTLS is not used.
 
 ### Git Transport (Per-Session WebSocket Tunnel)
-- Each session gets a transport for the host botspace repo via a per-session WebSocket tunnel over the existing sandbox HTTP API (#24):
+- Each session gets a transport for the host agent home repo via a per-session WebSocket tunnel over the existing sandbox HTTP API (#24):
   - The sandbox `/tunnel` route binds `127.0.0.1:6000` inside the container; on each accepted TCP connection it allocates a u32 streamId and multiplexes bytes both ways using a 5-byte frame header (`streamId u32 BE | type u8`; type 0 = data, type 1 = close).
   - The bot side runs a per-session HTTP server on `127.0.0.1:0` that wraps `git http-backend` as a CGI subprocess. `core.hooksPath` is set via `GIT_CONFIG_*` env so the agenta `pre-receive` hook (ref-namespace restriction + fast-forward-only) runs without touching the configured repo's hook tree. `http.receivepack=true` is forced the same way so non-bare repos accept pushes.
   - On the first sandbox-touching tool of a turn, `ensureRepoBootstrap` starts the local git server, opens the WS tunnel (forwarding the **full** endpoint headers map from `getEndpoint`, including `fly-force-instance-id` on Fly), probes loopback inside the sandbox, clones `http://localhost:6000/<repo>.git` into `/home/sandbox`, configures the cached creator identity, and checks out `agenta/sessions/<thread_key>`.
@@ -249,8 +249,8 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
 - A single Slack message per turn shows progress in-place via reactions + content updates; reactions are cleared in a `finally` block on success, abort, or error.
 - Mid-turn mentions steer the running turn at the next iteration boundary instead of triggering a parallel turn.
 - The sandbox is per-thread via the configured provider (docker or fly), runs as a non-root user with capabilities dropped, and is reachable only via Bearer-authenticated HTTP.
-- The system prompt is composed from the host-side botspace repo on first mention and frozen for the thread's lifetime; subsequent botspace edits do not affect already-running threads.
-- The model can `git clone` the host botspace repo into `/home/sandbox` over the WS tunnel, commit, and push back to `agenta/sessions/<thread_key>` (fast-forward-only against the per-session ref).
+- The system prompt is composed from the host-side agent home repo on first mention and frozen for the thread's lifetime; subsequent agent home edits do not affect already-running threads.
+- The model can `git clone` the host agent home repo into `/home/sandbox` over the WS tunnel, commit, and push back to `agenta/sessions/<thread_key>` (fast-forward-only against the per-session ref).
 - Unhandled errors appear in thread as a separate message with stack trace and best-effort secret redaction.
 
 ## 18) Test Matrix (v1 Minimum)
@@ -268,7 +268,7 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
   - process crash during `running` or `stopping` results in an interrupted notice posted to Slack on next boot, with `session.json` cleared back to `idle`.
 - **Sandbox persistence**
   - bot restart re-adopts a live container/machine; a dead container/machine with a live volume spawns a fresh container reattached to the existing workspace.
-- **Botspace round-trip**
+- **Agent home round-trip**
   - the sandbox can `git clone` the host repo, create a commit on `agenta/sessions/<thread_key>`, and push back through the WS tunnel (gated on docker availability via `DOCKER_PROVIDER_ACTIVE`).
 - **Attachment lifecycle**
   - inbound attachments are MIME-detected from bytes, persisted on disk, mirrored into the sandbox at `attachments/<file_id>-<safeName>`, and emitted as multipart `user` content to the model; on Slack delete the local file is removed while the JSONL audit trail remains.

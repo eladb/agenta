@@ -288,7 +288,7 @@ export async function runTurn(
           await repaint();
         }
 
-        // Git-backed botspace bootstrap. Runs AFTER ensureContainer (it
+        // Git-backed agent home bootstrap. Runs AFTER ensureContainer (it
         // talks to the sandbox over the existing HTTP API) and BEFORE the
         // attachment sync (so the clone-into-empty-home dance plays out
         // before we copy stuff into ~). Idempotent: short-circuits when

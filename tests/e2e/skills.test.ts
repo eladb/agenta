@@ -25,8 +25,8 @@ let agent: Agent;
 let tester: Tester;
 let channel: string;
 const createdThreads: string[] = [];
-let botspaceDir: string;
-let originalBotspaceEnv: string | undefined;
+let agentHomeDir: string;
+let originalAgentHomeEnv: string | undefined;
 
 const calls: Message[][] = [];
 
@@ -47,13 +47,13 @@ const scriptedCallModel: CallModel = async (messages) => {
 };
 
 beforeAll(async () => {
-  // Build a fresh, isolated botspace dir so the test isn't affected by the
-  // repo's actual `sandbox/botspace/` contents. Point handler.ts at it via
-  // the BOTSPACE_DIR env var.
-  botspaceDir = mkdtempSync(join(tmpdir(), 'agenta-skills-'));
-  writeFileSync(join(botspaceDir, 'README.md'), 'INITIAL BOT BODY');
-  originalBotspaceEnv = process.env.BOTSPACE_DIR;
-  process.env.BOTSPACE_DIR = botspaceDir;
+  // Build a fresh, isolated agent home dir so the test isn't affected by the
+  // host's actual agent home contents. Point handler.ts at it via the
+  // AGENT_HOME_DIR env var.
+  agentHomeDir = mkdtempSync(join(tmpdir(), 'agenta-skills-'));
+  writeFileSync(join(agentHomeDir, 'README.md'), 'INITIAL BOT BODY');
+  originalAgentHomeEnv = process.env.AGENT_HOME_DIR;
+  process.env.AGENT_HOME_DIR = agentHomeDir;
 
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
@@ -66,9 +66,9 @@ afterAll(async () => {
   }
   await shutdown(agent, tester);
   cleanupTempDataDir();
-  if (originalBotspaceEnv === undefined) delete process.env.BOTSPACE_DIR;
-  else process.env.BOTSPACE_DIR = originalBotspaceEnv;
-  rmSync(botspaceDir, { recursive: true, force: true });
+  if (originalAgentHomeEnv === undefined) delete process.env.AGENT_HOME_DIR;
+  else process.env.AGENT_HOME_DIR = originalAgentHomeEnv;
+  rmSync(agentHomeDir, { recursive: true, force: true });
 });
 
 test('two mentions in one thread -> system message is byte-identical (frozen prompt)', async () => {
@@ -88,7 +88,7 @@ test('two mentions in one thread -> system message is byte-identical (frozen pro
 
   // Mutate README.md between the two mentions — the frozen prompt for this
   // thread must NOT pick up the change.
-  writeFileSync(join(botspaceDir, 'README.md'), 'MUTATED BOT BODY — should not appear');
+  writeFileSync(join(agentHomeDir, 'README.md'), 'MUTATED BOT BODY — should not appear');
 
   const secondMentionText = `second-turn-${Date.now()}`;
   await mention(tester, agent.botUserId, channel, threadTs, secondMentionText);
@@ -128,7 +128,7 @@ test('new thread after README.md edit -> system prompt reflects the new README.m
   calls.length = 0;
   // Drop the mutated body into README.md (the previous test's mutation persists
   // here intentionally; if it doesn't, re-write it).
-  writeFileSync(join(botspaceDir, 'README.md'), 'NEW BOT BODY for new thread');
+  writeFileSync(join(agentHomeDir, 'README.md'), 'NEW BOT BODY for new thread');
 
   const seed = `e2e-skills-new-${Date.now()}`;
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, seed);
@@ -184,16 +184,16 @@ test('/delete removes session.json (and the rest of the thread dir)', async () =
   );
 });
 
-test('a skill in BOTSPACE_DIR shows up in the system prompt for a new thread', async () => {
+test('a skill in AGENT_HOME_DIR shows up in the system prompt for a new thread', async () => {
   calls.length = 0;
 
-  // Drop a fresh skill into the host-side botspace BEFORE the next mention
-  // — the prompt builder reads from the BOTSPACE_DIR working tree
+  // Drop a fresh skill into the host-side agent home BEFORE the next mention
+  // — the prompt builder reads from the AGENT_HOME_DIR working tree
   // directly, so a new thread sees it. (Existing threads keep their frozen
   // prompt; see the "frozen prompt" test above.)
-  mkdirSync(join(botspaceDir, 'skills', 'demo-skill'), { recursive: true });
+  mkdirSync(join(agentHomeDir, 'skills', 'demo-skill'), { recursive: true });
   writeFileSync(
-    join(botspaceDir, 'skills', 'demo-skill', 'SKILL.md'),
+    join(agentHomeDir, 'skills', 'demo-skill', 'SKILL.md'),
     [
       '---',
       'name: demo-skill',

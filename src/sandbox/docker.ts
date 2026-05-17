@@ -248,7 +248,7 @@ async function ensureContainer(threadKey: string): Promise<void> {
   //   - same-provider, live container → adopt it.
   //   - same-provider, dead container, **live volume** → create a fresh
   //     container attached to the existing volume. The thread's state
-  //     (workspace files, caches, the botspace seed) survives.
+  //     (workspace files, caches, the agent home seed) survives.
   //   - cross-provider or fully-missing → clear and provision from scratch.
   const persisted = await loadSandbox(threadKey);
   if (persisted) {

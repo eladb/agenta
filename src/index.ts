@@ -44,7 +44,7 @@ const callModel = createCallModel({
 });
 
 // The system prompt is no longer constructed here — the handler composes it
-// per thread from `sandbox/botspace/` on the first mention (README.md + skills),
+// per thread from the agent home dir on the first mention (README.md + skills),
 // then freezes it in `data/{thread_key}/session.json`. `SYSTEM_PROMPT` env
 // var, if set, *prepends* to that composition; it no longer replaces it.
 

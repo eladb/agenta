@@ -38,7 +38,7 @@ export type SandboxRecord =
       private_ip?: string;
     };
 
-// Per-thread git-backed-botspace routing. `ref` is the
+// Per-thread git-backed agent home routing. `ref` is the
 // agenta/sessions/<thread_key> branch the pre-receive hook restricts pushes
 // to. The phase-22/23 `pubkey_fp` field is tolerated on read (sessions
 // written before the WS-tunnel transport landed may still carry it) but

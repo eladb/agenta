@@ -1,4 +1,4 @@
-// Per-session git-backed botspace bootstrap (WS-tunnel transport, phase 24).
+// Per-session git-backed agent home bootstrap (WS-tunnel transport, phase 24).
 //
 // Replaces the phase-22 per-session SSH keypairs + authorized_keys + Mac
 // sshd transport and the phase-23 Fly reverse-SSH tunnel.
@@ -62,9 +62,9 @@ async function sb(threadKey: string, cmd: string): Promise<string> {
 }
 
 export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
-  const repoPath = process.env.AGENTA_REPO_PATH;
+  const repoPath = process.env.AGENT_HOME;
   if (!repoPath || repoPath.length === 0) {
-    throw new Error('AGENTA_REPO_PATH must be set to a non-bare git repo');
+    throw new Error('AGENT_HOME must be set to a non-bare git repo');
   }
 
   const allowedRef = refFor(threadKey);
