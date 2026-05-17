@@ -92,7 +92,32 @@ export function setupTempDataDir(): string {
   // a different shape (https://, a real repo on disk) can install their
   // own via `withTempHomeConfig` before/after this in beforeAll, and the
   // last-installed config wins.
+  //
+  // The tmpdir must be an initialized non-bare git repo (with at least
+  // one commit on `main`) because tunneled-file transport serves it via
+  // `git-http-backend`, which 404s on a directory without `.git/`. See
+  // #93 — without this, every sandbox-touching e2e test fails with
+  // 'repository not found'.
   defaultHomeDir = mkdtempSync(join(tmpdir(), 'agenta-e2e-home-'));
+  writeFileSync(join(defaultHomeDir, 'README.md'), 'agenta e2e home\n');
+  const gitRun = (...args: string[]): void => {
+    const r = spawnSync('git', args, { cwd: defaultHomeDir, stdio: 'ignore' });
+    if (r.status !== 0) {
+      throw new Error(`git ${args.join(' ')} failed (status ${r.status}) in ${defaultHomeDir}`);
+    }
+  };
+  gitRun('init', '--initial-branch=main', '--quiet');
+  gitRun('add', '.');
+  gitRun(
+    '-c',
+    'user.email=e2e@agenta',
+    '-c',
+    'user.name=e2e',
+    'commit',
+    '-q',
+    '-m',
+    'initial',
+  );
   defaultHomeOverride = withTempHomeConfig(`file://${defaultHomeDir}`);
   return dataDir;
 }
