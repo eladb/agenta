@@ -119,7 +119,7 @@ sandbox/
 scripts/
   setup-slack-apps.ts      interactive creator via apps.manifest.create (needs config tokens)
   update-manifest.ts       push slack-manifests/<agent|tester>.json via apps.manifest.update (`SLACK_CONFIG_ACCESS_TOKEN=... bun scripts/update-manifest.ts <agent|tester>`). Reports `permissions_updated: true` when reinstall is needed.
-  deploy-sandbox-fly.ts    one-shot Fly provisioning + image push (`bun scripts/deploy-sandbox-fly.ts`)
+  deploy-sandbox-fly.sh    one-shot Fly provisioning + image push (`bash scripts/deploy-sandbox-fly.sh`)
   manual-test-image.ts     quick uploader for the agent: posts a PNG with a mention via the tester
   run-e2e.ts               `bun run e2e` wrapper. Creates a fresh `#agenta-e2e-<stamp>` channel, invites the agent, exports TEST_CHANNEL_ID for each spawned `bun test <file>` (sequentially, one process per file), archives the channel on exit (success/failure/signal).
   canary.ts                `bun run canary` smoke test against a live production agent. Three steps: chat reply → bash + cat → /delete cleanup. Logs `[OK]`/`[FAIL]` per step + non-zero exit on red. Useful after deploys.
@@ -204,7 +204,7 @@ Optional:
 - `BOTSPACE_DIR` — override the directory the prompt is composed from (precedence: `BOTSPACE_DIR` > `AGENTA_REPO_PATH`). E2E + unit tests use this to point at an isolated tmpdir so they don't need a real repo on disk.
 - `SANDBOX_PROVIDER` — `docker` (default) or `fly`. Picks where per-thread sandboxes live.
 - `SANDBOX_EGRESS` — `allow` (default) or `block`. Controls whether the in-container iptables OUTPUT block is installed. `block` matches the old behavior (loopback + RFC1918 + link-local only).
-- `FLY_APP_NAME` + `FLY_API_TOKEN` — required when `SANDBOX_PROVIDER=fly`. Provision the app once via `bun scripts/deploy-sandbox-fly.ts`, then generate a token: `flyctl tokens create deploy -a <app>`.
+- `FLY_APP_NAME` + `FLY_API_TOKEN` — required when `SANDBOX_PROVIDER=fly`. Provision the app once via `bash scripts/deploy-sandbox-fly.sh`, then generate a token: `flyctl tokens create deploy -a <app>`.
 - `FLY_REGION` — optional override for the region per-thread Fly volumes + machines provision into. Defaults to the app's `primary_region`. Set this if you want sandboxes in a specific region regardless of where the app's primary is.
 - `SANDBOX_EXEC_TIMEOUT_MS` — bash command wall-clock cap inside the sandbox. Default 60s. Tests set it lower.
 
