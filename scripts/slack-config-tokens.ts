@@ -18,6 +18,7 @@ import { join } from 'node:path';
 export type Cache = {
   agent?: { app_id: string; install_url: string };
   tester?: { app_id: string; install_url: string };
+  staging?: { app_id: string; install_url: string };
   config_access_token?: string;
   config_refresh_token?: string;
 };

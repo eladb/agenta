@@ -1,0 +1,83 @@
+name: CD
+
+# Gated deploy pipeline. Runs on push to main.
+#
+#   1. e2e   — full tests/e2e/ suite against the staging Slack app
+#              (STAGING_APP_TOKEN + STAGING_BOT_TOKEN). Runs in-process on
+#              the runner using SANDBOX_PROVIDER=docker. Production's
+#              Socket Mode is untouched.
+#   2. deploy — `bun run deploy` (scripts/deploy-bot-fly.ts) only if e2e
+#              is green. Rolls the agenta-bot Fly machine to the new
+#              image.
+#   3. canary — scripts/canary.ts against the just-deployed production
+#              bot using the tester credentials. Mentions the prod agent
+#              user via Slack and asserts chat reply + bash + /delete.
+#              Catches deploy-only regressions (env, image, fly volume)
+#              that staging e2e can't.
+#
+# A red step fails the workflow — prod never sees code that didn't pass
+# e2e, and the team is notified by the default GitHub Actions failure
+# email if canary regresses after a deploy. Manual rollback is
+# `flyctl releases rollback -a agenta-bot`.
+#
+# Concurrency: serialize runs without cancelling, so a quick burst of
+# pushes to main doesn't interleave deploys.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: cd
+  cancel-in-progress: false
+
+jobs:
+  cd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Pre-build the sandbox image so the first docker-gated test
+      # doesn't pay the multi-minute ensureImage() build cost.
+      - name: Pre-build sandbox image
+        run: docker build -t agenta-sandbox:latest sandbox/
+
+      # 1. Run e2e against the staging Slack app. The agent runs
+      # in-process on the runner; production's Socket Mode is untouched.
+      - name: E2E (staging)
+        env:
+          SLACK_APP_TOKEN: ${{ secrets.STAGING_APP_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.STAGING_BOT_TOKEN }}
+          TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
+          TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
+          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+          SANDBOX_PROVIDER: docker
+        run: bun run e2e
+
+      # 2. Deploy to production. Only reached on e2e green.
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to production
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: bun run deploy
+
+      # 3. Canary against the just-deployed prod bot. Uses the real
+      # agent's bot token (to resolve its user id) + the tester to drive
+      # the conversation.
+      - name: Canary (production)
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
+          TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
+          TEST_CHANNEL_ID: ${{ secrets.CANARY_CHANNEL_ID }}
+        run: bun run canary
