@@ -1,9 +1,9 @@
 name: Detect code changes
 description: >
-  Sets `outputs.code=true` if any path outside the
-  `.github/ci-skip-paths` allowlist changed in this PR / push. Used by
-  both `ci.yml` and `cd.yml` to skip work for doc-only changes while
-  still reporting a green check (so branch protection is satisfied).
+  Sets `outputs.code=true` if any path outside the `.ci-ignore`
+  allowlist (at repo root) changed in this PR / push. Used by both
+  `ci.yml` and `cd.yml` to skip work for doc-only changes while still
+  reporting a green check (so branch protection is satisfied).
 
 outputs:
   code:
@@ -22,7 +22,7 @@ runs:
       run: |
         set -euo pipefail
 
-        patterns_file="${GITHUB_WORKSPACE}/.github/ci-skip-paths"
+        patterns_file="${GITHUB_WORKSPACE}/.ci-ignore"
         if [ ! -f "$patterns_file" ]; then
           echo "No $patterns_file — treating all changes as code." >&2
           echo "code=true" >> "$GITHUB_OUTPUT"

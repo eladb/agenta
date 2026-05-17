@@ -7,7 +7,7 @@ name: CI
 #
 # Doc-only PRs skip the work but the job still completes green so branch
 # protection's required `unit-tests` check is satisfied. The allowlist
-# of skip-paths lives in `.github/ci-skip-paths`.
+# of skip-paths lives in `.ci-ignore` at the repo root.
 
 on:
   pull_request:
