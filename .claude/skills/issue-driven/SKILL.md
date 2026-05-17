@@ -77,8 +77,8 @@ Agent(
   2. Create branch `issue-<NN>-<short-slug>` off main.
   3. Implement. Match the codebase conventions in CLAUDE.md (functional TypeScript, no classes in src/, biome, tests co-located).
   4. Run `bun test src` before committing — must be green.
-  5. Commit with a message ending in `(#<NN>)` so GitHub auto-links. Do NOT include `Closes #<NN>` in commits (that goes on the PR).
-  6. Push the branch and open a PR with body containing `Closes #<NN>` so merging closes the issue.
+  5. Commit with a **Conventional Commits** subject ending in `(#<NN>)` so GitHub auto-links. Format: `<type>(<scope>): <subject> (#<NN>)`. Types: feat, fix, docs, chore, refactor, test, perf, build, ci, style, revert. Do NOT include `Closes #<NN>` in commits (that goes on the PR).
+  6. Push the branch and open a PR. The PR **title must also use Conventional Commits** (typically the same as the commit subject). PR body contains `Closes #<NN>` so merging closes the issue.
   7. Report the PR URL.
 
   Notes:
@@ -115,6 +115,7 @@ It rewrites `ISSUES.md` at the repo root. If anything actually changed, commit i
 
 ## Conventions
 
+- **Conventional Commits is mandatory** for both commit subjects AND PR titles. Format: `<type>(<scope>): <subject> (#<NN>)`. Allowed types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `perf`, `build`, `ci`, `style`, `revert`. Scope is optional (use it when there's a clear area: `sandbox`, `SPEC`, `CLAUDE.md`, `slack`).
 - **Issue numbers in commits**: always end the commit subject line with `(#<NN>)`. PR bodies should contain `Closes #<NN>` so the merge auto-closes.
 - **Labels are exclusive**: an issue gets exactly one of `phase` / `gotcha` / `proposed`. GitHub default labels (`bug`, `enhancement`, `documentation`) can be added on top as descriptors.
 - **One change request, one issue**. If a request grows new scope mid-flight, file a second issue for the new piece and reference it.
