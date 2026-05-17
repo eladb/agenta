@@ -51,7 +51,7 @@ Batch related proposals into a single question where possible — but if any are
 
 ### 6. Refresh the issues index
 
-Run `bun scripts/refresh-issues-index.ts` so `ISSUES.md` at the repo root reflects the current GitHub state. If the script changes the file, commit it as `docs(ISSUES): refresh index` (its own commit, not folded into the CLAUDE.md commit). This is non-optional — `ISSUES.md` is the offline recall surface for the `issue-driven` skill and drifts fast otherwise.
+Run `bash scripts/refresh-issues-index.sh` so `ISSUES.md` at the repo root reflects the current GitHub state. If the script changes the file, commit it as `docs(ISSUES): refresh index` (its own commit, not folded into the CLAUDE.md commit). This is non-optional — `ISSUES.md` is the offline recall surface for the `issue-driven` skill and drifts fast otherwise.
 
 ### 7. Optional: tag HEAD
 
