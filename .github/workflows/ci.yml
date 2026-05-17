@@ -3,7 +3,11 @@ name: CI
 # Pre-merge gate. Runs on every PR + on every push to main (so the badge
 # stays current even on direct pushes). Unit tests only — e2e tests need
 # real Slack tokens and would deadlock on Socket Mode contention; they
-# live in `e2e-prod.yml` and run post-merge.
+# live in `cd.yml` and run post-merge.
+#
+# Doc-only PRs skip the work but the job still completes green so branch
+# protection's required `unit-tests` check is satisfied. See the
+# "Detect code changes" step.
 
 on:
   pull_request:
@@ -17,16 +21,56 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need both sides of the PR diff to decide whether to skip.
+          # fetch-depth: 0 (full history) is overkill on small repos but
+          # cheap; depth 2 isn't enough because base != HEAD~1 on forks.
+          fetch-depth: 0
+
+      # Doc-only allowlist: if the only changed paths match `*.md`,
+      # `LICENSE`, `.gitignore`, or `.env.example`, skip the rest of the
+      # job. Slack manifests, package.json/bun.lock, workflows themselves,
+      # and Dockerfile are NOT in the allowlist — they affect runtime
+      # behavior.
+      - name: Detect code changes
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            # push to main — compare to the parent commit
+            base="${{ github.event.before }}"
+            head="${{ github.event.after }}"
+          fi
+          files=$(git diff --name-only "$base" "$head" || true)
+          echo "Changed files:"
+          echo "$files" | sed 's/^/  /'
+          if [ -z "$files" ]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          elif echo "$files" | grep -qvE '(^|/)[^/]*\.md$|^LICENSE$|^\.gitignore$|^\.env\.example$'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: oven-sh/setup-bun@v2
+        if: steps.changed.outputs.code == 'true'
         with:
           bun-version: latest
 
       - name: Install dependencies
+        if: steps.changed.outputs.code == 'true'
         run: bun install --frozen-lockfile
 
       - name: Build bot image (sanity check Dockerfile)
+        if: steps.changed.outputs.code == 'true'
         run: docker build -t agenta-bot:ci .
 
       - name: Unit tests
+        if: steps.changed.outputs.code == 'true'
         run: bun test src
+
+      - name: Doc-only — tests skipped
+        if: steps.changed.outputs.code == 'false'
+        run: echo "Only doc-allowlisted paths changed; skipping bun install + docker build + tests."
