@@ -74,9 +74,6 @@ Build a single-workspace Slack bot platform where each thread can host an isolat
 - `/delete` applies even when no active run exists.
 - `/delete` is thread/session scoped only.
 
-### Not yet implemented
-- Inactivity-based session expiration. There is no time-based timeout that mimics `/delete`.
-
 ## 6) Commands and Parsing
 ### Supported Commands
 - `/stop`
