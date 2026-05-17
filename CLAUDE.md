@@ -34,7 +34,7 @@ Phase history, open gotchas, and proposed work live on GitHub as issues.
 
 ### Production runtime notes
 
-- **Bot runs on Fly** as app `agenta-bot` (one shared-cpu-1x machine in `iad`, 1 GB volume `agenta_data` mounted at `/data`). Deploy via `bun scripts/deploy-bot-fly.ts` (locally) or by pushing to `main` — `.github/workflows/cd.yml` runs `bun run deploy` then the canary against the just-deployed machine. The e2e suite runs in parallel under `.github/workflows/e2e-prod.yml` against the dedicated `agenta-ci` Slack app, so neither workflow contends with the production Socket Mode connection. No `[http_service]` — Slack is Socket Mode (outbound WS), the model gateway + Fly Machines API are outbound HTTPS, so the bot has no inbound surface.
+- **Bot runs on Fly** as app `agenta-bot` (one shared-cpu-1x machine in `iad`, 1 GB volume `agenta_data` mounted at `/data`). Deploy via `bun scripts/deploy-bot-fly.ts` (locally) or by pushing to `main` — `.github/workflows/cd.yml` runs the e2e suite (against the dedicated `agenta-ci` Slack app so prod's Socket Mode is untouched), then `bun run deploy`, then `bun run canary` against the just-deployed machine, fail-stopping at each step. No `[http_service]` — Slack is Socket Mode (outbound WS), the model gateway + Fly Machines API are outbound HTTPS, so the bot has no inbound surface.
 - **Botspace lives on GitHub** at `eladb/agenta-test-home` (private). `entrypoint.sh` clones it into `/data/botspace` (= `AGENTA_REPO_PATH`) on first boot using `GITHUB_TOKEN`; on subsequent boots it `fetch + reset --hard origin/main` so README/skill edits made on GitHub reach the bot. `git-hooks/post-receive` auto-pushes every `agenta/sessions/<thread_key>` ref to `origin` after the WS-tunnel receive-pack completes — best-effort, failures log to stderr and don't block the receive.
 - **Health check**: the bot exposes `/health` on `HEALTH_PORT` (default 8080, set in `fly.toml`); `fly.toml`'s `[[checks]]` polls it every 30s. Returns 200 when Socket Mode is connected, 503 otherwise. Process-up + socket-up only — silent-deaf (#27) still isn't detected; that needs an event-recency heartbeat.
 - **Production bot user**: `U0B2WQUHK6Z` (agent app `A0B2WL8UYAZ`). The agent's manifest scopes after phase 25: `app_mentions:read`, `chat:write`, `channels:history`, `files:read`, `files:write`, `reactions:write`, `users:read`, `users:read.email`. Reinstall required after any scope change via `https://api.slack.com/apps/A0B2WL8UYAZ/install-on-team`.
@@ -181,7 +181,7 @@ tests/golden/
 
 - Agent app: **A0B2WL8UYAZ** (bot user `U0B2WQUHK6Z`, display name `agenta`) — production bot, runs on Fly.
 - Tester app: **A0B33L7CVRA** (bot user used by e2e tests, `agenta-tester`) — drives both the e2e suite and the post-deploy canary.
-- CI app: **A0B49GHNG22** (`agenta-ci`, per PR #66) — used by `.github/workflows/e2e-prod.yml` only, so prod's Socket Mode is untouched during CI.
+- CI app: **A0B49GHNG22** (`agenta-ci`, per PR #66) — used by the e2e step in `.github/workflows/cd.yml`, so prod's Socket Mode is untouched during CI.
 - Test channel: `C0B307LP274`
 - The canary step in `cd.yml` uses the existing test channel via the `CANARY_CHANNEL_ID` secret (production agent + tester both invited). e2e runs use a fresh `#agenta-e2e-<stamp>` channel created per run by `scripts/run-e2e.ts`.
 
@@ -217,12 +217,13 @@ For the setup script only (rotates every 12h):
 - `SLACK_CONFIG_ACCESS_TOKEN`, `SLACK_CONFIG_REFRESH_TOKEN`
 
 For CD (`.github/workflows/cd.yml`) — set as GitHub Actions repo secrets, not in `.env`:
+- `CI_SLACK_APP_TOKEN`, `CI_SLACK_BOT_TOKEN` — dedicated `agenta-ci` Slack app (e2e step)
+- `BOTSPACE_READ_TOKEN` — fine-grained PAT with read access to `eladb/agenta-test-home`; used to clone the botspace into `$RUNNER_TEMP` so the in-process agent's `buildSystemPrompt()` can resolve `AGENTA_REPO_PATH`
+- `TEST_APP_TOKEN`, `TEST_BOT_TOKEN` — tester credentials (same as local e2e)
+- `MODEL_API_KEY` — model gateway key for the in-process agent during e2e
 - `FLY_API_TOKEN` — deploy token (generate with `flyctl tokens create deploy -a agenta-bot`)
 - `SLACK_BOT_TOKEN` — production agent bot token (canary uses it only to resolve the prod agent's user id; no Socket Mode client connects to it)
-- `TEST_APP_TOKEN`, `TEST_BOT_TOKEN` — tester credentials (same as local e2e)
 - `CANARY_CHANNEL_ID` — channel both the production agent and the tester are invited to
-
-(`e2e-prod.yml`'s own secrets — `CI_SLACK_APP_TOKEN`, `CI_SLACK_BOT_TOKEN`, `BOTSPACE_READ_TOKEN`, `MODEL_API_KEY` — are documented in that workflow's header.)
 
 `.env` is gitignored. `.slack-apps.json` (app-id cache used by the setup script) is also gitignored.
 
