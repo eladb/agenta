@@ -1,0 +1,29 @@
+# Paths that DO NOT trigger CI / CD when they're the only thing changed
+# in a PR or push. Used by .github/actions/detect-code-changes/ — both
+# .github/workflows/ci.yml and .github/workflows/cd.yml read this file.
+#
+# Format: one egrep (POSIX extended regex) pattern per line, matched
+# against the full path from the repo root. Lines starting with `#` and
+# blank lines are ignored.
+#
+# Add a pattern here when you want changes to those paths to skip the
+# unit-tests + e2e + deploy + canary pipeline (they'll still record a
+# green check so branch protection is satisfied).
+#
+# Be CONSERVATIVE — anything that affects runtime behavior must NOT be
+# in this list:
+#   slack-manifests/*.json — scope changes affect the running bot
+#   .github/workflows/*.yml — workflow changes need verification
+#   package.json / bun.lock — dep changes
+#   Dockerfile / entrypoint.sh — image changes
+# Those will still fall through to the full pipeline by virtue of NOT
+# matching anything here.
+
+# Markdown anywhere (CLAUDE.md, SPEC.md, README.md, SETUP.md, skill
+# SKILL.md files, doc additions in any subdir).
+\.md$
+
+# Top-level non-code files.
+^LICENSE$
+^\.gitignore$
+^\.env\.example$

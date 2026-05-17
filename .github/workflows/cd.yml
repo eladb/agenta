@@ -23,6 +23,11 @@ name: CD
 # canary regresses after a deploy. Manual rollback is
 # `flyctl releases rollback -a agenta-bot`.
 #
+# Doc-only commits skip every active step (no point running e2e + deploy
+# + canary when only CLAUDE.md changed) but the workflow still completes
+# green so the timeline stays clean. The skip allowlist lives in
+# `.github/ci-skip-paths`.
+#
 # Concurrency: serialize runs AND preempt in-flight runs when a newer
 # commit lands. Reasons —
 # (a) only one agenta-ci Socket Mode client at a time, else two CI
@@ -47,24 +52,36 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          # detect-code-changes diffs push before..after; needs the full
+          # history. Also lets the composite action's action.yml load.
+          fetch-depth: 0
+
+      - name: Detect code changes
+        id: changed
+        uses: ./.github/actions/detect-code-changes
 
       - uses: oven-sh/setup-bun@v2
+        if: steps.changed.outputs.code == 'true'
         with:
           bun-version: latest
 
       - name: Install dependencies
+        if: steps.changed.outputs.code == 'true'
         run: bun install --frozen-lockfile
 
       # Pre-build the sandbox image so the first docker-gated test
       # doesn't pay the multi-minute ensureImage() build cost during
       # the test window.
       - name: Pre-build sandbox image
+        if: steps.changed.outputs.code == 'true'
         run: docker build -t agenta-sandbox:latest sandbox/
 
       # Clone the botspace for the in-process agent's buildSystemPrompt.
       # Locally this comes from the dev's .env (AGENTA_REPO_PATH=…/agenta-botspace);
       # CI needs an explicit clone.
       - name: Clone botspace
+        if: steps.changed.outputs.code == 'true'
         env:
           BOTSPACE_TOKEN: ${{ secrets.BOTSPACE_READ_TOKEN }}
         run: |
@@ -74,6 +91,7 @@ jobs:
           echo "AGENTA_REPO_PATH=${RUNNER_TEMP}/botspace" >> "$GITHUB_ENV"
 
       - name: E2E
+        if: steps.changed.outputs.code == 'true'
         env:
           # Dedicated CI Slack app — see header comment for why.
           SLACK_APP_TOKEN: ${{ secrets.CI_SLACK_APP_TOKEN }}
@@ -91,9 +109,11 @@ jobs:
         run: bun run e2e
 
       - name: Install flyctl
+        if: steps.changed.outputs.code == 'true'
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Deploy to production
+        if: steps.changed.outputs.code == 'true'
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: bun run deploy
@@ -102,9 +122,14 @@ jobs:
       # prod agent's user id (no Socket Mode client is connected to it).
       # The tester drives the conversation via TEST_APP_TOKEN/TEST_BOT_TOKEN.
       - name: Canary (production)
+        if: steps.changed.outputs.code == 'true'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
           TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
           TEST_CHANNEL_ID: ${{ secrets.CANARY_CHANNEL_ID }}
         run: bun run canary
+
+      - name: Doc-only — CD skipped
+        if: steps.changed.outputs.code == 'false'
+        run: echo "Only doc-allowlisted paths changed; skipping e2e + deploy + canary."

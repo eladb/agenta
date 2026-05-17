@@ -1,0 +1,83 @@
+name: Detect code changes
+description: >
+  Sets `outputs.code=true` if any path outside the
+  `.github/ci-skip-paths` allowlist changed in this PR / push. Used by
+  both `ci.yml` and `cd.yml` to skip work for doc-only changes while
+  still reporting a green check (so branch protection is satisfied).
+
+outputs:
+  code:
+    description: '`true` when at least one non-allowlisted path changed; `false` otherwise.'
+    value: ${{ steps.detect.outputs.code }}
+
+runs:
+  using: composite
+  steps:
+    # The calling workflow MUST `actions/checkout@v4 with fetch-depth: 0`
+    # before calling this composite — local composite actions can't load
+    # their own action.yml before the repo is checked out, and we need
+    # both sides of the diff resolvable.
+    - id: detect
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        patterns_file="${GITHUB_WORKSPACE}/.github/ci-skip-paths"
+        if [ ! -f "$patterns_file" ]; then
+          echo "No $patterns_file — treating all changes as code." >&2
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Build an OR'd alternation of the non-blank, non-comment lines.
+        skip_re=$(grep -vE '^([[:space:]]*#|[[:space:]]*$)' "$patterns_file" \
+          | tr '\n' '|' | sed 's/|$//')
+        if [ -z "$skip_re" ]; then
+          echo "$patterns_file is empty (or comments only) — treating all changes as code." >&2
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Resolve base/head depending on event type.
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+          base="$(jq -r '.pull_request.base.sha' < "$GITHUB_EVENT_PATH")"
+          head="$(jq -r '.pull_request.head.sha' < "$GITHUB_EVENT_PATH")"
+        elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+          base="$(jq -r '.before' < "$GITHUB_EVENT_PATH")"
+          head="$(jq -r '.after' < "$GITHUB_EVENT_PATH")"
+          # Initial pushes / force-pushes can leave base as the zero sha.
+          # Fall back to comparing against the parent commit.
+          if [ "$base" = "0000000000000000000000000000000000000000" ] || [ -z "$base" ]; then
+            base="$(git rev-parse "${head}^" 2>/dev/null || echo "")"
+          fi
+        else
+          echo "Unsupported event ${GITHUB_EVENT_NAME} — running tests to be safe." >&2
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ -z "$base" ] || [ -z "$head" ]; then
+          echo "Could not resolve base/head — running tests to be safe." >&2
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Comparing $base...$head"
+        files=$(git diff --name-only "$base" "$head" || true)
+        echo "Changed files:"
+        echo "${files:-(none)}" | sed 's/^/  /'
+
+        if [ -z "$files" ]; then
+          # No diff (e.g. empty merge commit) — nothing to test.
+          echo "code=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Any file that does NOT match the skip alternation is a "code"
+        # change. `grep -qvE` returns 0 (true) when at least one line
+        # doesn't match — we want exactly that.
+        if echo "$files" | grep -qvE "$skip_re"; then
+          echo "code=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "code=false" >> "$GITHUB_OUTPUT"
+        fi

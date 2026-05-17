@@ -6,8 +6,8 @@ name: CI
 # live in `cd.yml` and run post-merge.
 #
 # Doc-only PRs skip the work but the job still completes green so branch
-# protection's required `unit-tests` check is satisfied. See the
-# "Detect code changes" step.
+# protection's required `unit-tests` check is satisfied. The allowlist
+# of skip-paths lives in `.github/ci-skip-paths`.
 
 on:
   pull_request:
@@ -22,37 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Need both sides of the PR diff to decide whether to skip.
-          # fetch-depth: 0 (full history) is overkill on small repos but
-          # cheap; depth 2 isn't enough because base != HEAD~1 on forks.
+          # detect-code-changes diffs PR base..head; needs the full
+          # history. Also lets the composite action's action.yml load.
           fetch-depth: 0
 
-      # Doc-only allowlist: if the only changed paths match `*.md`,
-      # `LICENSE`, `.gitignore`, or `.env.example`, skip the rest of the
-      # job. Slack manifests, package.json/bun.lock, workflows themselves,
-      # and Dockerfile are NOT in the allowlist — they affect runtime
-      # behavior.
       - name: Detect code changes
         id: changed
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-            head="${{ github.event.pull_request.head.sha }}"
-          else
-            # push to main — compare to the parent commit
-            base="${{ github.event.before }}"
-            head="${{ github.event.after }}"
-          fi
-          files=$(git diff --name-only "$base" "$head" || true)
-          echo "Changed files:"
-          echo "$files" | sed 's/^/  /'
-          if [ -z "$files" ]; then
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          elif echo "$files" | grep -qvE '(^|/)[^/]*\.md$|^LICENSE$|^\.gitignore$|^\.env\.example$'; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
+        uses: ./.github/actions/detect-code-changes
 
       - uses: oven-sh/setup-bun@v2
         if: steps.changed.outputs.code == 'true'
