@@ -1,0 +1,54 @@
+name: E2E (production)
+
+# Post-merge regression suite. Runs the e2e tests with real Slack
+# credentials against the agenta workspace (same app the production
+# Fly bot is connected to), so it exercises actual Socket Mode + the
+# tester bot + real channel create/invite.
+#
+# IMPORTANT: Slack's Socket Mode load-balances events between every
+# client connected on the same app token. While this workflow is
+# running, ~half of the production bot's incoming events are routed
+# to the CI runner instead. Don't pile up concurrent runs.
+#
+# The concurrency block serializes runs in the same group without
+# cancelling — a second push during a run queues behind it.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: e2e-prod
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Pre-build the sandbox image so the first docker-gated test
+      # doesn't pay the multi-minute ensureImage() build cost during
+      # the test window.
+      - name: Pre-build sandbox image
+        run: docker build -t agenta-sandbox:latest sandbox/
+
+      - name: Run e2e
+        env:
+          SLACK_APP_TOKEN: ${{ secrets.SLACK_APP_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
+          TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
+          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+          # Docker-gated tests run here; Fly-gated tests skip cleanly
+          # because no FLY_API_TOKEN is set.
+          SANDBOX_PROVIDER: docker
+        run: bun run e2e
