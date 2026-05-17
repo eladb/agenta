@@ -14,8 +14,9 @@
 //   - `file:`  → tunneled, no mirror (the file:// path IS the working tree).
 //   - `https:` → tunneled, with a mirror clone at `<root>/<slug>` that
 //     `entrypoint.sh` refreshes on boot.
-//   - `git@` / `ssh:` → direct (NOT implemented; deferred to #88). Caught
-//     at validation time so a misconfigured ssh URL fails fast.
+//   - `git@` / `ssh:` → direct (#88). Sandbox clones + pushes straight to
+//     the SSH remote; the bot still keeps a host-side mirror at
+//     `<root>/<slug>` for prompt-source (README.md + skills/).
 //
 // Slugs are derived deterministically from the URL so two channels pointing
 // at the same remote share a mirror (and so the mirror path is stable across
@@ -88,6 +89,38 @@ function deriveSlug(url: URL): string {
   return raw.toLowerCase().replace(/^-+/, '');
 }
 
+// SSH-style scp-form URLs (`git@host:owner/repo.git`) and `ssh://` URLs
+// each need their own slug path: scp-form isn't an RFC-3986 URL, and
+// `ssh://git@host/path` parses with the user as part of host. Match the
+// `host + sanitized path` shape of `deriveSlug(URL)` so a future migration
+// from https → ssh on the same repo preserves the slug if anyone hand-
+// pins it.
+function deriveSshSlug(remote: string): string {
+  let host = '';
+  let path = '';
+  if (remote.startsWith('ssh://') || remote.startsWith('git+ssh://')) {
+    // node:url parses these — strip user info, then reuse host + pathname.
+    try {
+      const u = new URL(remote);
+      host = u.hostname; // user info stripped
+      path = u.pathname.replace(/^\//, '');
+    } catch {
+      // Fall through to the scp-form parser.
+    }
+  }
+  if (host === '') {
+    // scp form: <user>@<host>:<path>
+    const m = remote.match(/^[^@]+@([^:]+):(.+)$/);
+    if (m) {
+      host = m[1] ?? '';
+      path = m[2] ?? '';
+    }
+  }
+  const sanitized = path.replace(/[^a-zA-Z0-9-]/g, '-');
+  const raw = host ? `${host}-${sanitized}` : sanitized;
+  return raw.toLowerCase().replace(/^-+/, '');
+}
+
 function parseRemote(remote: string): URL {
   // node:url throws on unparseable input. We catch + rethrow with a clearer
   // message so config validation errors point at the offending entry.
@@ -116,7 +149,20 @@ function isSshStyle(remote: string): boolean {
 // the ResolvedHome.
 export function resolveTransport(home: HomeConfig): ResolvedHome {
   if (isSshStyle(home.remote)) {
-    throw new Error(`SSH transport requires #88; not implemented (remote: ${home.remote})`);
+    const slug = deriveSshSlug(home.remote);
+    if (slug.length === 0) {
+      throw new Error(`could not derive slug from ssh remote ${JSON.stringify(home.remote)}`);
+    }
+    const mirror = join(defaultMirrorRoot(), slug);
+    return {
+      ...home,
+      slug,
+      transport: 'direct',
+      // The bot still keeps a host-side clone for prompt-source (README.md
+      // + skills/). The sandbox uses the original SSH URL directly.
+      mirrorPath: mirror,
+      localPath: mirror,
+    };
   }
   const url = parseRemote(home.remote);
   const slug = deriveSlug(url);
@@ -153,15 +199,22 @@ export function resolveTransport(home: HomeConfig): ResolvedHome {
 // off the entry's name (`default` or a channel id). Auth rules:
 //   - file:// → auth_env MUST be absent.
 //   - https:// → auth_env REQUIRED, and process.env[auth_env] must be set.
-//   - ssh / git@ → rejected (deferred to #88).
+//   - ssh / git@ → auth_env REQUIRED (PEM-formatted private key), and
+//     process.env[auth_env] must be set. The PEM itself is read at use
+//     time, not here, so config-reload survives a transient unset.
 function validateEntry(name: string, home: HomeConfig): void {
   if (typeof home.remote !== 'string' || home.remote.length === 0) {
     throw new Error(`[${name}] missing required string "remote"`);
   }
   if (isSshStyle(home.remote)) {
-    throw new Error(
-      `[${name}] SSH transport requires #88; not implemented (remote: ${home.remote})`,
-    );
+    if (typeof home.auth_env !== 'string' || home.auth_env.length === 0) {
+      throw new Error(`[${name}] auth_env required for ssh:// / git@ URLs`);
+    }
+    const v = process.env[home.auth_env];
+    if (!v || v.length === 0) {
+      throw new Error(`[${name}] auth_env ${home.auth_env} is not set (or empty) in process env`);
+    }
+    return;
   }
   const url = parseRemote(home.remote);
   if (url.protocol === 'file:') {

@@ -15,6 +15,7 @@
 // succeeds, before `syncAttachmentsToSandbox`. Idempotent: re-running on
 // the same thread is cheap when the sandbox already has `~/.git`.
 
+import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { log } from '../log';
 import { resolveTransport } from '../runtime/home-config';
@@ -25,9 +26,21 @@ import { flyProvider } from '../sandbox/fly';
 import { type GitServerHandle, startGitServer } from './git-server';
 import { startTunnel, stopTunnel, type TunnelHandle } from './ws-tunnel';
 
-// pre-receive hook lives at <repo_root>/git-hooks/pre-receive.
+// pre-receive hook lives at <repo_root>/git-hooks/pre-receive. The same
+// directory holds known_hosts (#88) — the pinned host-key bundle the
+// sandbox installs into ~/.ssh on direct-mode bootstrap.
 const AGENTA_ROOT = join(import.meta.dir, '..', '..');
 const HOOKS_DIR = join(AGENTA_ROOT, 'git-hooks');
+const KNOWN_HOSTS_PATH = join(HOOKS_DIR, 'known_hosts');
+
+// Read the pinned known_hosts bundle once at module load — bundling it
+// at start time matches the spec ("read at process start, embedded into
+// the bootstrap step"). Fail-fast: the file is committed, so a missing
+// one is a packaging bug, not a runtime error to swallow.
+function loadKnownHosts(): string {
+  return readFileSync(KNOWN_HOSTS_PATH, 'utf8');
+}
+const KNOWN_HOSTS = loadKnownHosts();
 
 // Loopback port the sandbox-side TCP listener binds inside the container.
 // Must match `TUNNEL_TCP_PORT` in sandbox/server/server.ts.
@@ -72,10 +85,10 @@ export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
   }
   const resolved = resolveTransport(session.home);
   if (resolved.transport === 'direct') {
-    // Defense-in-depth: validation in home-config already rejects ssh
-    // URLs, but if a future path lets a `direct` snapshot land in
-    // session.json we want a clear pointer here too.
-    throw new Error(`[${threadKey}] direct transport (ssh://) not implemented; depends on #88`);
+    // Direct SSH transport (#88): sandbox clones + pushes straight to
+    // the remote over SSH. No bot-side git server, no WS tunnel.
+    await bootstrapDirect(threadKey, session.home.remote, session.home.auth_env);
+    return;
   }
   const repoPath = resolved.localPath;
 
@@ -153,6 +166,138 @@ async function waitForSandboxPort(threadKey: string): Promise<void> {
   throw new Error(
     `WS tunnel for ${threadKey} not reachable inside sandbox on localhost:${SANDBOX_TUNNEL_PORT} within 5s`,
   );
+}
+
+// Direct SSH transport (#88): no bot-side git server / WS tunnel; the
+// sandbox clones from the remote and pushes straight back over SSH.
+//
+// Side effects inside the sandbox:
+//   - writes ~/.ssh/id_ed25519 (mode 0600) from process.env[authEnv]
+//   - writes ~/.ssh/known_hosts from the bundled KNOWN_HOSTS
+//   - clones <sshUrl> into /tmp/agenta-clone, transplants .git + cp -an
+//     into ~/, removes the temp dir
+//   - checks out agenta/sessions/<thread_key>
+//   - sets user.name / user.email from session.git.creator (with the
+//     same fallback as the tunneled path).
+//
+// The PEM is resolved from env at every call — NEVER persisted into
+// session.json. The auth_env name is the only thing the session carries.
+async function bootstrapDirect(
+  threadKey: string,
+  sshUrl: string,
+  authEnv: string | undefined,
+): Promise<void> {
+  if (!authEnv || authEnv.length === 0) {
+    throw new Error(
+      `[${threadKey}] direct SSH transport requires auth_env to be set in session.home`,
+    );
+  }
+  const allowedRef = refFor(threadKey);
+  const session = await readSession(threadKey);
+
+  // Persist the session ref + creator (same shape as the tunneled path).
+  // We don't track a bot-side handle for direct mode — there's nothing
+  // running on the bot to tear down.
+  await setGit(threadKey, { ref: allowedRef, creator: session?.git?.creator });
+
+  // Fast path: if ~/.git is already in place and pointed at our ref, the
+  // setup commands below are all no-ops, but skipping the round-trips is
+  // worth it. We still want user.* to be set in case the sandbox volume
+  // was wiped between turns.
+  const probe = await runBash(threadKey, 'test -d ~/.git');
+  if (probe.exitCode === 0) {
+    log.info('git', `[${threadKey}] direct: ~/.git present; ensuring branch + identity`);
+    await ensureBranchAndIdentity(threadKey, session?.git?.creator);
+    return;
+  }
+
+  // PEM lookup at USE time — not at module load, not at session-write
+  // time. The auth_env name is the contract; the PEM bytes live entirely
+  // in process env.
+  const pem = process.env[authEnv];
+  if (!pem || pem.length === 0) {
+    throw new Error(
+      `[${threadKey}] direct SSH transport: env var ${authEnv} is unset or empty (deploy key missing)`,
+    );
+  }
+
+  // Write the keypair + known_hosts via the sandbox /write endpoint so we
+  // don't have to inline the PEM into a bash command (cleaner + avoids
+  // pem-newline escape issues).
+  await ensureSshDir(threadKey);
+  await writeSandboxFile(threadKey, '/home/sandbox/.ssh/id_ed25519', pem, 0o600);
+  await writeSandboxFile(threadKey, '/home/sandbox/.ssh/known_hosts', KNOWN_HOSTS, 0o644);
+
+  // Same clone dance as the tunneled path, just with the SSH URL. We use
+  // `git clone -c …` to point at the per-session known_hosts + key right
+  // from the initial clone; `origin` then stays as the SSH URL.
+  const sshOpts = `-o IdentitiesOnly=yes -o UserKnownHostsFile=/home/sandbox/.ssh/known_hosts -o StrictHostKeyChecking=yes`;
+  const gitSshCmd = `ssh -i /home/sandbox/.ssh/id_ed25519 ${sshOpts}`;
+  const cloneCmd = [
+    `[ -d ~/.git ] || (`,
+    `cd /tmp &&`,
+    `rm -rf agenta-clone &&`,
+    `GIT_SSH_COMMAND=${shellQuote(gitSshCmd)}`,
+    `git clone --depth 1 ${shellQuote(sshUrl)} agenta-clone &&`,
+    `mv agenta-clone/.git ~/ &&`,
+    `cp -an agenta-clone/. ~/ &&`,
+    `rm -rf agenta-clone`,
+    `)`,
+  ].join(' ');
+  await sb(threadKey, cloneCmd);
+
+  // Stamp the SSH command on the cloned repo so subsequent fetch/push
+  // calls from inside the sandbox use the same key + host pin without
+  // needing GIT_SSH_COMMAND in the model's bash env.
+  await sb(threadKey, `git -C ~ config core.sshCommand ${shellQuote(gitSshCmd)}`);
+  // Origin URL is already set by `git clone`; reassert it so a re-bootstrap
+  // onto a remote URL change is honored.
+  await sb(threadKey, `git -C ~ remote set-url origin ${shellQuote(sshUrl)}`);
+
+  await ensureBranchAndIdentity(threadKey, session?.git?.creator);
+}
+
+// Create ~/.ssh with mode 0700 if it isn't already there. `useradd
+// --create-home` doesn't create .ssh, and ssh-keygen / git refuse to use
+// a 0755 .ssh dir.
+async function ensureSshDir(threadKey: string): Promise<void> {
+  await sb(threadKey, 'mkdir -p ~/.ssh && chmod 700 ~/.ssh');
+}
+
+// Drop a file into the sandbox via the bytes-aware /write endpoint. We
+// don't import writeFile from ../sandbox to keep this file's surface
+// narrow; the inline bash heredoc works for utf-8 payloads (PEMs +
+// known_hosts are both 7-bit ASCII).
+async function writeSandboxFile(
+  threadKey: string,
+  path: string,
+  content: string,
+  mode: number,
+): Promise<void> {
+  // Use printf %s + a heredoc — handles arbitrary content (including
+  // trailing newlines) without trying to inline-escape the PEM bytes.
+  const modeOct = mode.toString(8);
+  const cmd = `cat > ${shellQuote(path)} <<'__AGENTA_EOF__' && chmod ${modeOct} ${shellQuote(path)}
+${content}
+__AGENTA_EOF__`;
+  await sb(threadKey, cmd);
+}
+
+// Idempotent branch + identity step shared by direct + the tunneled path.
+async function ensureBranchAndIdentity(
+  threadKey: string,
+  creator: { email: string; name: string } | undefined,
+): Promise<void> {
+  const allowedRef = refFor(threadKey);
+  const branchName = `agenta/sessions/${threadKey}`;
+  const authorName = creator?.name ?? 'agenta';
+  const authorEmail = creator?.email ?? 'agenta@localhost';
+  await sb(threadKey, `git -C ~ config user.email ${shellQuote(authorEmail)}`);
+  await sb(threadKey, `git -C ~ config user.name ${shellQuote(authorName)}`);
+  const head = await runBash(threadKey, 'git -C ~ symbolic-ref --quiet HEAD');
+  if (head.stdout.trim() !== allowedRef) {
+    await sb(threadKey, `git -C ~ checkout -B ${shellQuote(branchName)}`);
+  }
 }
 
 async function cloneAndCheckout(threadKey: string, repoPath: string): Promise<void> {
