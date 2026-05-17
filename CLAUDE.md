@@ -25,12 +25,12 @@ Implementation of `SPEC.md` (v1) in this repo — a Slack thread-backed agentic 
 
 ## Implementation state (current)
 
-Phase history, open gotchas, and proposed work live on GitHub as issues.
-`ISSUES.md` is the offline index. Quick lookup:
+Phase history, open gotchas, and proposed work live on GitHub as issues. Query directly — there is no local index:
 
 - `gh issue list -R eladb/agenta --label phase --state closed` — what shipped
 - `gh issue list -R eladb/agenta --label gotcha` — open footguns to know
 - `gh issue list -R eladb/agenta --label proposed` — backlog
+- `gh issue view <NN> -R eladb/agenta` — read a specific issue's body
 
 ### Production runtime notes
 
@@ -47,7 +47,7 @@ When you start a new session on this repo:
 1. Read this file in full (you're doing that now).
 2. Skim recent commits: `git log -25 --oneline` to see what's actually merged vs. what this doc claims.
 3. Check `ps aux | grep "bun src/index"` — production agent may already be running on the user's Mac (pid varies). Don't restart unless needed; the `agent` lockfile will block a second instance with a clear error if you try.
-4. Glance at ISSUES.md (or 'gh issue list -R eladb/agenta --label gotcha') — Socket Mode silent disconnect (#27), Fly DNS hostility (#29), and SIGTERM unreliability (#35) are the most likely to come up.
+4. Glance at `gh issue list -R eladb/agenta --label gotcha` — Socket Mode silent disconnect (#27), Fly DNS hostility (#29), and SIGTERM unreliability (#35) are the most likely to come up.
 5. If the user asks "what's next?", check 'gh issue list -R eladb/agenta --label proposed'. Top of mind today: #39 edits/deletes into context, #40 context-window trimming, #41 Socket Mode watchdog, #43 host-side egress block on docker, #44 persisted dedupe + queue.
 
 ## Repo layout
