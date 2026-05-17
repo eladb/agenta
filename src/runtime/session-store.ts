@@ -3,6 +3,7 @@ import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from '../log';
 import { dataRoot, ensureThreadDir, threadDir } from '../persistence/store';
+import type { HomeConfig } from './home-config';
 
 // Provider-tagged routing info for a thread's sandbox. Persisted into
 // session.json so per-thread sandboxes survive a bot restart: on the next
@@ -60,12 +61,18 @@ export type GitRecord = {
 // Per-thread runtime state. The file now persists even when the thread is
 // idle — it carries the frozen `system_prompt` across turns so each thread's
 // prompt is stable for its lifetime. Recovery filters on status !== 'idle'.
+//
+// `home` is a snapshot of the per-channel home config (#87) frozen on first
+// mention. Stored as the raw HomeConfig (remote + auth_env); slug, transport,
+// and paths derive on read via `resolveTransport` so future config edits
+// only affect new threads.
 export type SessionState = {
   status: 'idle' | 'running' | 'stopping';
   updated_at: string;
   system_prompt?: string;
   sandbox?: SandboxRecord;
   git?: GitRecord;
+  home?: HomeConfig;
 };
 
 const RUNTIME_FILENAME = 'session.json';
@@ -118,6 +125,7 @@ export async function clearSession(threadKey: string): Promise<void> {
     ...(existing?.system_prompt !== undefined ? { system_prompt: existing.system_prompt } : {}),
     ...(existing?.sandbox !== undefined ? { sandbox: existing.sandbox } : {}),
     ...(existing?.git !== undefined ? { git: existing.git } : {}),
+    ...(existing?.home !== undefined ? { home: existing.home } : {}),
   });
 }
 
@@ -174,6 +182,30 @@ export async function setGit(threadKey: string, git: GitRecord | undefined): Pro
     ...(git !== undefined ? { git } : {}),
   };
   if (git === undefined) delete next.git;
+  await writeSession(threadKey, next);
+}
+
+// Atomic read-modify-write of the `home` record (#87). Called once on
+// first mention by `handler.ts`. The frozen snapshot is the HomeConfig
+// only (remote + auth_env) — slug, transport, and paths recompute on
+// read via `resolveTransport`. `undefined` clears the field.
+export async function setHome(threadKey: string, home: HomeConfig | undefined): Promise<void> {
+  const existing = await readSession(threadKey);
+  if (!existing) {
+    if (home === undefined) return;
+    await writeSession(threadKey, {
+      status: 'idle',
+      updated_at: new Date().toISOString(),
+      home,
+    });
+    return;
+  }
+  const next: SessionState = {
+    ...existing,
+    updated_at: new Date().toISOString(),
+    ...(home !== undefined ? { home } : {}),
+  };
+  if (home === undefined) delete next.home;
   await writeSession(threadKey, next);
 }
 

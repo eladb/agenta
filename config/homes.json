@@ -1,0 +1,7 @@
+{
+  "default": {
+    "remote": "https://github.com/eladb/agenta-test-home",
+    "auth_env": "GITHUB_TOKEN"
+  },
+  "channels": {}
+}

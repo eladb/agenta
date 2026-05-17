@@ -17,6 +17,7 @@
 
 import { basename, join } from 'node:path';
 import { log } from '../log';
+import { resolveTransport } from '../runtime/home-config';
 import { readSession, setGit } from '../runtime/session-store';
 import { runBash } from '../sandbox';
 import { dockerProvider } from '../sandbox/docker';
@@ -62,13 +63,21 @@ async function sb(threadKey: string, cmd: string): Promise<string> {
 }
 
 export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
-  const repoPath = process.env.AGENT_HOME;
-  if (!repoPath || repoPath.length === 0) {
-    throw new Error('AGENT_HOME must be set to a non-bare git repo');
-  }
-
   const allowedRef = refFor(threadKey);
   const session = await readSession(threadKey);
+  if (!session?.home) {
+    throw new Error(
+      `[${threadKey}] session.home is unset — handler should freeze it on first mention (#87)`,
+    );
+  }
+  const resolved = resolveTransport(session.home);
+  if (resolved.transport === 'direct') {
+    // Defense-in-depth: validation in home-config already rejects ssh
+    // URLs, but if a future path lets a `direct` snapshot land in
+    // session.json we want a clear pointer here too.
+    throw new Error(`[${threadKey}] direct transport (ssh://) not implemented; depends on #88`);
+  }
+  const repoPath = resolved.localPath;
 
   // Fast path: tunnel + git server already up for this thread, and the
   // sandbox already has a clone. Probe ~/.git to confirm — the sandbox

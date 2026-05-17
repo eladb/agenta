@@ -77,19 +77,10 @@ jobs:
         if: steps.changed.outputs.code == 'true'
         run: docker build -t agenta-sandbox:latest sandbox/
 
-      # Clone the agent home for the in-process agent's buildSystemPrompt.
-      # Locally this comes from the dev's .env (AGENT_HOME=…/agenta-test-home);
-      # CI needs an explicit clone.
-      - name: Clone agent home
-        if: steps.changed.outputs.code == 'true'
-        env:
-          # GH Actions secret name still BOTSPACE_READ_TOKEN; rename deferred (PAT values aren't readable, would need a new token issued via UI).
-          AGENT_HOME_TOKEN: ${{ secrets.BOTSPACE_READ_TOKEN }}
-        run: |
-          git clone --depth 1 \
-            "https://x-access-token:${AGENT_HOME_TOKEN}@github.com/eladb/agenta-test-home.git" \
-            "${RUNNER_TEMP}/agent-home"
-          echo "AGENT_HOME=${RUNNER_TEMP}/agent-home" >> "$GITHUB_ENV"
+      # The in-process e2e agent gets its home config via
+      # `tests/e2e/helpers.ts:setupTempDataDir`, which installs a
+      # `withTempHomeConfig(file://<tmpdir>)` per test — no env-var clone
+      # needed any more (#87 dropped the AGENT_HOME single-repo env).
 
       - name: E2E
         if: steps.changed.outputs.code == 'true'

@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readSession } from '../runtime/session-store';
+import { readSession, setHome } from '../runtime/session-store';
 import { _resetImageReadyCache, dockerProvider } from '../sandbox/docker';
 import { _resetFlyState, flyProvider } from '../sandbox/fly';
 import { _resetForTests, ensureRepoBootstrap, teardownAllSessions } from './bootstrap';
@@ -146,7 +146,6 @@ afterEach(async () => {
   await stopAllTunnels();
   globalThis.fetch = ORIG_FETCH;
   delete process.env.AGENTA_DATA_DIR;
-  delete process.env.AGENT_HOME;
   delete process.env.SANDBOX_PROVIDER;
   await sandbox.stop();
   rmSync(dataDir, { recursive: true, force: true });
@@ -158,16 +157,15 @@ afterEach(async () => {
 });
 
 describe('ensureRepoBootstrap', () => {
-  test('throws when AGENT_HOME is unset', async () => {
-    delete process.env.AGENT_HOME;
-    await expect(ensureRepoBootstrap('tk-x')).rejects.toThrow(/AGENT_HOME/);
+  test('throws when session.home is unset (handler should have frozen it)', async () => {
+    await expect(ensureRepoBootstrap('tk-x')).rejects.toThrow(/session\.home is unset/);
   });
 
   test.skipIf(!hasGit)(
     'first-run path: starts tunnel, probes loopback:6000, exec sequence for clone + checkout',
     async () => {
-      process.env.AGENT_HOME = repoPath;
       const tk = 'tk-first';
+      await setHome(tk, { remote: `file://${repoPath}` });
 
       // /exec sequence inside bootstrap (no pre-existing handle, no fast-path):
       //   1. waitForSandboxPort probe (`/dev/tcp/localhost/6000`) → exit 0
@@ -212,8 +210,8 @@ describe('ensureRepoBootstrap', () => {
   test.skipIf(!hasGit)(
     'second call short-circuits to a single `~/.git` probe when handle + ref match',
     async () => {
-      process.env.AGENT_HOME = repoPath;
       const tk = 'tk-second';
+      await setHome(tk, { remote: `file://${repoPath}` });
 
       // First call: same shape as the first-run test.
       sandbox.execQueue.push(

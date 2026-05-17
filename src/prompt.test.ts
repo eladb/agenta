@@ -109,20 +109,6 @@ describe('buildSystemPrompt', () => {
     expect(out).toBe('BOT only');
   });
 
-  test('throws when AGENT_HOME and AGENT_HOME_DIR are both unset (no default location any more)', async () => {
-    const priorRepo = process.env.AGENT_HOME;
-    const priorAgentHomeDir = process.env.AGENT_HOME_DIR;
-    delete process.env.AGENT_HOME;
-    delete process.env.AGENT_HOME_DIR;
-    try {
-      // Call with no positional arg so the default-resolver runs.
-      await expect(buildSystemPrompt()).rejects.toThrow(/AGENT_HOME/);
-    } finally {
-      if (priorRepo !== undefined) process.env.AGENT_HOME = priorRepo;
-      if (priorAgentHomeDir !== undefined) process.env.AGENT_HOME_DIR = priorAgentHomeDir;
-    }
-  });
-
   test('skill without frontmatter delimiters is skipped', async () => {
     writeBot('BOT');
     // No `---` opener.

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
@@ -8,6 +8,7 @@ import { acquire, type Lock } from '../../src/lockfile';
 import { type CallModel, createCallModel, type Message } from '../../src/model/gateway';
 import { withGolden } from '../../src/model/golden';
 import { makeEventHandler } from '../../src/runtime/handler';
+import { _resetCacheForTests as _resetHomesCache } from '../../src/runtime/home-config';
 import { threadKey as makeThreadKey } from '../../src/runtime/thread';
 import { removeContainer } from '../../src/sandbox';
 import { connect } from '../../src/slack/connect';
@@ -79,10 +80,20 @@ export type Tester = {
 };
 
 let dataDir: string | undefined;
+let defaultHomeOverride: HomeConfigOverride | undefined;
+let defaultHomeDir: string | undefined;
 
 export function setupTempDataDir(): string {
   dataDir = mkdtempSync(join(tmpdir(), 'agenta-e2e-'));
   process.env.AGENTA_DATA_DIR = dataDir;
+  // Every e2e mention triggers handler.ts → resolveHome(channelId) →
+  // loadHomesConfig, so we need a valid config on disk. Default to a
+  // file:// URL pointing at a fresh tmp working tree — tests that need
+  // a different shape (https://, a real repo on disk) can install their
+  // own via `withTempHomeConfig` before/after this in beforeAll, and the
+  // last-installed config wins.
+  defaultHomeDir = mkdtempSync(join(tmpdir(), 'agenta-e2e-home-'));
+  defaultHomeOverride = withTempHomeConfig(`file://${defaultHomeDir}`);
   return dataDir;
 }
 
@@ -90,11 +101,54 @@ export function cleanupTempDataDir(): void {
   if (dataDir) rmSync(dataDir, { recursive: true, force: true });
   dataDir = undefined;
   delete process.env.AGENTA_DATA_DIR;
+  if (defaultHomeOverride) {
+    defaultHomeOverride.restore();
+    defaultHomeOverride = undefined;
+  }
+  if (defaultHomeDir) {
+    rmSync(defaultHomeDir, { recursive: true, force: true });
+    defaultHomeDir = undefined;
+  }
 }
 
 export function getDataDir(): string {
   if (!dataDir) throw new Error('data dir not set; call setupTempDataDir first');
   return dataDir;
+}
+
+// Per-test homes-config override (#87). Writes `{ default: { remote,
+// auth_env? }, channels: {} }` into a tmpdir, points
+// `AGENT_HOMES_CONFIG` at it, and clears the home-config cache so the
+// loader picks up the new file. Returns a `restore` thunk for afterAll.
+//
+// The agent's `resolveHome()` reads via `AGENT_HOMES_CONFIG`; the prompt
+// builder is invoked through handler.ts which still honors
+// `AGENT_HOME_DIR` as a one-shot override (so tests that just want to
+// pin the prompt dir without exercising the home-config path keep
+// working).
+export type HomeConfigOverride = {
+  configPath: string;
+  restore: () => void;
+};
+
+export function withTempHomeConfig(remote: string, authEnvName?: string): HomeConfigOverride {
+  const dir = mkdtempSync(join(tmpdir(), 'agenta-homes-cfg-'));
+  const configPath = join(dir, 'homes.json');
+  const entry: { remote: string; auth_env?: string } = { remote };
+  if (authEnvName) entry.auth_env = authEnvName;
+  writeFileSync(configPath, JSON.stringify({ default: entry, channels: {} }));
+  const priorCfg = process.env.AGENT_HOMES_CONFIG;
+  process.env.AGENT_HOMES_CONFIG = configPath;
+  _resetHomesCache();
+  return {
+    configPath,
+    restore: () => {
+      if (priorCfg === undefined) delete process.env.AGENT_HOMES_CONFIG;
+      else process.env.AGENT_HOMES_CONFIG = priorCfg;
+      _resetHomesCache();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
 }
 
 export async function startAgent(callModel: CallModel = stubCallModel): Promise<Agent> {
