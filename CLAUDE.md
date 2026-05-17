@@ -256,5 +256,7 @@ bun run deploy   # scripts/deploy-bot-fly.ts: provisions agenta-bot app + agenta
 - Repo: `git@github.com:eladb/agenta.git` (private, on account `eladb`).
 - Default branch: `main`. Commits use a `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer.
 - **Conventional Commits is mandatory** for BOTH commit subjects AND PR titles. Format: `<type>(<optional-scope>): <subject> (#NN)`. Allowed types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `perf`, `build`, `ci`, `style`, `revert`. Scope is the touched area (`sandbox`, `SPEC`, `CLAUDE.md`, `slack`, etc.). The `(#NN)` issue reference is required when there's an associated issue (i.e. always, under the issue-driven workflow). Examples: `feat(sandbox): background warmup + lazy UI (#11)`, `docs(SPEC): drop §5 dangling note (#56)`.
+- **Branch protection on `main`**: ruleset `main-protection` (id `16501910`) requires the `unit-tests` check to pass, blocks force-push, blocks deletion. No bypass actors — applies to admins too. View/edit: https://github.com/eladb/agenta/rules/16501910.
+- **Auto-merge is the default**. The `issue-driven` skill calls `gh pr merge <N> --auto --squash --delete-branch` right after `gh pr create`, so PRs land themselves the moment CI is green. The user can override by saying "let me review first" on a specific PR.
 - Never push without being asked.
 - Never amend / force-push.
