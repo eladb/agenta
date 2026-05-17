@@ -26,7 +26,7 @@ name: CD
 # Doc-only commits skip every active step (no point running e2e + deploy
 # + canary when only CLAUDE.md changed) but the workflow still completes
 # green so the timeline stays clean. The skip allowlist lives in
-# `.github/ci-skip-paths`.
+# `.ci-ignore` at the repo root.
 #
 # Concurrency: serialize runs AND preempt in-flight runs when a newer
 # commit lands. Reasons —
