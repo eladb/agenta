@@ -1,0 +1,41 @@
+# Fly app config for the agenta bot itself.
+#
+# Single long-lived machine in iad with one persistent volume mounted at
+# /data. The bot is Slack-Socket-Mode + outbound HTTPS only — there is no
+# [http_service] / [[services]] section because nothing inbound hits this
+# machine.
+#
+# The sandbox app (agenta-sandbox) is a SEPARATE Fly app and is configured
+# from sandbox/fly.toml; the bot creates per-thread machines there on
+# demand via the Machines API.
+#
+# Provision via:  bun scripts/deploy-bot-fly.ts
+
+app = "agenta-bot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  AGENTA_DATA_DIR = "/data/agenta"
+  AGENTA_REPO_PATH = "/data/botspace"
+  BOTSPACE_REPO = "eladb/agenta-botspace"
+  SANDBOX_PROVIDER = "fly"
+  FLY_APP_NAME = "agenta-sandbox"
+  FLY_REGION = "iad"
+
+[[mounts]]
+  source = "agenta_data"
+  destination = "/data"
+
+# Single machine — the bot uses src/lockfile.ts to enforce one instance, so
+# a second machine would refuse to start anyway. The deploy strategy is
+# "immediate" because we have no second machine to roll over into.
+[deploy]
+  strategy = "immediate"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"

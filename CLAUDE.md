@@ -34,7 +34,8 @@ Phase history, open gotchas, and proposed work live on GitHub as issues.
 
 ### Production runtime notes
 
-- **`AGENTA_REPO_PATH=/Users/bensadeh/agenta-botspace`** is the configured botspace repo on Elad's Mac. Restored from `git show 3d329de:sandbox/botspace/{README.md,skills/python-charts/SKILL.md}` after phase 22 deleted the baked tree. Local-only (no remote); one branch (`main`) plus whatever `agenta/sessions/*` refs the bot creates as threads push back.
+- **Bot runs on Fly** as app `agenta-bot` (one shared-cpu-1x machine in `iad`, 1 GB volume `agenta_data` mounted at `/data`). Deploy via `bun scripts/deploy-bot-fly.ts`. No `[http_service]` — Slack is Socket Mode (outbound WS), the model gateway + Fly Machines API are outbound HTTPS, so the bot has no inbound surface.
+- **Botspace lives on GitHub** at `eladb/agenta-botspace` (private). `entrypoint.sh` clones it into `/data/botspace` (= `AGENTA_REPO_PATH`) on first boot using `GITHUB_TOKEN`. `git-hooks/post-receive` then auto-pushes every `agenta/sessions/<thread_key>` ref to `origin` after the WS-tunnel receive-pack completes — best-effort, failures log to stderr and don't block the receive.
 - **Production bot user**: `U0B2WQUHK6Z` (agent app `A0B2WL8UYAZ`). The agent's manifest scopes after phase 25: `app_mentions:read`, `chat:write`, `channels:history`, `files:read`, `files:write`, `reactions:write`, `users:read`, `users:read.email`. Reinstall required after any scope change via `https://api.slack.com/apps/A0B2WL8UYAZ/install-on-team`.
 - **Slack config-tokens** (for `apps.manifest.update`): cached in `.slack-apps.json` (gitignored). `getConfigTokens()` reads env first (one-time bootstrap), persists to cache, then auto-rotates via `tooling.tokens.rotate`. To recover from a lost cache: regenerate at https://api.slack.com/authentication/config-tokens, export `SLACK_CONFIG_ACCESS_TOKEN` + `SLACK_CONFIG_REFRESH_TOKEN`, run any script once, the cache fills back in.
 
@@ -190,7 +191,9 @@ Runtime (required for `bun start`):
 - `SLACK_APP_TOKEN` (xapp-) — agent Socket Mode
 - `SLACK_BOT_TOKEN` (xoxb-) — agent bot
 - `MODEL_API_KEY` — the model gateway API key. Falls back to `ANTHROPIC_API_KEY` if unset. Same key works against Anthropic's OpenAI-compat endpoint, OpenRouter, or any OpenAI-compat host (set `MODEL_BASE_URL` accordingly).
-- `AGENTA_REPO_PATH` — absolute path to a non-bare git working tree on the bot host. It's both the source of the prompt (README.md + skills/) AND the remote the per-session sandbox clones from + pushes back to. Required for `bun start`; only optional in tests (set `BOTSPACE_DIR` instead to point the prompt builder at a tmpdir).
+- `AGENTA_REPO_PATH` — absolute path to a non-bare git working tree on the bot host. It's both the source of the prompt (README.md + skills/) AND the remote the per-session sandbox clones from + pushes back to. Required for `bun start`; only optional in tests (set `BOTSPACE_DIR` instead to point the prompt builder at a tmpdir). On Fly, `entrypoint.sh` clones from `BOTSPACE_REPO` into this path on first boot.
+- `BOTSPACE_REPO` — `owner/repo` of the GitHub repo `entrypoint.sh` clones into `AGENTA_REPO_PATH` on Fly. Set in `fly.toml`'s `[env]` (default `eladb/agenta-botspace`); ignored when the path already exists, so it's a no-op for local `bun start` against a checked-out repo.
+- `GITHUB_TOKEN` — fine-grained PAT with read+write to `BOTSPACE_REPO`. Used by `entrypoint.sh` to clone on first boot and embedded in the `origin` URL so the `post-receive` hook can auto-push session refs. Fly secret only; not needed for local `bun start`.
 
 E2E (required for `bun run e2e`):
 - All runtime vars (the test starts the agent in-process)
@@ -224,7 +227,9 @@ bun start        # production agent (acquires the 'agent' lockfile; second invoc
 bun run lint     # biome check
 bun run format   # biome format --write
 bun run setup    # interactive Slack app creation (apps.manifest.create)
+bun run deploy   # scripts/deploy-bot-fly.ts: provisions agenta-bot app + agenta_data volume in iad, builds + rolls the bot image
 # scripts/update-manifest.ts <agent|tester> — push a manifest change to Slack via apps.manifest.update (needs SLACK_CONFIG_ACCESS_TOKEN)
+# scripts/deploy-sandbox-fly.ts — builds + pushes the sandbox image to registry.fly.io/agenta-sandbox:latest (run when sandbox/ changes)
 ```
 
 ## Test design — important to understand
