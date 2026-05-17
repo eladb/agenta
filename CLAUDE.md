@@ -204,7 +204,7 @@ E2E (required for `bun run e2e`):
 Optional:
 - `AGENTA_DATA_DIR` — overrides `./data` (tests use a mkdtemp dir)
 - `MODEL_NAME` — defaults to `claude-sonnet-4-6`
-- `MODEL_BASE_URL` — defaults to `https://api.anthropic.com/v1`. For OpenRouter set `https://openrouter.ai/api/v1` and choose a tool-supporting model (e.g. `google/gemini-2.0-flash-exp:free`). Tool calling reliability varies wildly by model — many free models don't support `tool_calls` and the agent regresses to chat-only.
+- `MODEL_BASE_URL` — defaults to `https://api.anthropic.com/v1`. For OpenRouter set `https://openrouter.ai/api/v1` and choose a tool-supporting model (e.g. `google/gemini-2.0-flash-exp:free`). Tool calling reliability varies wildly by model — many free models don't support `tool_calls` and the agent regresses to chat-only. **On prod (Fly) all three of `MODEL_API_KEY` + `MODEL_BASE_URL` + `MODEL_NAME` are Fly secrets, not in `fly.toml`. If `MODEL_BASE_URL` is unset, the bot silently sends the configured key to `api.anthropic.com` → 401 `Invalid Anthropic API Key` on every call. When rotating, set all three together.**
 - `SYSTEM_PROMPT` — **prepended** to README.md (separated by a blank line). Used to **replace** the default const prompt entirely; the switch to a per-thread frozen prompt composed from `<AGENTA_REPO_PATH>/README.md` made replace-semantics meaningless, so it's now a prefix. Leave unset to use README.md verbatim.
 - `BOTSPACE_DIR` — override the directory the prompt is composed from (precedence: `BOTSPACE_DIR` > `AGENTA_REPO_PATH`). E2E + unit tests use this to point at an isolated tmpdir so they don't need a real repo on disk.
 - `SANDBOX_PROVIDER` — `docker` (default) or `fly`. Picks where per-thread sandboxes live.
