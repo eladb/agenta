@@ -13,12 +13,10 @@ outputs:
 runs:
   using: composite
   steps:
-    # Need both sides of the diff resolvable. fetch-depth: 0 is the
-    # simple choice on small repos; the GitHub-runner cost is trivial.
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
+    # The calling workflow MUST `actions/checkout@v4 with fetch-depth: 0`
+    # before calling this composite — local composite actions can't load
+    # their own action.yml before the repo is checked out, and we need
+    # both sides of the diff resolvable.
     - id: detect
       shell: bash
       run: |

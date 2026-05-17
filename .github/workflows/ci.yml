@@ -20,6 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+        with:
+          # detect-code-changes diffs PR base..head; needs the full
+          # history. Also lets the composite action's action.yml load.
+          fetch-depth: 0
+
       - name: Detect code changes
         id: changed
         uses: ./.github/actions/detect-code-changes
