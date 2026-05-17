@@ -29,20 +29,50 @@ function selectProvider(): SandboxProvider {
 const provider: SandboxProvider = selectProvider();
 log.info('sandbox', `provider: ${provider.name}`);
 
+// Per-thread in-flight ensure promise. The provider's own ensure() races
+// when called concurrently (its in-memory "ready" flag is only set at the
+// end of provisioning), so without this wrapper a background kickoff +
+// foreground tool-call ensure would both try to provision and the second
+// `docker run` / `POST /machines` would fail with a name conflict.
+// We hold the promise so concurrent callers await the same operation.
+const inFlightEnsure = new Map<string, Promise<void>>();
+
 // Lifecycle re-exports — names match the old module's exports so callers
 // (handler.ts, index.ts) don't change.
 export async function ensureContainer(threadKey: string): Promise<void> {
-  return provider.ensure(threadKey);
+  const existing = inFlightEnsure.get(threadKey);
+  if (existing) return existing;
+  const p = provider.ensure(threadKey).finally(() => {
+    // Clear regardless of outcome so a failed attempt doesn't pin the
+    // map entry; the next call retries from scratch.
+    if (inFlightEnsure.get(threadKey) === p) inFlightEnsure.delete(threadKey);
+  });
+  inFlightEnsure.set(threadKey, p);
+  return p;
+}
+// Fire-and-forget warmup: schedules ensureContainer in the background and
+// swallows errors (a real foreground tool call will hit the same
+// in-flight promise and observe the error there). Used by handler.ts to
+// begin provisioning at session start so first-tool latency is hidden.
+export function kickoffEnsureContainer(threadKey: string): void {
+  ensureContainer(threadKey).catch((err) => {
+    log.warn(
+      'sandbox',
+      `[${threadKey}] background ensureContainer failed: ${(err as Error).message}`,
+    );
+  });
 }
 export function isSandboxReady(threadKey: string): boolean {
   return provider.isReady(threadKey);
 }
 export async function removeContainer(threadKey: string): Promise<void> {
   syncedAttachments.delete(threadKey);
+  inFlightEnsure.delete(threadKey);
   return provider.remove(threadKey);
 }
 export async function killAllSandboxContainers(): Promise<void> {
   syncedAttachments.clear();
+  inFlightEnsure.clear();
   return provider.killAll();
 }
 

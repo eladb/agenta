@@ -25,7 +25,7 @@ const LIVE_EDIT_INTERVAL_MS = 800;
 // Visual conventions for an intermediate round message:
 //   - The model's reasoning text at the top, plain (no prefix).
 //   - Tool blocks below — a plain label line + a result line (`→ result`).
-//   - Status lines (provisioning workspace, attachments synced) shown as
+//   - Status lines (waiting for workspace, attachments synced) shown as
 //     plain italics so they read as informational, not equal weight to
 //     tool actions.
 // When the model emits no reasoning text, the header is omitted entirely —
@@ -254,14 +254,18 @@ export async function runTurn(
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
 
       for (const tc of toolCalls) {
-        // Lazy sandbox provisioning. Surfaced as an italicized status
-        // line before the tool that needs it so the chronology lines up.
+        // Sandbox readiness. Provisioning was kicked off in the background
+        // when the turn started (see handler.ts → kickoffEnsureContainer);
+        // here we just await whatever's in flight. If it's already done by
+        // the time we get here, ensureContainer is effectively a no-op and
+        // no status line is shown. Otherwise we surface a single
+        // "_waiting for workspace…_" line until it lands.
         const tool = TOOLS[tc.function.name];
         let provisionError: string | undefined;
         if (tool?.requiresSandbox && !isSandboxReady(input.threadKey)) {
           pushSeparator(liveLines);
           const provIdx = liveLines.length;
-          liveLines.push('_provisioning workspace…_');
+          liveLines.push('_waiting for workspace to become available…_');
           await repaint();
           try {
             await ensureContainer(input.threadKey);

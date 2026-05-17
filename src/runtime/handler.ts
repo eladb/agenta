@@ -7,7 +7,7 @@ import { backfillIfNew } from '../persistence/backfill';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { deleteThreadData } from '../persistence/store';
 import { buildSystemPrompt } from '../prompt';
-import { removeContainer } from '../sandbox';
+import { kickoffEnsureContainer, removeContainer } from '../sandbox';
 import type { DeleteMessage, EditMessage, IncomingEvent, NormalMessage } from '../slack/events';
 import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';
@@ -118,11 +118,18 @@ async function handleMessage(
   // there across turns; only `/delete` removes it.
   const prompt = await resolveSystemPrompt(web, tk, e.user);
 
-  // Sandbox provisioning is deferred — see turn.ts. The first tool that
-  // sets requiresSandbox triggers `ensureContainer` and surfaces a
-  // "🛠️ provisioning workspace…" line in the checklist. Mentions that
-  // never use a sandbox-touching tool (just chat, time, fetch_url, ask_user)
-  // pay nothing.
+  // Sandbox warmup: kick off provisioning in the background as soon as a
+  // turn is committed. The foreground tool loop in turn.ts awaits the same
+  // in-flight promise via ensureContainer() (the per-thread dedup lives in
+  // src/sandbox/index.ts), so if the sandbox is ready by the time a
+  // requiresSandbox tool fires, no UI line is shown. If it's still
+  // provisioning, the user sees a single "_waiting for workspace to become
+  // available…_" line until it lands. Idempotent + cheap when already up.
+  // Mentions that never exercise a sandbox-touching tool (pure chat, time,
+  // fetch_url, ask_user) still trigger the warmup — that's a deliberate
+  // trade: a small amount of wasted provisioning for zero first-tool latency
+  // on the common case.
+  kickoffEnsureContainer(tk);
 
   await startOrQueue(web, callModel, prompt, {
     channel: e.channel,

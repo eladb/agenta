@@ -28,9 +28,10 @@ export type Tool = {
   // on malformed input, and not throw.
   describe?: (args: unknown) => string;
   // True if this tool touches the per-thread sandbox (bash, fs, share_file,
-  // …). Used by the turn loop to lazy-provision the sandbox on first such
-  // tool call and surface a "🛠️ provisioning workspace…" line. Tools that
-  // never call into the sandbox (get_current_time, fetch_url, ask_user)
-  // leave this unset.
+  // …). Used by the turn loop to await the in-flight ensureContainer (kicked
+  // off in the background by handler.ts on turn start) and, if it's still
+  // running, surface a "_waiting for workspace…_" line. Tools that never
+  // call into the sandbox (get_current_time, fetch_url, ask_user) leave
+  // this unset.
   requiresSandbox?: boolean;
 };

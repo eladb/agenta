@@ -256,7 +256,7 @@ describe('runTurn with tools', () => {
     expect(trs[0]?.payload.content).toMatch(/unknown tool/);
   });
 
-  test('no "provisioning workspace…" line for tools that do not require the sandbox', async () => {
+  test('no "waiting for workspace…" line for tools that do not require the sandbox', async () => {
     const { web, edits } = makeWebStub();
     const callModel: CallModel = async () => ({
       role: 'assistant',
@@ -264,7 +264,8 @@ describe('runTurn with tools', () => {
     });
     await runTurn(web, callModel, 'sys', input);
     // The model returned a final reply with no tool_calls, so we never even
-    // reach the per-tool loop. Sanity check: no provisioning bullet anywhere.
+    // reach the per-tool loop. Sanity check: no workspace-status bullet anywhere.
+    expect(edits.some((e) => e.text.includes('waiting for workspace'))).toBe(false);
     expect(edits.some((e) => e.text.includes('provisioning workspace'))).toBe(false);
   });
 
@@ -292,6 +293,7 @@ describe('runTurn with tools', () => {
     await runTurn(web, callModel, 'sys', input);
     // get_current_time has no `requiresSandbox` flag, so the turn must not
     // surface a workspace status line at any point.
+    expect(edits.some((e) => e.text.includes('waiting for workspace'))).toBe(false);
     expect(edits.some((e) => e.text.includes('provisioning workspace'))).toBe(false);
     expect(edits.some((e) => e.text.includes('workspace ready'))).toBe(false);
   });
