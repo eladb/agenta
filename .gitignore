@@ -5,4 +5,5 @@ node_modules
 data/
 .DS_Store
 .slack-apps.json
-.claude/
+.claude/*
+!.claude/skills/
