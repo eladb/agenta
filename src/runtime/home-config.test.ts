@@ -101,20 +101,42 @@ describe('loadHomesConfig', () => {
     expect(() => loadHomesConfig()).toThrow(/auth_env must be absent for file/);
   });
 
-  test('rejects ssh-style remote with a pointer to #88', () => {
+  test('accepts ssh-style remote when auth_env is set', () => {
+    process.env.TEST_TOKEN_X = 'pem-bytes';
     writeConfig({
-      default: { remote: 'git@github.com:owner/repo.git', auth_env: 'GITHUB_TOKEN' },
+      default: { remote: 'git@github.com:owner/repo.git', auth_env: 'TEST_TOKEN_X' },
       channels: {},
     });
-    expect(() => loadHomesConfig()).toThrow(/#88/);
+    const f = loadHomesConfig();
+    expect(f.default.remote).toBe('git@github.com:owner/repo.git');
+    expect(f.default.auth_env).toBe('TEST_TOKEN_X');
   });
 
-  test('rejects ssh:// remote with a pointer to #88', () => {
+  test('accepts ssh:// remote when auth_env is set', () => {
+    process.env.TEST_TOKEN_X = 'pem-bytes';
     writeConfig({
-      default: { remote: 'ssh://git@github.com/owner/repo', auth_env: 'GITHUB_TOKEN' },
+      default: { remote: 'ssh://git@github.com/owner/repo', auth_env: 'TEST_TOKEN_X' },
       channels: {},
     });
-    expect(() => loadHomesConfig()).toThrow(/#88/);
+    const f = loadHomesConfig();
+    expect(f.default.remote).toBe('ssh://git@github.com/owner/repo');
+  });
+
+  test('rejects ssh-style remote when auth_env is missing', () => {
+    writeConfig({
+      default: { remote: 'git@github.com:owner/repo.git' },
+      channels: {},
+    });
+    expect(() => loadHomesConfig()).toThrow(/auth_env required for ssh/);
+  });
+
+  test('rejects ssh-style remote when auth_env points at unset env var', () => {
+    delete process.env.TEST_TOKEN_X;
+    writeConfig({
+      default: { remote: 'git@github.com:owner/repo.git', auth_env: 'TEST_TOKEN_X' },
+      channels: {},
+    });
+    expect(() => loadHomesConfig()).toThrow(/TEST_TOKEN_X is not set/);
   });
 
   test('rejects unsupported URL scheme', () => {
@@ -130,10 +152,10 @@ describe('loadHomesConfig', () => {
     writeConfig({
       default: { remote: 'https://github.com/o/r', auth_env: 'TEST_TOKEN_X' },
       channels: {
-        C123: { remote: 'git@github.com:bad/ssh.git', auth_env: 'TEST_TOKEN_X' },
+        C123: { remote: 'ftp://nope', auth_env: 'TEST_TOKEN_X' },
       },
     });
-    expect(() => loadHomesConfig()).toThrow(/\[C123\].*#88/);
+    expect(() => loadHomesConfig()).toThrow(/\[C123\].*unsupported URL scheme/);
   });
 });
 
@@ -202,8 +224,26 @@ describe('resolveTransport', () => {
     expect(r.slug).toBe('github.com-eladb-agenta-test-home');
   });
 
-  test('ssh-style remote rejected at use time too (defense in depth)', () => {
-    expect(() => resolveTransport({ remote: 'git@github.com:o/r.git' })).toThrow(/#88/);
+  test('git@ scp-form → direct transport, slug from host + path', () => {
+    process.env.AGENT_HOMES_ROOT = '/data/homes';
+    const r = resolveTransport({
+      remote: 'git@github.com:owner/repo.git',
+      auth_env: 'TEST_TOKEN_X',
+    });
+    expect(r.transport).toBe('direct');
+    expect(r.slug).toBe('github.com-owner-repo-git');
+    expect(r.mirrorPath).toBe('/data/homes/github.com-owner-repo-git');
+    expect(r.localPath).toBe(r.mirrorPath);
+  });
+
+  test('ssh:// → direct transport, user info stripped from slug', () => {
+    process.env.AGENT_HOMES_ROOT = '/data/homes';
+    const r = resolveTransport({
+      remote: 'ssh://git@github.com/owner/repo',
+      auth_env: 'TEST_TOKEN_X',
+    });
+    expect(r.transport).toBe('direct');
+    expect(r.slug).toBe('github.com-owner-repo');
   });
 
   test('unparseable remote URL throws with the offending value', () => {

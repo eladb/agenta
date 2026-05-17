@@ -10,7 +10,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git iptables jq ripgrep util-linux \
+      bash ca-certificates curl git iptables jq openssh-client ripgrep util-linux \
       zip unzip \
       python3 python-is-python3 python3-pip python3-pil python3-matplotlib python3-numpy python3-pandas \
       imagemagick \
