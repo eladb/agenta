@@ -79,6 +79,10 @@ jobs:
           # Docker-gated tests run here; Fly-gated tests skip cleanly
           # because no FLY_API_TOKEN is set in this step.
           SANDBOX_PROVIDER: docker
+          # Match what the egress test asserts. Phase 21 (#21) flipped the
+          # default to `allow` for dev ergonomics; CI exercises the
+          # production-hardened `block` config so the assertion holds.
+          SANDBOX_EGRESS: block
         run: bun run e2e
 
       - name: Install flyctl
