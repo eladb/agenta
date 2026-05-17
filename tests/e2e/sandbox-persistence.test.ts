@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';

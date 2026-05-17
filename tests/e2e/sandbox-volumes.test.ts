@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
 import { threadKey } from '../../src/runtime/thread';
 import { containerName } from '../../src/sandbox';
