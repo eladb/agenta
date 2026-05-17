@@ -20,14 +20,30 @@ primary_region = "iad"
 [env]
   AGENTA_DATA_DIR = "/data/agenta"
   AGENTA_REPO_PATH = "/data/botspace"
-  BOTSPACE_REPO = "eladb/agenta-botspace"
+  BOTSPACE_REPO = "eladb/agenta-test-home"
   SANDBOX_PROVIDER = "fly"
   FLY_APP_NAME = "agenta-sandbox"
   FLY_REGION = "iad"
+  HEALTH_PORT = "8080"
 
 [[mounts]]
   source = "agenta_data"
   destination = "/data"
+
+# Machine-level health check. The bot's HEALTH_PORT (default 8080) serves
+# /health returning 200 when Socket Mode is connected, 503 otherwise.
+# Not exposed externally — there is no [http_service] / [[services]]
+# section above, so this port is only reachable from Fly's check infra
+# inside the machine and via 6PN within this org.
+[[checks]]
+  name = "health"
+  type = "http"
+  port = 8080
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "30s"
+  method = "GET"
+  path = "/health"
 
 # Single machine — the bot uses src/lockfile.ts to enforce one instance, so
 # a second machine would refuse to start anyway. The deploy strategy is

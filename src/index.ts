@@ -60,6 +60,41 @@ listen(socket, botUserId, makeEventHandler(web, botToken, botUserId, callModel))
 listenInteractive(socket);
 log.info('boot', 'listening for events');
 
+// Health endpoint for Fly's machine-level [[checks]]. Process-up + Socket
+// Mode connected = OK. Slack silent-deaf (#27) isn't detected here yet —
+// that needs an event-recency heartbeat we haven't built. Binds to all
+// interfaces so Fly's check infrastructure inside the machine can reach
+// it. The bot has no [http_service] so this port isn't publicly exposed.
+const healthPort = Number(process.env.HEALTH_PORT ?? '8080');
+// connect() above already awaited socket.start(), so by here the socket
+// IS connected — initialize true and let subsequent disconnect/connect
+// events flip the flag. If we initialized false, the first health probe
+// after boot would 503 because connect()'s own 'connected' listener
+// already fired before this one attached.
+let socketConnected = true;
+socket.on('connected', () => {
+  socketConnected = true;
+});
+socket.on('disconnected', () => {
+  socketConnected = false;
+});
+const healthServer = Bun.serve({
+  port: healthPort,
+  hostname: '0.0.0.0',
+  fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname !== '/health') {
+      return new Response('Not Found', { status: 404 });
+    }
+    const ok = socketConnected;
+    return new Response(JSON.stringify({ ok, socket: socketConnected }), {
+      status: ok ? 200 : 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+});
+log.info('boot', `health on http://0.0.0.0:${healthServer.port}/health`);
+
 // Announce any in-flight sessions that died with the previous process.
 // listSessions() scans data/{thread_key}/session.json.
 recoverInterruptedSessions(web).catch((err) => {
