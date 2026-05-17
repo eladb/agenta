@@ -79,7 +79,9 @@ Agent(
   4. Run `bun test src` before committing — must be green.
   5. Commit with a **Conventional Commits** subject ending in `(#<NN>)` so GitHub auto-links. Format: `<type>(<scope>): <subject> (#<NN>)`. Types: feat, fix, docs, chore, refactor, test, perf, build, ci, style, revert. Do NOT include `Closes #<NN>` in commits (that goes on the PR).
   6. Push the branch and open a PR. The PR **title must also use Conventional Commits** (typically the same as the commit subject). PR body contains `Closes #<NN>` so merging closes the issue.
-  7. Report the PR URL.
+  7. Enable auto-merge so the PR lands as soon as branch-protection's required `unit-tests` check passes:
+     `gh pr merge <PR#> -R eladb/agenta --auto --squash --delete-branch`
+  8. Report the PR URL.
 
   Notes:
   - DO NOT run `bun run format` (biome rewrites unrelated files — see memory).
@@ -89,7 +91,7 @@ Agent(
 )
 ```
 
-If the change is trivial enough to keep in this session (a one-line fix, a typo), still create the issue, commit with `(#NN)` in the main worktree, push, and open the PR yourself — but the default is delegate.
+If the change is trivial enough to keep in this session (a one-line fix, a typo), still create the issue, commit with `(#NN)` in the main worktree, push, open the PR, and `gh pr merge <N> --auto --squash --delete-branch` so it lands on green — but the default is delegate.
 
 ### 4. Keep the issue current
 
@@ -133,6 +135,7 @@ gh issue list -R eladb/agenta --state all --search "socket mode"
 - **Labels are exclusive**: an issue gets exactly one of `phase` / `gotcha` / `proposed`. GitHub default labels (`bug`, `enhancement`, `documentation`) can be added on top as descriptors.
 - **One change request, one issue**. If a request grows new scope mid-flight, file a second issue for the new piece and reference it.
 - **Don't open an issue retroactively** to "document" something that was committed without one. Leave history alone — the commit message and CLAUDE.md phase entry already serve that purpose. Backfill is a one-time migration, not an ongoing habit.
+- **Auto-merge is the default**. Once a PR is open, run `gh pr merge <N> --auto --squash --delete-branch` — branch protection's required `unit-tests` check gates the actual merge, so this just lets the PR land itself when green. Skip auto-merge ONLY when the user has said something like "let me review this one first" or the change is unusually risky (irreversible migration, scope-creeping refactor) — surface that as a question before opening the PR if you're unsure.
 
 ## What NOT to do
 
