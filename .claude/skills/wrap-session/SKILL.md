@@ -49,7 +49,11 @@ Batch related proposals into a single question where possible — but if any are
 - Memory files: use `Write` to create new ones; update `MEMORY.md` index with a one-line `- [Title](file.md) — hook` entry per new file.
 - Commit CLAUDE.md as `docs(CLAUDE.md): <one-line summary>` with a body listing the sections touched. Memory files don't get committed — they're outside the repo.
 
-### 6. Optional: tag HEAD
+### 6. Refresh the issues index
+
+Run `bun scripts/refresh-issues-index.ts` so `ISSUES.md` at the repo root reflects the current GitHub state. If the script changes the file, commit it as `docs(ISSUES): refresh index` (its own commit, not folded into the CLAUDE.md commit). This is non-optional — `ISSUES.md` is the offline recall surface for the `issue-driven` skill and drifts fast otherwise.
+
+### 7. Optional: tag HEAD
 
 If the session represents a meaningful milestone (multi-phase work, big refactor, before/after a destabilizing change), suggest tagging HEAD as `session-<YYYYMMDD>` or `pre-<next-thing>`. Ask before tagging.
 
