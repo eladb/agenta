@@ -20,7 +20,7 @@ RUN bun install --production --frozen-lockfile
 FROM oven/bun:1-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      git ca-certificates \
+      git ca-certificates jq python3 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,6 +28,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json bun.lock tsconfig.json ./
 COPY src ./src
 COPY git-hooks ./git-hooks
+COPY config ./config
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh git-hooks/pre-receive git-hooks/post-receive
 

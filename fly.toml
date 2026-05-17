@@ -19,8 +19,10 @@ primary_region = "iad"
 
 [env]
   AGENTA_DATA_DIR = "/data/agenta"
-  AGENT_HOME = "/data/agent-home"
-  AGENT_HOME_REPO = "eladb/agenta-test-home"
+  # Per-channel home config (#87) lives at config/homes.json in the image;
+  # entrypoint.sh clones each https:// entry into AGENT_HOMES_ROOT/<slug>
+  # on boot. file:// entries are used in-place (host path == working tree).
+  AGENT_HOMES_ROOT = "/data/homes"
   SANDBOX_PROVIDER = "fly"
   # Note: FLY_APP_NAME would be overridden by Fly's auto-injection of the
   # current app's name. entrypoint.sh `export`s the right value (from

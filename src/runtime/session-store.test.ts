@@ -8,6 +8,7 @@ import {
   readSession,
   type SandboxRecord,
   type SessionState,
+  setHome,
   setSandbox,
   writeSession,
 } from './session-store';
@@ -172,5 +173,57 @@ describe('session-store', () => {
     await writeSession('tk-rt', { status: 'idle', updated_at: 't', sandbox: rec });
     const out = await readSession('tk-rt');
     expect(out?.sandbox).toEqual(rec);
+  });
+
+  test('setHome on a thread with no session.json writes a minimal idle record', async () => {
+    await setHome('tk-home-fresh', {
+      remote: 'https://github.com/o/r',
+      auth_env: 'GITHUB_TOKEN',
+    });
+    const after = await readSession('tk-home-fresh');
+    expect(after?.status).toBe('idle');
+    expect(after?.home).toEqual({
+      remote: 'https://github.com/o/r',
+      auth_env: 'GITHUB_TOKEN',
+    });
+  });
+
+  test('setHome preserves other fields', async () => {
+    await writeSession('tk-home-merge', {
+      status: 'running',
+      updated_at: 't',
+      system_prompt: 'sp',
+    });
+    await setHome('tk-home-merge', { remote: 'file:///x' });
+    const after = await readSession('tk-home-merge');
+    expect(after?.status).toBe('running');
+    expect(after?.system_prompt).toBe('sp');
+    expect(after?.home).toEqual({ remote: 'file:///x' });
+  });
+
+  test('setHome(undefined) removes the home field but keeps the rest', async () => {
+    await writeSession('tk-home-clear', {
+      status: 'idle',
+      updated_at: 't',
+      system_prompt: 'sp',
+      home: { remote: 'file:///x' },
+    });
+    await setHome('tk-home-clear', undefined);
+    const after = await readSession('tk-home-clear');
+    expect(after?.home).toBeUndefined();
+    expect(after?.system_prompt).toBe('sp');
+  });
+
+  test('clearSession preserves the home record across the running -> idle transition', async () => {
+    await writeSession('tk-home-keep', {
+      status: 'running',
+      updated_at: 't',
+      system_prompt: 'p',
+      home: { remote: 'file:///x' },
+    });
+    await clearSession('tk-home-keep');
+    const after = await readSession('tk-home-keep');
+    expect(after?.status).toBe('idle');
+    expect(after?.home).toEqual({ remote: 'file:///x' });
   });
 });

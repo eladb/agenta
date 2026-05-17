@@ -71,6 +71,7 @@ export async function startOrQueue(
     system_prompt: systemPrompt,
     ...(prior?.sandbox !== undefined ? { sandbox: prior.sandbox } : {}),
     ...(prior?.git !== undefined ? { git: prior.git } : {}),
+    ...(prior?.home !== undefined ? { home: prior.home } : {}),
   });
   // Lets runTurn signal "I consumed a mid-turn mention" so the post-turn
   // pending-check doesn't kick off a redundant follow-up turn.
@@ -93,6 +94,7 @@ export async function startOrQueue(
         system_prompt: systemPrompt,
         ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
         ...(carry?.git !== undefined ? { git: carry.git } : {}),
+        ...(carry?.home !== undefined ? { home: carry.home } : {}),
       });
     }
   } finally {
@@ -123,6 +125,7 @@ export async function signalStop(
       ...(s.systemPrompt !== undefined ? { system_prompt: s.systemPrompt } : {}),
       ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
       ...(carry?.git !== undefined ? { git: carry.git } : {}),
+      ...(carry?.home !== undefined ? { home: carry.home } : {}),
     });
     s.abort.abort();
     log.info('session', `[${tk}] stop signaled`);

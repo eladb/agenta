@@ -15,28 +15,13 @@ export type SkillEntry = {
   [extra: string]: unknown;
 };
 
-// Resolve the host-side path to read README.md + skills/ from. The repo at
-// AGENT_HOME is the single source of truth — the sandbox shallow-clones it,
-// and the host reads the same working tree directly when composing the
-// system prompt for a new thread.
-//
-// AGENT_HOME_DIR is honored only as a test override (it's the only way the
-// e2e/unit tests can point at an isolated tmpdir without standing up a real
-// git repo). If neither is set we throw — there's no "default location"
-// any more.
-function defaultAgentHomeDir(): string {
-  const dir = process.env.AGENT_HOME_DIR ?? process.env.AGENT_HOME;
-  if (!dir || dir.length === 0) {
-    throw new Error(
-      'AGENT_HOME must be set to a git working tree (AGENT_HOME_DIR override allowed for tests)',
-    );
-  }
-  return dir;
-}
-
 // Compose the system prompt for a new thread from an agent home directory.
 //
-// `agentHomeDir` defaults to `process.env.AGENT_HOME_DIR ?? process.env.AGENT_HOME`.
+// `agentHomeDir` is passed by the caller — handler.ts resolves it from
+// `resolveTransport(session.home).localPath` (#87). Tests inject a tmpdir
+// path directly. There is no env-default any more; the per-channel home
+// config is the single source of truth.
+//
 // `envPrefix` defaults to `process.env.SYSTEM_PROMPT` — when set, it is
 // prepended (with a blank-line separator) to the README.md body. This is the
 // only behavior delta from the legacy const prompt: SYSTEM_PROMPT used to
@@ -46,7 +31,7 @@ function defaultAgentHomeDir(): string {
 //   README.md
 //   skills/<slug>/SKILL.md  (YAML frontmatter parsed for the skills map)
 export async function buildSystemPrompt(
-  agentHomeDir: string = defaultAgentHomeDir(),
+  agentHomeDir: string,
   envPrefix: string | undefined = process.env.SYSTEM_PROMPT,
 ): Promise<string> {
   const botPath = join(agentHomeDir, 'README.md');

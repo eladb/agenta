@@ -5,7 +5,8 @@
 // sandbox's /tunnel route, the sandbox-side multiplexer accepts the
 // model's `git clone` / `git push` over loopback TCP inside the
 // container, the traffic is framed back through the WS to the bot's git
-// server, which spawns `git http-backend` against AGENT_HOME.
+// server, which spawns `git http-backend` against the agent-home working
+// tree resolved from the per-channel home config (#87).
 //
 // No host sshd, no authorized_keys, no WireGuard — the test runs against
 // any active sandbox provider with no opt-in beyond DOCKER_PROVIDER_ACTIVE.
@@ -22,6 +23,7 @@ import {
   cleanupTempDataDir,
   DOCKER_PROVIDER_ACTIVE,
   deleteThread,
+  type HomeConfigOverride,
   mention,
   requireEnv,
   STUB_REPLY_PREFIX,
@@ -31,6 +33,7 @@ import {
   startTester,
   type Tester,
   waitForReply,
+  withTempHomeConfig,
 } from './helpers';
 
 const TEST_TK_PREFIX = 'e2e-git-ah-';
@@ -45,7 +48,7 @@ if (!DOCKER_PROVIDER_ACTIVE) {
   let tester: Tester;
   let channel: string;
   let repoPath: string;
-  let originalRepoPathEnv: string | undefined;
+  let homeOverride: HomeConfigOverride;
   const createdThreadTs: string[] = [];
 
   // The model script returns one assistant message per call. Tests push
@@ -78,10 +81,13 @@ if (!DOCKER_PROVIDER_ACTIVE) {
     // http.receivepack is explicitly enabled.
     spawnSync('git', ['-C', repoPath, 'config', 'http.receivepack', 'true']);
 
-    originalRepoPathEnv = process.env.AGENT_HOME;
-    process.env.AGENT_HOME = repoPath;
-
     setupTempDataDir();
+    // Override the e2e-default home (which points at an empty tmpdir)
+    // with one that points at our seeded git repo. bootstrap.ts reads
+    // `session.home` to drive the WS-tunneled clone — file:// transport
+    // uses the URL pathname directly as the working tree.
+    homeOverride = withTempHomeConfig(`file://${repoPath}`);
+
     channel = requireEnv('TEST_CHANNEL_ID');
     [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
   });
@@ -91,10 +97,9 @@ if (!DOCKER_PROVIDER_ACTIVE) {
       await deleteThread(tester, agent, channel, ts);
     }
     await shutdown(agent, tester);
+    homeOverride.restore();
     cleanupTempDataDir();
     rmSync(repoPath, { recursive: true, force: true });
-    if (originalRepoPathEnv === undefined) delete process.env.AGENT_HOME;
-    else process.env.AGENT_HOME = originalRepoPathEnv;
   });
 
   describe('git-backed agent home over WS tunnel', () => {

@@ -13,6 +13,7 @@ import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
+import { type HomeConfig, resolveHome, resolveTransport } from './home-config';
 import { signalStop, startOrQueue } from './session';
 import { readSession, writeSession } from './session-store';
 import { threadKey } from './thread';
@@ -111,12 +112,13 @@ async function handleMessage(
     return;
   }
 
-  // Per-thread frozen system prompt: composed on the first mention and
-  // persisted into session.json so every subsequent turn in this thread
-  // sees the same prompt even if README.md / skills change in the meantime.
-  // `clearSession` writes idle (preserving system_prompt) so the file is
-  // there across turns; only `/delete` removes it.
-  const prompt = await resolveSystemPrompt(web, tk, e.user);
+  // Per-thread frozen system prompt + per-channel home: composed on the
+  // first mention and persisted into session.json so every subsequent turn
+  // in this thread sees the same prompt + home even if README.md / skills /
+  // config/homes.json change in the meantime. `clearSession` writes idle
+  // (preserving these) so the file is there across turns; only `/delete`
+  // removes it.
+  const prompt = await resolveSystemPrompt(web, tk, e.channel, e.user);
 
   // Sandbox warmup: kick off provisioning in the background as soon as a
   // turn is committed. The foreground tool loop in turn.ts awaits the same
@@ -141,11 +143,19 @@ async function handleMessage(
 async function resolveSystemPrompt(
   web: WebClient,
   tk: string,
+  channelId: string,
   userId: string,
 ): Promise<string> {
   const existing = await readSession(tk);
   if (existing?.system_prompt !== undefined) return existing.system_prompt;
-  const composed = await buildSystemPrompt();
+  // Resolve + freeze the per-channel home (#87) on first mention. The
+  // snapshot is just the HomeConfig (remote + auth_env); slug/transport/
+  // paths recompute on read via `resolveTransport` so future config edits
+  // only affect new threads. Tests bypass the config file via the
+  // AGENT_HOME_DIR env override (see `resolveAgentHomeForPrompt`).
+  const home = resolveHome(channelId);
+  const agentHomeDir = resolveAgentHomeForPrompt(home);
+  const composed = await buildSystemPrompt(agentHomeDir);
   // First-mention resolution: look up the originating Slack user once and
   // cache their email + name into session.json. bootstrap.ts reads these
   // back to configure git user.email / user.name inside the sandbox so
@@ -154,14 +164,24 @@ async function resolveSystemPrompt(
   const creator = await resolveCreator(web, userId);
   // Persist as idle so it survives this turn and any future ones. session.ts
   // will overwrite the file with running/stopping/idle as it transitions,
-  // always carrying `system_prompt` (and `git`) forward.
+  // always carrying `system_prompt` (and `git`, and `home`) forward.
   await writeSession(tk, {
     status: 'idle',
     updated_at: nowIso(),
     system_prompt: composed,
     git: creator ? { ref: refFor(tk), creator } : undefined,
+    home,
   });
   return composed;
+}
+
+// Test override hatch: `AGENT_HOME_DIR` short-circuits the configured
+// remote and points the prompt builder at the test's tmpdir. Production
+// never sets it.
+function resolveAgentHomeForPrompt(home: HomeConfig): string {
+  const override = process.env.AGENT_HOME_DIR;
+  if (override && override.length > 0) return override;
+  return resolveTransport(home).localPath;
 }
 
 async function resolveCreator(
