@@ -83,7 +83,8 @@ jobs:
       - name: Clone agent home
         if: steps.changed.outputs.code == 'true'
         env:
-          AGENT_HOME_TOKEN: ${{ secrets.AGENT_HOME_READ_TOKEN }}
+          # GH Actions secret name still BOTSPACE_READ_TOKEN; rename deferred (PAT values aren't readable, would need a new token issued via UI).
+          AGENT_HOME_TOKEN: ${{ secrets.BOTSPACE_READ_TOKEN }}
         run: |
           git clone --depth 1 \
             "https://x-access-token:${AGENT_HOME_TOKEN}@github.com/eladb/agenta-test-home.git" \
