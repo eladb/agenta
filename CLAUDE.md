@@ -34,7 +34,7 @@ Phase history, open gotchas, and proposed work live on GitHub as issues.
 
 ### Production runtime notes
 
-- **Bot runs on Fly** as app `agenta-bot` (one shared-cpu-1x machine in `iad`, 1 GB volume `agenta_data` mounted at `/data`). Deploy via `bun scripts/deploy-bot-fly.ts` (locally) or by pushing to `main` — `.github/workflows/cd.yml` runs the staging e2e suite, then `bun run deploy`, then the canary, fail-stopping at each step. No `[http_service]` — Slack is Socket Mode (outbound WS), the model gateway + Fly Machines API are outbound HTTPS, so the bot has no inbound surface.
+- **Bot runs on Fly** as app `agenta-bot` (one shared-cpu-1x machine in `iad`, 1 GB volume `agenta_data` mounted at `/data`). Deploy via `bun scripts/deploy-bot-fly.ts` (locally) or by pushing to `main` — `.github/workflows/cd.yml` runs `bun run deploy` then the canary against the just-deployed machine. The e2e suite runs in parallel under `.github/workflows/e2e-prod.yml` against the dedicated `agenta-ci` Slack app, so neither workflow contends with the production Socket Mode connection. No `[http_service]` — Slack is Socket Mode (outbound WS), the model gateway + Fly Machines API are outbound HTTPS, so the bot has no inbound surface.
 - **Botspace lives on GitHub** at `eladb/agenta-test-home` (private). `entrypoint.sh` clones it into `/data/botspace` (= `AGENTA_REPO_PATH`) on first boot using `GITHUB_TOKEN`; on subsequent boots it `fetch + reset --hard origin/main` so README/skill edits made on GitHub reach the bot. `git-hooks/post-receive` auto-pushes every `agenta/sessions/<thread_key>` ref to `origin` after the WS-tunnel receive-pack completes — best-effort, failures log to stderr and don't block the receive.
 - **Health check**: the bot exposes `/health` on `HEALTH_PORT` (default 8080, set in `fly.toml`); `fly.toml`'s `[[checks]]` polls it every 30s. Returns 200 when Socket Mode is connected, 503 otherwise. Process-up + socket-up only — silent-deaf (#27) still isn't detected; that needs an event-recency heartbeat.
 - **Production bot user**: `U0B2WQUHK6Z` (agent app `A0B2WL8UYAZ`). The agent's manifest scopes after phase 25: `app_mentions:read`, `chat:write`, `channels:history`, `files:read`, `files:write`, `reactions:write`, `users:read`, `users:read.email`. Reinstall required after any scope change via `https://api.slack.com/apps/A0B2WL8UYAZ/install-on-team`.
@@ -120,7 +120,7 @@ sandbox/
     server.ts              Bun HTTP API. Endpoints (Bearer auth except /health): /exec (SSE), /read, /read_binary, /write, /edit, /grep, /glob, /ls, /tunnel (WS), /health. Spawned bash inherits cwd=/home/sandbox (the workspace = sandbox user's home = per-thread persistent volume mount). 60s default exec timeout (SANDBOX_EXEC_TIMEOUT_MS). /tunnel binds 127.0.0.1:6000 per WS connection and multiplexes accepted TCP into binary frames (5-byte header: streamId u32 BE | type u8; data=0, close=1) so the bot's local git server (Phase 24) can serve the sandbox's `git` over loopback.
 scripts/
   setup-slack-apps.ts      interactive creator via apps.manifest.create (needs config tokens)
-  update-manifest.ts       push slack-manifests/<agent|tester|staging>.json via apps.manifest.update (`SLACK_CONFIG_ACCESS_TOKEN=... bun scripts/update-manifest.ts <agent|tester|staging>`). Reports `permissions_updated: true` when reinstall is needed.
+  update-manifest.ts       push slack-manifests/<agent|tester>.json via apps.manifest.update (`SLACK_CONFIG_ACCESS_TOKEN=... bun scripts/update-manifest.ts <agent|tester>`). Reports `permissions_updated: true` when reinstall is needed.
   deploy-sandbox-fly.sh    one-shot Fly provisioning + image push (`bash scripts/deploy-sandbox-fly.sh`)
   manual-test-image.ts     quick uploader for the agent: posts a PNG with a mention via the tester
   run-e2e.ts               `bun run e2e` wrapper. Creates a fresh `#agenta-e2e-<stamp>` channel, invites the agent, exports TEST_CHANNEL_ID for each spawned `bun test <file>` (sequentially, one process per file), archives the channel on exit (success/failure/signal).
@@ -128,7 +128,6 @@ scripts/
 slack-manifests/
   agent.json               scopes: app_mentions:read, chat:write, channels:history, files:read, files:write, reactions:write; events: message.channels; interactivity enabled
   tester.json              scopes: app_mentions:read, chat:write, channels:history, files:write, channels:manage, channels:write.invites; events: message.channels (channels:manage + write.invites are for run-e2e's per-run channel creation)
-  staging.json             clone of agent.json with name agenta-staging; only ever connected from the CD GitHub runner via STAGING_APP_TOKEN / STAGING_BOT_TOKEN secrets so prod's Socket Mode is untouched during CI
 tests/e2e/
   helpers.ts               startAgent (acquires 'agent' lock + in-process socket), startTester (acquires 'tester' lock), mention, uploadFile, waitForReply, waitFor, deleteThread, stubCalls/recordingStub, createGoldenCallModel, shutdown (disconnects + releases both locks), DOCKER_PROVIDER_ACTIVE constant (gates docker-only test files).
   fixtures.ts              inline PNG/PDF/text/binary byte fixtures
@@ -181,10 +180,10 @@ tests/golden/
 ## Slack apps + IDs (workspace `agentalabs` / T0B304AJPUZ)
 
 - Agent app: **A0B2WL8UYAZ** (bot user `U0B2WQUHK6Z`, display name `agenta`) — production bot, runs on Fly.
-- Tester app: **A0B33L7CVRA** (bot user used by e2e tests, `agenta-tester`) — used by both CD's staging e2e step and the post-deploy canary.
-- Staging app: **`agenta-staging`** (provision via `bun scripts/setup-slack-apps.ts --staging`) — only ever runs in-process on the CD GitHub runner. Tokens live as `STAGING_APP_TOKEN`/`STAGING_BOT_TOKEN` GitHub secrets, not in `.env`. Keeps prod's Socket Mode untouched during CI.
+- Tester app: **A0B33L7CVRA** (bot user used by e2e tests, `agenta-tester`) — drives both the e2e suite and the post-deploy canary.
+- CI app: **A0B49GHNG22** (`agenta-ci`, per PR #66) — used by `.github/workflows/e2e-prod.yml` only, so prod's Socket Mode is untouched during CI.
 - Test channel: `C0B307LP274`
-- Both bots must be `/invite`d to the test channel. The CD workflow creates a fresh `#agenta-e2e-<stamp>` channel per run via the tester (see `scripts/run-e2e.ts`) and invites the staging agent; the canary step uses the existing test channel via the `CANARY_CHANNEL_ID` secret.
+- The canary step in `cd.yml` uses the existing test channel via the `CANARY_CHANNEL_ID` secret (production agent + tester both invited). e2e runs use a fresh `#agenta-e2e-<stamp>` channel created per run by `scripts/run-e2e.ts`.
 
 If you change scopes via `apps.manifest.update`, `permissions_updated: true` in the response means the user must reinstall the app to grant the new scope. The bot token usually stays the same across reinstalls.
 
@@ -218,12 +217,12 @@ For the setup script only (rotates every 12h):
 - `SLACK_CONFIG_ACCESS_TOKEN`, `SLACK_CONFIG_REFRESH_TOKEN`
 
 For CD (`.github/workflows/cd.yml`) — set as GitHub Actions repo secrets, not in `.env`:
-- `STAGING_APP_TOKEN`, `STAGING_BOT_TOKEN` — staging Slack app (provisioned via `bun scripts/setup-slack-apps.ts --staging`)
-- `TEST_APP_TOKEN`, `TEST_BOT_TOKEN` — tester credentials (same as local e2e)
-- `SLACK_BOT_TOKEN` — production agent bot token (the canary uses it only to resolve the prod agent's user id; the canary does NOT connect a Socket Mode client to it)
-- `MODEL_API_KEY` — model gateway key for the staging agent's tool turns
 - `FLY_API_TOKEN` — deploy token (generate with `flyctl tokens create deploy -a agenta-bot`)
+- `SLACK_BOT_TOKEN` — production agent bot token (canary uses it only to resolve the prod agent's user id; no Socket Mode client connects to it)
+- `TEST_APP_TOKEN`, `TEST_BOT_TOKEN` — tester credentials (same as local e2e)
 - `CANARY_CHANNEL_ID` — channel both the production agent and the tester are invited to
+
+(`e2e-prod.yml`'s own secrets — `CI_SLACK_APP_TOKEN`, `CI_SLACK_BOT_TOKEN`, `BOTSPACE_READ_TOKEN`, `MODEL_API_KEY` — are documented in that workflow's header.)
 
 `.env` is gitignored. `.slack-apps.json` (app-id cache used by the setup script) is also gitignored.
 
@@ -239,7 +238,7 @@ bun run lint     # biome check
 bun run format   # biome format --write
 bun run setup    # interactive Slack app creation (apps.manifest.create)
 bun run deploy   # scripts/deploy-bot-fly.ts: provisions agenta-bot app + agenta_data volume in iad, builds + rolls the bot image
-# scripts/update-manifest.ts <agent|tester|staging> — push a manifest change to Slack via apps.manifest.update (needs SLACK_CONFIG_ACCESS_TOKEN)
+# scripts/update-manifest.ts <agent|tester> — push a manifest change to Slack via apps.manifest.update (needs SLACK_CONFIG_ACCESS_TOKEN)
 # scripts/deploy-sandbox-fly.ts — builds + pushes the sandbox image to registry.fly.io/agenta-sandbox:latest (run when sandbox/ changes)
 ```
 

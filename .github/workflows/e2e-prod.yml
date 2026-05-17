@@ -1,0 +1,72 @@
+name: E2E (production)
+
+# Post-merge regression suite. Runs the e2e tests with real Slack
+# credentials against the agenta workspace.
+#
+# Slack apps: the in-process e2e agent uses the DEDICATED `agenta-ci`
+# Slack app (CI_SLACK_*), NOT the production agent app. This is the
+# whole point of the CI app — Socket Mode load-balances events
+# between every client connected on the same app token, so reusing
+# the production token would mean the Fly bot and the CI agent each
+# receive ~50% of test mentions and both run different model paths.
+# The CI app has its own Socket Mode connection, zero contention.
+#
+# The tester bot (TEST_*) is unchanged — it's the puppet that creates
+# the test channel and posts mentions.
+#
+# Concurrency: only one CI Socket Mode client at a time, otherwise
+# two CI runs would split events 50/50 with each other. cancel-in-
+# progress: false queues subsequent runs instead of killing in-flight.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: e2e-prod
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Pre-build the sandbox image so the first docker-gated test
+      # doesn't pay the multi-minute ensureImage() build cost during
+      # the test window.
+      - name: Pre-build sandbox image
+        run: docker build -t agenta-sandbox:latest sandbox/
+
+      # Clone the botspace for the in-process agent's buildSystemPrompt.
+      # Locally this comes from the dev's .env (AGENTA_REPO_PATH=…/agenta-botspace);
+      # CI needs an explicit clone.
+      - name: Clone botspace
+        env:
+          BOTSPACE_TOKEN: ${{ secrets.BOTSPACE_READ_TOKEN }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${BOTSPACE_TOKEN}@github.com/eladb/agenta-test-home.git" \
+            "${RUNNER_TEMP}/botspace"
+          echo "AGENTA_REPO_PATH=${RUNNER_TEMP}/botspace" >> "$GITHUB_ENV"
+
+      - name: Run e2e
+        env:
+          # Dedicated CI Slack app — see header comment for why.
+          SLACK_APP_TOKEN: ${{ secrets.CI_SLACK_APP_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.CI_SLACK_BOT_TOKEN }}
+          TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
+          TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
+          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+          # Docker-gated tests run here; Fly-gated tests skip cleanly
+          # because no FLY_API_TOKEN is set.
+          SANDBOX_PROVIDER: docker
+        run: bun run e2e

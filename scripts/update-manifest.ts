@@ -20,8 +20,8 @@ import { join } from 'node:path';
 import { loadCache, slackApi, withTokenRefresh } from './slack-config-tokens';
 
 const name = process.argv[2];
-if (name !== 'agent' && name !== 'tester' && name !== 'staging') {
-  console.error('usage: bun scripts/update-manifest.ts <agent|tester|staging>');
+if (name !== 'agent' && name !== 'tester') {
+  console.error('usage: bun scripts/update-manifest.ts <agent|tester>');
   process.exit(1);
 }
 

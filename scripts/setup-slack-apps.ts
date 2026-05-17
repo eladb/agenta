@@ -18,11 +18,10 @@ const ROOT = join(import.meta.dir, '..');
 const MANIFESTS = {
   agent: join(ROOT, 'slack-manifests/agent.json'),
   tester: join(ROOT, 'slack-manifests/tester.json'),
-  staging: join(ROOT, 'slack-manifests/staging.json'),
 };
 const ENV_PATH = join(ROOT, '.env');
 
-type AppKey = 'agent' | 'tester' | 'staging';
+type AppKey = 'agent' | 'tester';
 
 type ManifestCreateResp = {
   ok: true;
@@ -158,49 +157,10 @@ async function runDelete(): Promise<void> {
   console.log('done. note: .env not touched.');
 }
 
-// Provision the staging Slack app used by the CD pipeline. Separate from
-// runCreate so it doesn't disturb agent/tester credentials in .env — the
-// resulting tokens are meant for GitHub Actions secrets, not local .env.
-async function runStaging(): Promise<void> {
-  const cache = loadCache();
-  const staging = await ensureCreated(cache, 'staging');
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    console.log('\n--- install the staging app ---');
-    console.log(`install: ${staging.install_url}`);
-    console.log('open the URL, click "Allow", then come back here.');
-    await prompt(rl, 'press enter once installed: ');
-
-    console.log('\n--- bot token ---');
-    console.log('copy the Bot User OAuth Token (xoxb-...) from the install confirmation.');
-    const bot = await promptToken(rl, 'STAGING bot token', 'xoxb-');
-
-    console.log('\n--- app-level token (Socket Mode) ---');
-    console.log(
-      `${basicInfoUrl(staging.app_id)} -> App-Level Tokens -> Generate Token and Scopes`,
-    );
-    console.log('add scope: connections:write');
-    const app = await promptToken(rl, 'STAGING app-level token', 'xapp-');
-
-    console.log('\n--- add these as GitHub Actions repository secrets ---');
-    console.log(`STAGING_BOT_TOKEN=${bot}`);
-    console.log(`STAGING_APP_TOKEN=${app}`);
-    console.log('\nthe CD workflow (.github/workflows/cd.yml) reads these.');
-    console.log(
-      'also: /invite the staging bot to a channel? not required — run-e2e.ts creates a fresh channel per run via the tester.',
-    );
-  } finally {
-    rl.close();
-  }
-}
-
 const args = process.argv.slice(2);
 const force = args.includes('--force');
 if (args.includes('--delete')) {
   await runDelete();
-} else if (args.includes('--staging')) {
-  await runStaging();
 } else {
   await runCreate({ force });
 }
