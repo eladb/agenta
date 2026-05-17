@@ -1,11 +1,11 @@
-// Full git-backed-botspace e2e test (WS-tunnel transport, phase 24).
+// Full git-backed agent home e2e test (WS-tunnel transport, phase 24).
 //
 // Drives the bot end-to-end through the per-session WS tunnel: the bot
 // starts a per-session git HTTP server on loopback, opens a WS to the
 // sandbox's /tunnel route, the sandbox-side multiplexer accepts the
 // model's `git clone` / `git push` over loopback TCP inside the
 // container, the traffic is framed back through the WS to the bot's git
-// server, which spawns `git http-backend` against AGENTA_REPO_PATH.
+// server, which spawns `git http-backend` against AGENT_HOME.
 //
 // No host sshd, no authorized_keys, no WireGuard — the test runs against
 // any active sandbox provider with no opt-in beyond DOCKER_PROVIDER_ACTIVE.
@@ -33,11 +33,11 @@ import {
   waitForReply,
 } from './helpers';
 
-const TEST_TK_PREFIX = 'e2e-git-bs-';
+const TEST_TK_PREFIX = 'e2e-git-ah-';
 
 if (!DOCKER_PROVIDER_ACTIVE) {
-  test('git-botspace e2e (skipped)', () => {
-    console.log('[git-botspace] skipped: SANDBOX_PROVIDER=docker is not active');
+  test('git-agent-home e2e (skipped)', () => {
+    console.log('[git-agent-home] skipped: SANDBOX_PROVIDER=docker is not active');
     expect(true).toBe(true);
   });
 } else {
@@ -67,7 +67,7 @@ if (!DOCKER_PROVIDER_ACTIVE) {
     // Source-of-truth repo on the host. The prompt builder reads from
     // README.md + skills/; the per-session git HTTP server exports the
     // same working tree.
-    repoPath = mkdtempSync(join(tmpdir(), 'agenta-e2e-git-bs-repo-'));
+    repoPath = mkdtempSync(join(tmpdir(), 'agenta-e2e-git-ah-repo-'));
     spawnSync('git', ['init', '--initial-branch=main', repoPath]);
     spawnSync('git', ['-C', repoPath, 'config', 'user.email', 'e2e@agenta.test']);
     spawnSync('git', ['-C', repoPath, 'config', 'user.name', 'agenta-e2e']);
@@ -78,8 +78,8 @@ if (!DOCKER_PROVIDER_ACTIVE) {
     // http.receivepack is explicitly enabled.
     spawnSync('git', ['-C', repoPath, 'config', 'http.receivepack', 'true']);
 
-    originalRepoPathEnv = process.env.AGENTA_REPO_PATH;
-    process.env.AGENTA_REPO_PATH = repoPath;
+    originalRepoPathEnv = process.env.AGENT_HOME;
+    process.env.AGENT_HOME = repoPath;
 
     setupTempDataDir();
     channel = requireEnv('TEST_CHANNEL_ID');
@@ -93,11 +93,11 @@ if (!DOCKER_PROVIDER_ACTIVE) {
     await shutdown(agent, tester);
     cleanupTempDataDir();
     rmSync(repoPath, { recursive: true, force: true });
-    if (originalRepoPathEnv === undefined) delete process.env.AGENTA_REPO_PATH;
-    else process.env.AGENTA_REPO_PATH = originalRepoPathEnv;
+    if (originalRepoPathEnv === undefined) delete process.env.AGENT_HOME;
+    else process.env.AGENT_HOME = originalRepoPathEnv;
   });
 
-  describe('git-backed botspace over WS tunnel', () => {
+  describe('git-backed agent home over WS tunnel', () => {
     test('mention triggers bootstrap; sandbox can clone and push back to allowed ref', async () => {
       const tk = testThreadKey();
       // Round-trip: write + commit + push in the sandbox. The bash payload
@@ -128,7 +128,7 @@ if (!DOCKER_PROVIDER_ACTIVE) {
         agent.botUserId,
         channel,
         undefined,
-        `e2e-git-bs ${tk}`,
+        `e2e-git-ah ${tk}`,
       );
       createdThreadTs.push(threadTs);
 
@@ -193,7 +193,7 @@ if (!DOCKER_PROVIDER_ACTIVE) {
         agent.botUserId,
         channel,
         undefined,
-        `e2e-git-bs-reject ${tk}`,
+        `e2e-git-ah-reject ${tk}`,
       );
       createdThreadTs.push(threadTs);
 

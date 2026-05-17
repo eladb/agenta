@@ -5,7 +5,7 @@ import { parse as parseYaml } from 'yaml';
 import { log } from './log';
 
 // Skill entry as projected into the system prompt. `path` is relative to the
-// botspace root (i.e. relative to the workspace, /home/sandbox/, inside the
+// agent home root (i.e. relative to the workspace, /home/sandbox/, inside the
 // sandbox). Extra frontmatter fields beyond `name`/`description` flow through
 // verbatim (open extension).
 export type SkillEntry = {
@@ -16,40 +16,40 @@ export type SkillEntry = {
 };
 
 // Resolve the host-side path to read README.md + skills/ from. The repo at
-// AGENTA_REPO_PATH is the single source of truth — the sandbox shallow-
-// clones it, and the host reads the same working tree directly when
-// composing the system prompt for a new thread.
+// AGENT_HOME is the single source of truth — the sandbox shallow-clones it,
+// and the host reads the same working tree directly when composing the
+// system prompt for a new thread.
 //
-// BOTSPACE_DIR is honored only as a test override (it's the only way the
+// AGENT_HOME_DIR is honored only as a test override (it's the only way the
 // e2e/unit tests can point at an isolated tmpdir without standing up a real
 // git repo). If neither is set we throw — there's no "default location"
 // any more.
-function defaultBotspaceDir(): string {
-  const dir = process.env.BOTSPACE_DIR ?? process.env.AGENTA_REPO_PATH;
+function defaultAgentHomeDir(): string {
+  const dir = process.env.AGENT_HOME_DIR ?? process.env.AGENT_HOME;
   if (!dir || dir.length === 0) {
     throw new Error(
-      'AGENTA_REPO_PATH must be set to a git working tree (BOTSPACE_DIR override allowed for tests)',
+      'AGENT_HOME must be set to a git working tree (AGENT_HOME_DIR override allowed for tests)',
     );
   }
   return dir;
 }
 
-// Compose the system prompt for a new thread from a botspace directory.
+// Compose the system prompt for a new thread from an agent home directory.
 //
-// `botspaceDir` defaults to `process.env.BOTSPACE_DIR ?? process.env.AGENTA_REPO_PATH`.
+// `agentHomeDir` defaults to `process.env.AGENT_HOME_DIR ?? process.env.AGENT_HOME`.
 // `envPrefix` defaults to `process.env.SYSTEM_PROMPT` — when set, it is
 // prepended (with a blank-line separator) to the README.md body. This is the
 // only behavior delta from the legacy const prompt: SYSTEM_PROMPT used to
 // replace, it now prepends.
 //
-// Layout (inside `botspaceDir`):
+// Layout (inside `agentHomeDir`):
 //   README.md
 //   skills/<slug>/SKILL.md  (YAML frontmatter parsed for the skills map)
 export async function buildSystemPrompt(
-  botspaceDir: string = defaultBotspaceDir(),
+  agentHomeDir: string = defaultAgentHomeDir(),
   envPrefix: string | undefined = process.env.SYSTEM_PROMPT,
 ): Promise<string> {
-  const botPath = join(botspaceDir, 'README.md');
+  const botPath = join(agentHomeDir, 'README.md');
   let bot = '';
   try {
     bot = await readFile(botPath, 'utf8');
@@ -59,7 +59,7 @@ export async function buildSystemPrompt(
     log.warn('prompt', `README.md not readable at ${botPath}: ${(err as Error).message}`);
   }
 
-  const skills = await loadSkills(botspaceDir);
+  const skills = await loadSkills(agentHomeDir);
 
   const parts: string[] = [];
   if (envPrefix && envPrefix.length > 0) parts.push(envPrefix);
@@ -80,8 +80,8 @@ export async function buildSystemPrompt(
   return parts.join('\n\n');
 }
 
-async function loadSkills(botspaceDir: string): Promise<SkillEntry[]> {
-  const skillsDir = join(botspaceDir, 'skills');
+async function loadSkills(agentHomeDir: string): Promise<SkillEntry[]> {
+  const skillsDir = join(agentHomeDir, 'skills');
   if (!existsSync(skillsDir)) return [];
   let slugs: string[];
   try {

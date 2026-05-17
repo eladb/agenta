@@ -19,7 +19,7 @@
 set -u
 
 # Skip cleanly when there's no `origin` configured (e.g. a local-only
-# botspace on a dev laptop). Sessions still work fine; we just have
+# agent home on a dev laptop). Sessions still work fine; we just have
 # nowhere to push to.
 if ! git remote get-url origin >/dev/null 2>&1; then
   exit 0

@@ -23,10 +23,10 @@ RUN apt-get update \
 RUN userdel -r ubuntu 2>/dev/null || true \
  && useradd --create-home --shell /bin/bash --uid 1000 sandbox
 
-# Botspace is no longer baked into the image. Each session shallow-clones
+# Agent home is no longer baked into the image. Each session shallow-clones
 # the configured host-side repo over the WS-tunnel transport on first
 # sandbox-touching tool — see src/git/bootstrap.ts. /home/sandbox is the
-# working tree and the botspace (README.md + skills/) all at once.
+# working tree and the agent home (README.md + skills/) all at once.
 
 COPY --from=builder /build/sandbox-server /usr/local/bin/sandbox-server
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

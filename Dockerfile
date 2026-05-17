@@ -5,7 +5,7 @@
 #                 only the prod dependency tree (no biome / @types / etc.).
 #   2. runtime  - Debian-slim Bun + git + ca-certificates. The bot shells
 #                 out to `git http-backend` per session (src/git/git-server.ts),
-#                 and entrypoint.sh clones the configured botspace repo
+#                 and entrypoint.sh clones the configured agent home repo
 #                 into the Fly volume on first boot.
 #
 # The bot only speaks Slack over Socket Mode (outbound WS) + outbound HTTPS

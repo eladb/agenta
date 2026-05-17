@@ -5,7 +5,7 @@
 // (they're imported as concrete functions); instead we exercise the
 // bootstrap end-to-end against a real loopback Bun.serve + a fake sandbox
 // WS server. The tests assert:
-//   - AGENTA_REPO_PATH unset -> throws clearly.
+//   - AGENT_HOME unset -> throws clearly.
 //   - First-run path: starts a git server + a tunnel, probes the in-
 //     sandbox port, persists `session.git.ref`, and exec's the clone +
 //     branch setup commands.
@@ -146,7 +146,7 @@ afterEach(async () => {
   await stopAllTunnels();
   globalThis.fetch = ORIG_FETCH;
   delete process.env.AGENTA_DATA_DIR;
-  delete process.env.AGENTA_REPO_PATH;
+  delete process.env.AGENT_HOME;
   delete process.env.SANDBOX_PROVIDER;
   await sandbox.stop();
   rmSync(dataDir, { recursive: true, force: true });
@@ -158,15 +158,15 @@ afterEach(async () => {
 });
 
 describe('ensureRepoBootstrap', () => {
-  test('throws when AGENTA_REPO_PATH is unset', async () => {
-    delete process.env.AGENTA_REPO_PATH;
-    await expect(ensureRepoBootstrap('tk-x')).rejects.toThrow(/AGENTA_REPO_PATH/);
+  test('throws when AGENT_HOME is unset', async () => {
+    delete process.env.AGENT_HOME;
+    await expect(ensureRepoBootstrap('tk-x')).rejects.toThrow(/AGENT_HOME/);
   });
 
   test.skipIf(!hasGit)(
     'first-run path: starts tunnel, probes loopback:6000, exec sequence for clone + checkout',
     async () => {
-      process.env.AGENTA_REPO_PATH = repoPath;
+      process.env.AGENT_HOME = repoPath;
       const tk = 'tk-first';
 
       // /exec sequence inside bootstrap (no pre-existing handle, no fast-path):
@@ -212,7 +212,7 @@ describe('ensureRepoBootstrap', () => {
   test.skipIf(!hasGit)(
     'second call short-circuits to a single `~/.git` probe when handle + ref match',
     async () => {
-      process.env.AGENTA_REPO_PATH = repoPath;
+      process.env.AGENT_HOME = repoPath;
       const tk = 'tk-second';
 
       // First call: same shape as the first-run test.

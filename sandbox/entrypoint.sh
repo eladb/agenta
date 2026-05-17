@@ -4,7 +4,7 @@
 #   1. Install iptables OUTPUT rules (egress block; requires NET_ADMIN cap).
 #   2. Drop privs and exec the server.
 #
-# The botspace (README.md + skills/) is no longer baked into the image —
+# The agent home (README.md + skills/) is no longer baked into the image —
 # the host-side bot bootstraps a per-session git clone over the WS-tunnel
 # transport on the first sandbox-touching tool. So this script just preps
 # capabilities and launches the server; the workspace starts empty until

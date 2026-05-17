@@ -117,7 +117,7 @@ console.log(`  flyctl secrets set -a ${APP} \\`);
 console.log('    SLACK_APP_TOKEN=xapp-... \\');
 console.log('    SLACK_BOT_TOKEN=xoxb-... \\');
 console.log('    MODEL_API_KEY=sk-ant-... \\');
-console.log('    GITHUB_TOKEN=<fine-grained PAT, read+write to BOTSPACE_REPO> \\');
+console.log('    GITHUB_TOKEN=<fine-grained PAT, read+write to AGENT_HOME_REPO> \\');
 console.log(`    FLY_API_TOKEN=<token from: flyctl tokens create deploy -a agenta-sandbox>`);
 console.log('');
 console.log(`Then tail logs:  flyctl logs -a ${APP}`);

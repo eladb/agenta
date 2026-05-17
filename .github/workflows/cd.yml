@@ -77,18 +77,18 @@ jobs:
         if: steps.changed.outputs.code == 'true'
         run: docker build -t agenta-sandbox:latest sandbox/
 
-      # Clone the botspace for the in-process agent's buildSystemPrompt.
-      # Locally this comes from the dev's .env (AGENTA_REPO_PATH=…/agenta-botspace);
+      # Clone the agent home for the in-process agent's buildSystemPrompt.
+      # Locally this comes from the dev's .env (AGENT_HOME=…/agenta-test-home);
       # CI needs an explicit clone.
-      - name: Clone botspace
+      - name: Clone agent home
         if: steps.changed.outputs.code == 'true'
         env:
-          BOTSPACE_TOKEN: ${{ secrets.BOTSPACE_READ_TOKEN }}
+          AGENT_HOME_TOKEN: ${{ secrets.AGENT_HOME_READ_TOKEN }}
         run: |
           git clone --depth 1 \
-            "https://x-access-token:${BOTSPACE_TOKEN}@github.com/eladb/agenta-test-home.git" \
-            "${RUNNER_TEMP}/botspace"
-          echo "AGENTA_REPO_PATH=${RUNNER_TEMP}/botspace" >> "$GITHUB_ENV"
+            "https://x-access-token:${AGENT_HOME_TOKEN}@github.com/eladb/agenta-test-home.git" \
+            "${RUNNER_TEMP}/agent-home"
+          echo "AGENT_HOME=${RUNNER_TEMP}/agent-home" >> "$GITHUB_ENV"
 
       - name: E2E
         if: steps.changed.outputs.code == 'true'
