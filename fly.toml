@@ -22,7 +22,12 @@ primary_region = "iad"
   AGENTA_REPO_PATH = "/data/botspace"
   BOTSPACE_REPO = "eladb/agenta-test-home"
   SANDBOX_PROVIDER = "fly"
-  FLY_APP_NAME = "agenta-sandbox"
+  # Note: FLY_APP_NAME would be overridden by Fly's auto-injection of the
+  # current app's name. entrypoint.sh `export`s the right value (from
+  # AGENTA_SANDBOX_APP, default "agenta-sandbox") so flyProvider addresses
+  # the sandbox app instead of `agenta-bot`. Setting it here would be
+  # silently dead.
+  AGENTA_SANDBOX_APP = "agenta-sandbox"
   FLY_REGION = "iad"
   HEALTH_PORT = "8080"
 

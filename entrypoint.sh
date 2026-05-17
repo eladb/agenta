@@ -29,6 +29,15 @@ set -euo pipefail
 : "${GITHUB_TOKEN:?GITHUB_TOKEN required (set as Fly secret)}"
 : "${BOTSPACE_REPO:?BOTSPACE_REPO required (owner/repo, e.g. eladb/agenta-test-home)}"
 
+# Fly auto-injects FLY_APP_NAME=<current-app-name> (here: agenta-bot) and
+# this overrides the fly.toml [env] value silently. The bot uses
+# FLY_APP_NAME to address the SANDBOX Fly app — that's where per-thread
+# sandboxes live, not this machine. Override here so flyProvider hits
+# /apps/agenta-sandbox/* instead of /apps/agenta-bot/*. Use
+# AGENTA_SANDBOX_APP to make the intent explicit; default to
+# "agenta-sandbox".
+export FLY_APP_NAME="${AGENTA_SANDBOX_APP:-agenta-sandbox}"
+
 DATA_DIR="${AGENTA_DATA_DIR:-/data/agenta}"
 REPO_DIR="${AGENTA_REPO_PATH:-/data/botspace}"
 
