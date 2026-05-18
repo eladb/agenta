@@ -128,14 +128,24 @@ test.if(HAS_DOCKER)(
     expect(shareTool.content).toContain('file_id=');
 
     // The Slack thread now contains a message with an attached file.
-    const replies = await tester.web.conversations.replies({ channel, ts: threadTs });
-    const fileMsg = (replies.messages ?? []).find(
-      (m) =>
-        Array.isArray((m as { files?: unknown[] }).files) &&
-        (m as { files: unknown[] }).files.length > 0,
-    );
+    // Slack's files.uploadV2 has eventual consistency vs conversations.replies —
+    // the upload can succeed (tool_result reports file_id=…) before the
+    // attached message is visible in the thread listing. Poll briefly
+    // instead of one-shot fetching.
+    let fileMsg: { files?: Array<{ name?: string; mimetype?: string }> } | undefined;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const replies = await tester.web.conversations.replies({ channel, ts: threadTs });
+      fileMsg = (replies.messages ?? []).find(
+        (m) =>
+          Array.isArray((m as { files?: unknown[] }).files) &&
+          (m as { files: unknown[] }).files.length > 0,
+      ) as { files?: Array<{ name?: string; mimetype?: string }> } | undefined;
+      if (fileMsg) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
     expect(fileMsg).toBeDefined();
-    const fileInfo = (fileMsg as { files: Array<{ name?: string; mimetype?: string }> }).files[0];
+    const fileInfo = fileMsg?.files?.[0];
     expect(fileInfo?.name).toBe('note.txt');
 
     // JSONL has an assistant message event with the files payload, and a

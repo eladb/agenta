@@ -361,9 +361,14 @@ async function remove(threadKey: string): Promise<void> {
   // Resolve the volume name from the persisted record before clearing it.
   // Falls back to the derived name (volumeName(threadKey)) so a /delete on
   // a thread whose record was written before this change still nukes its
-  // legacy volume.
+  // legacy volume — AND so we still nuke the volume when the session.json
+  // has already been deleted by a racing deleteThreadData call (handler.ts
+  // runs deleteThreadData and removeContainer in Promise.all).
   const persisted = await loadSandbox(threadKey);
-  const vol = persisted?.provider === 'docker' ? (persisted.volume_name ?? undefined) : undefined;
+  const vol =
+    persisted?.provider === 'docker'
+      ? (persisted.volume_name ?? volumeName(threadKey))
+      : volumeName(threadKey);
   tokens.delete(threadKey);
   await clearSandbox(threadKey).catch((err) => {
     log.warn('sandbox', `remove: clearSandbox(${threadKey}) failed: ${(err as Error).message}`);

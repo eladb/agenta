@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
+import { teardownSession } from '../../src/git/bootstrap';
 import { acquire, type Lock } from '../../src/lockfile';
 import { type CallModel, createCallModel, type Message } from '../../src/model/gateway';
 import { withGolden } from '../../src/model/golden';
@@ -304,9 +305,14 @@ export async function deleteThread(
   } catch {
     // ignore
   }
-  // Also remove the sandbox container created on first mention (best-effort —
-  // a no-op if docker isn't running or the container was never created).
-  await removeContainer(makeThreadKey(channel, threadTs)).catch(() => {});
+  // Tear down per-session git state (git server + WS tunnel) BEFORE the
+  // container goes away — otherwise the tunnel's reconnect loop hammers
+  // a dead container forever, polluting logs and stealing CPU from the
+  // next test in the same file. Mirror the production /delete order
+  // (handler.ts: teardownSession + removeContainer).
+  const tk = makeThreadKey(channel, threadTs);
+  await teardownSession(tk).catch(() => {});
+  await removeContainer(tk).catch(() => {});
 }
 
 export async function shutdown(agent: Agent, tester: Tester): Promise<void> {
