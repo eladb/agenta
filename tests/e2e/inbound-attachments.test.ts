@@ -109,7 +109,29 @@ test.if(HAS_DOCKER)(
     const fileContents = `inbound-attach-test ${Date.now()}\nline two\n`;
     const filename = 'inbound.txt';
 
-    // 1) Upload the file as the root of a new thread, with a mention.
+    // 1) Pre-script the replies BEFORE upload. files.uploadV2 fires the
+    //    mention immediately and the bot's runTurn calls the model before
+    //    the test can push scripts otherwise (race: `scriptedCallModel`
+    //    returns "unscripted" → test times out waiting for "done").
+    //    The bash command uses a glob since fileId isn't known yet —
+    //    attachments/<fileId>-<filename> is the only file in the dir.
+    scriptReply({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_cat',
+          type: 'function',
+          function: {
+            name: 'bash',
+            arguments: JSON.stringify({ command: `cat attachments/*-${filename}` }),
+          },
+        },
+      ],
+    });
+    scriptReply({ role: 'assistant', content: 'done' });
+
+    // 2) Upload the file as the root of a new thread, with a mention.
     //    files.uploadV2 with no thread_ts creates a new top-level message.
     const upload = await tester.web.files.uploadV2({
       channel_id: channel,
@@ -155,25 +177,12 @@ test.if(HAS_DOCKER)(
     if (!threadTs) throw new Error('threadTs not resolved');
     createdThreads.push(threadTs);
 
-    // 2) Script the model: a bash `cat` of the synced file, then "done".
+    // 3) Compute the path the bot will inject into the user message and
+    //    use it in the assertion below. This is the same shape used by
+    //    `attachments.ts` host-side.
     const expectedPath = `attachments/${fileId}-${filename}`;
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_cat',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({ command: `cat ${expectedPath}` }),
-          },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'done' });
 
-    // 3) Wait for final reply + the two model calls (initial + post-tool).
+    // 4) Wait for final reply + the two model calls (initial + post-tool).
     await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'done', {
       timeoutMs: 90_000,
     });

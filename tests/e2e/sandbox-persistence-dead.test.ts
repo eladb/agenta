@@ -132,8 +132,11 @@ test.if(HAS_DOCKER)(
 
     // Simulate restart + force-remove the container behind the bot's back.
     // The named volume is NOT removed (docker rm -fv removes anonymous
-    // volumes only; named volumes survive).
+    // volumes only; named volumes survive). Release the per-bot lockfile
+    // too — `startAgent` below calls `acquire('agent')`, which would
+    // otherwise refuse because the file still names THIS pid.
     await agent.socket.disconnect();
+    agent.lock.release();
     const { _resetImageReadyCache } = await import('../../src/sandbox/docker');
     _resetImageReadyCache();
     const { _resetSyncedAttachments } = await import('../../src/sandbox');

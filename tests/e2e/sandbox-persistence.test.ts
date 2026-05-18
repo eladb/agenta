@@ -141,8 +141,11 @@ test.if(HAS_DOCKER)(
     // provider's in-memory state (the new process would have done both
     // implicitly). We re-import the module fresh? Not necessary — the
     // _resetImageReadyCache test helper clears `tokens` which is what
-    // tracks the in-memory route.
+    // tracks the in-memory route. Release the per-bot lockfile too —
+    // `startAgent` below calls `acquire('agent')`, which would otherwise
+    // refuse because the file still names THIS pid.
     await agent.socket.disconnect();
+    agent.lock.release();
     const { _resetImageReadyCache } = await import('../../src/sandbox/docker');
     _resetImageReadyCache();
     // _resetSyncedAttachments also resets the sandbox/index per-thread cache
