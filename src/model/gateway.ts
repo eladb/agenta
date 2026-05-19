@@ -33,7 +33,13 @@ export type CallOptions = { tools?: ToolDef[]; signal?: AbortSignal };
 export type CallModel = (messages: Message[], opts?: CallOptions) => Promise<AssistantMessage>;
 
 export type ModelConfig = {
-  apiKey: string;
+  // Either `apiKey` (literal) or `apiKeyEnv` (env var name read at every
+  // call). The env-name form mirrors how `home.auth_env` works for git
+  // PATs/PEMs — the value is never persisted into session.json, only the
+  // name is, and the secret is resolved lazily so an unset env at construct
+  // time can still recover if the secret is set later.
+  apiKey?: string;
+  apiKeyEnv?: string;
   baseUrl: string;
   model: string;
   maxTokens?: number;
@@ -41,6 +47,14 @@ export type ModelConfig = {
 
 export function createCallModel(config: ModelConfig): CallModel {
   return async (messages, opts) => {
+    const apiKey = config.apiKey ?? (config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined);
+    if (!apiKey) {
+      throw new Error(
+        config.apiKeyEnv
+          ? `model api key env ${config.apiKeyEnv} is unset at call time`
+          : 'model api key is unset',
+      );
+    }
     const body: Record<string, unknown> = {
       model: config.model,
       messages,
@@ -53,7 +67,7 @@ export function createCallModel(config: ModelConfig): CallModel {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
         'HTTP-Referer': 'https://github.com/eladb/agenta',
         'X-Title': 'agenta',
       },

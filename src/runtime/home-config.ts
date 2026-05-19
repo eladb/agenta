@@ -26,9 +26,21 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// Per-channel model/provider triplet (#128). All three fields are required
+// when the `model` block is present in homes.json — partial overrides aren't
+// supported (silently inheriting just `base_url` from env would be a footgun).
+// Only the env var NAME is persisted; the secret VALUE is read at use time
+// via `process.env[api_key_env]`, mirroring how `auth_env` works for git PATs.
+export type ModelTriplet = {
+  name: string;
+  base_url: string;
+  api_key_env: string;
+};
+
 export type HomeConfig = {
   remote: string;
   auth_env?: string;
+  model?: ModelTriplet;
 };
 
 export type Transport = 'tunneled-file' | 'tunneled-mirror' | 'direct';
@@ -202,10 +214,32 @@ export function resolveTransport(home: HomeConfig): ResolvedHome {
 //   - ssh / git@ → auth_env REQUIRED (PEM-formatted private key), and
 //     process.env[auth_env] must be set. The PEM itself is read at use
 //     time, not here, so config-reload survives a transient unset.
+// Validate the optional `model` block (#128). All three keys required when
+// present; the referenced env var must be set at boot. Same shape as the
+// `auth_env` check above.
+function validateModel(name: string, model: unknown): void {
+  if (model === undefined) return;
+  if (typeof model !== 'object' || model === null || Array.isArray(model)) {
+    throw new Error(`[${name}] "model" must be an object if present`);
+  }
+  const m = model as Record<string, unknown>;
+  for (const key of ['name', 'base_url', 'api_key_env'] as const) {
+    if (typeof m[key] !== 'string' || (m[key] as string).length === 0) {
+      throw new Error(`[${name}] model.${key} required (all three of name/base_url/api_key_env must be set together)`);
+    }
+  }
+  const envName = m.api_key_env as string;
+  const v = process.env[envName];
+  if (!v || v.length === 0) {
+    throw new Error(`[${name}] model.api_key_env ${envName} is not set (or empty) in process env`);
+  }
+}
+
 function validateEntry(name: string, home: HomeConfig): void {
   if (typeof home.remote !== 'string' || home.remote.length === 0) {
     throw new Error(`[${name}] missing required string "remote"`);
   }
+  validateModel(name, home.model);
   if (isSshStyle(home.remote)) {
     if (typeof home.auth_env !== 'string' || home.auth_env.length === 0) {
       throw new Error(`[${name}] auth_env required for ssh:// / git@ URLs`);
@@ -291,6 +325,24 @@ export function resolveHome(channelId: string, path?: string): HomeConfig {
   const specific = file.channels[channelId];
   if (specific) return { ...specific };
   return { ...file.default };
+}
+
+// Resolve the per-thread model triplet (#128). Channel-specific `model`
+// block wins, else the default's, else the caller-supplied fallback
+// (typically env-derived in production, undefined in tests with a fully-
+// configured homes.json). Returns undefined if no source provides a triplet
+// — callers must surface that as a boot/config error since the agent can't
+// run without one.
+export function resolveModel(
+  channelId: string,
+  fallback: ModelTriplet | undefined,
+  path?: string,
+): ModelTriplet | undefined {
+  const file = loadHomesConfig(path);
+  const specific = file.channels[channelId];
+  if (specific?.model) return { ...specific.model };
+  if (file.default.model) return { ...file.default.model };
+  return fallback ? { ...fallback } : undefined;
 }
 
 // For tests — drop the module-level cache so a new AGENT_HOMES_CONFIG

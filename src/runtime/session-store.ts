@@ -3,7 +3,7 @@ import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from '../log';
 import { dataRoot, ensureThreadDir, threadDir } from '../persistence/store';
-import type { HomeConfig } from './home-config';
+import type { HomeConfig, ModelTriplet } from './home-config';
 
 // Provider-tagged routing info for a thread's sandbox. Persisted into
 // session.json so per-thread sandboxes survive a bot restart: on the next
@@ -73,6 +73,12 @@ export type SessionState = {
   sandbox?: SandboxRecord;
   git?: GitRecord;
   home?: HomeConfig;
+  // Frozen per-thread model triplet (#128). Snapshotted from
+  // `resolveModel(channelId, envFallback)` on first mention so README/skills
+  // edits and homes.json mid-thread swaps don't change the active model
+  // mid-conversation. Only the env-var NAME is stored; the secret value is
+  // read at every call via `process.env[api_key_env]`.
+  model?: ModelTriplet;
 };
 
 const RUNTIME_FILENAME = 'session.json';
@@ -126,6 +132,7 @@ export async function clearSession(threadKey: string): Promise<void> {
     ...(existing?.sandbox !== undefined ? { sandbox: existing.sandbox } : {}),
     ...(existing?.git !== undefined ? { git: existing.git } : {}),
     ...(existing?.home !== undefined ? { home: existing.home } : {}),
+    ...(existing?.model !== undefined ? { model: existing.model } : {}),
   });
 }
 
@@ -206,6 +213,33 @@ export async function setHome(threadKey: string, home: HomeConfig | undefined): 
     ...(home !== undefined ? { home } : {}),
   };
   if (home === undefined) delete next.home;
+  await writeSession(threadKey, next);
+}
+
+// Atomic read-modify-write of the `model` triplet (#128). Symmetric with
+// setHome — called once on first mention from `handler.ts`. The frozen
+// snapshot is just the triplet (name + base_url + api_key_env); the API key
+// value is read at use time, never persisted here.
+export async function setModel(
+  threadKey: string,
+  model: ModelTriplet | undefined,
+): Promise<void> {
+  const existing = await readSession(threadKey);
+  if (!existing) {
+    if (model === undefined) return;
+    await writeSession(threadKey, {
+      status: 'idle',
+      updated_at: new Date().toISOString(),
+      model,
+    });
+    return;
+  }
+  const next: SessionState = {
+    ...existing,
+    updated_at: new Date().toISOString(),
+    ...(model !== undefined ? { model } : {}),
+  };
+  if (model === undefined) delete next.model;
   await writeSession(threadKey, next);
 }
 

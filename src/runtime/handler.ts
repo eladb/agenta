@@ -1,7 +1,7 @@
 import type { WebClient } from '@slack/web-api';
 import { refFor, teardownSession } from '../git/bootstrap';
 import { log } from '../log';
-import type { CallModel } from '../model/gateway';
+import { type CallModel, createCallModel } from '../model/gateway';
 import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attachments';
 import { backfillIfNew } from '../persistence/backfill';
 import { newEventId, nowIso, record } from '../persistence/events';
@@ -13,23 +13,37 @@ import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
-import { type HomeConfig, resolveHome, resolveTransport } from './home-config';
+import {
+  type HomeConfig,
+  type ModelTriplet,
+  resolveHome,
+  resolveModel,
+  resolveTransport,
+} from './home-config';
 import { refreshHomeMirror } from './home-refresh';
 import { signalStop, startOrQueue } from './session';
-import { readSession, writeSession } from './session-store';
+import { readSession, setModel, writeSession } from './session-store';
 import { threadKey } from './thread';
 
 const isDuplicate = createDedupe();
 
+// `fallbackModel` is the env-derived triplet (MODEL_NAME / MODEL_BASE_URL /
+// MODEL_API_KEY) — used when neither the channel's nor the default home's
+// `model` block is present. Existing single-model deploys carry this fallback
+// only; per-channel overrides are additive (#128).
 export function makeEventHandler(
   web: WebClient,
   botToken: string,
   botUserId: string,
-  callModel: CallModel,
+  fallbackModel: ModelTriplet | undefined,
+  // Test seam: e2e + unit tests inject a stubbed callModel directly so the
+  // triplet→fetch path is bypassed. Production never passes this; the handler
+  // builds the real callModel from the per-thread frozen triplet.
+  callModelOverride?: CallModel,
 ): (e: IncomingEvent) => Promise<void> {
   return async (e) => {
     if (e.kind === 'message') {
-      return handleMessage(web, botToken, botUserId, callModel, e);
+      return handleMessage(web, botToken, botUserId, fallbackModel, callModelOverride, e);
     }
     if (e.kind === 'edit') return handleEdit(e);
     if (e.kind === 'delete') return handleDelete(e);
@@ -40,7 +54,8 @@ async function handleMessage(
   web: WebClient,
   botToken: string,
   botUserId: string,
-  callModel: CallModel,
+  fallbackModel: ModelTriplet | undefined,
+  callModelOverride: CallModel | undefined,
   e: NormalMessage,
 ): Promise<void> {
   const key = dedupeKey({
@@ -119,7 +134,23 @@ async function handleMessage(
   // config/homes.json change in the meantime. `clearSession` writes idle
   // (preserving these) so the file is there across turns; only `/delete`
   // removes it.
-  const prompt = await resolveSystemPrompt(web, tk, e.channel, e.user);
+  const { prompt, model } = await resolveSystemPromptAndModel(
+    web,
+    tk,
+    e.channel,
+    e.user,
+    fallbackModel,
+  );
+  // Build the per-thread callModel from the frozen triplet (env-name only —
+  // the secret value is read at every call inside createCallModel). Tests
+  // pass `callModelOverride` to bypass this and inject a stub.
+  const callModel: CallModel =
+    callModelOverride ??
+    createCallModel({
+      apiKeyEnv: model.api_key_env,
+      baseUrl: model.base_url,
+      model: model.name,
+    });
 
   // Sandbox warmup: kick off provisioning in the background as soon as a
   // turn is committed. The foreground tool loop in turn.ts awaits the same
@@ -141,20 +172,47 @@ async function handleMessage(
   });
 }
 
-async function resolveSystemPrompt(
+async function resolveSystemPromptAndModel(
   web: WebClient,
   tk: string,
   channelId: string,
   userId: string,
-): Promise<string> {
+  fallbackModel: ModelTriplet | undefined,
+): Promise<{ prompt: string; model: ModelTriplet }> {
   const existing = await readSession(tk);
-  if (existing?.system_prompt !== undefined) return existing.system_prompt;
+  if (existing?.system_prompt !== undefined && existing.model !== undefined) {
+    // Both already frozen — reuse them. Same frozen-per-thread invariant as
+    // the prompt: mid-thread model swaps would be surprising.
+    return { prompt: existing.system_prompt, model: existing.model };
+  }
+  if (existing?.system_prompt !== undefined && existing.model === undefined) {
+    // Threads created before #128 don't have a frozen model — resolve fresh
+    // from current config + env fallback and persist alongside the existing
+    // prompt. Mirrors how `git`/`home` got backfilled in earlier migrations.
+    const resolved = resolveModel(channelId, fallbackModel);
+    if (!resolved) {
+      throw new Error(
+        `[${tk}] cannot resolve model: no per-channel/default in homes.json and no env fallback (set MODEL_API_KEY + MODEL_BASE_URL + MODEL_NAME, or add a model block to homes.json)`,
+      );
+    }
+    await setModel(tk, resolved);
+    return { prompt: existing.system_prompt, model: resolved };
+  }
   // Resolve + freeze the per-channel home (#87) on first mention. The
   // snapshot is just the HomeConfig (remote + auth_env); slug/transport/
   // paths recompute on read via `resolveTransport` so future config edits
   // only affect new threads. Tests bypass the config file via the
   // AGENT_HOME_DIR env override (see `resolveAgentHomeForPrompt`).
   const home = resolveHome(channelId);
+  // Resolve the model triplet alongside the home so a misconfigured channel
+  // fails loudly on first mention, not on the first model call. Channel
+  // override > default home's model > env fallback (#128).
+  const model = resolveModel(channelId, fallbackModel);
+  if (!model) {
+    throw new Error(
+      `[${tk}] cannot resolve model: no per-channel/default in homes.json and no env fallback (set MODEL_API_KEY + MODEL_BASE_URL + MODEL_NAME, or add a model block to homes.json)`,
+    );
+  }
   // Refresh the host-side mirror before composing the prompt so a fresh
   // thread picks up upstream README.md / skills/ changes since the bot
   // last booted (#120). Non-fatal: errors are logged and we fall through
@@ -180,8 +238,9 @@ async function resolveSystemPrompt(
     system_prompt: composed,
     git: creator ? { ref: refFor(tk), creator } : undefined,
     home,
+    model,
   });
-  return composed;
+  return { prompt: composed, model };
 }
 
 // Test override hatch: `AGENT_HOME_DIR` short-circuits the configured

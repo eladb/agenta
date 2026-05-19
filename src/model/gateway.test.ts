@@ -87,6 +87,42 @@ describe('createCallModel', () => {
     await expect(call([])).rejects.toThrow(/model HTTP 401/);
   });
 
+  it('reads apiKeyEnv at call time (#128 per-thread triplet path)', async () => {
+    process.env.GATEWAY_TEST_KEY = 'env-key-v1';
+    stubFetch({
+      status: 200,
+      body: { choices: [{ message: { role: 'assistant', content: 'ok' } }] },
+    });
+    const call = createCallModel({
+      apiKeyEnv: 'GATEWAY_TEST_KEY',
+      baseUrl: 'https://x.test/v1',
+      model: 'm',
+    });
+    // First call uses the initial env value.
+    await call([{ role: 'user', content: 'hi' }]);
+    expect((lastCall?.init?.headers as Record<string, string>).Authorization).toBe(
+      'Bearer env-key-v1',
+    );
+    // Rotate the env and re-call — the gateway must pick up the new value
+    // (mirrors how `home.auth_env` lazy-reads PATs/PEMs at use time).
+    process.env.GATEWAY_TEST_KEY = 'env-key-v2';
+    await call([{ role: 'user', content: 'again' }]);
+    expect((lastCall?.init?.headers as Record<string, string>).Authorization).toBe(
+      'Bearer env-key-v2',
+    );
+    delete process.env.GATEWAY_TEST_KEY;
+  });
+
+  it('throws when apiKeyEnv references an unset env var at call time', async () => {
+    delete process.env.GATEWAY_TEST_KEY_MISSING;
+    const call = createCallModel({
+      apiKeyEnv: 'GATEWAY_TEST_KEY_MISSING',
+      baseUrl: 'https://x.test/v1',
+      model: 'm',
+    });
+    await expect(call([])).rejects.toThrow(/GATEWAY_TEST_KEY_MISSING is unset/);
+  });
+
   it('throws if the response has no content and no tool_calls', async () => {
     stubFetch({
       status: 200,

@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { _resetCacheForTests, loadHomesConfig, resolveHome, resolveTransport } from './home-config';
+import {
+  _resetCacheForTests,
+  loadHomesConfig,
+  resolveHome,
+  resolveModel,
+  resolveTransport,
+} from './home-config';
 
 let tmp: string;
 let configPath: string;
@@ -27,7 +33,14 @@ function writeConfig(value: unknown): void {
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'agenta-homes-cfg-'));
   configPath = join(tmp, 'homes.json');
-  snapEnv('AGENT_HOMES_CONFIG', 'AGENT_HOMES_ROOT', 'GITHUB_TOKEN', 'TEST_TOKEN_X');
+  snapEnv(
+    'AGENT_HOMES_CONFIG',
+    'AGENT_HOMES_ROOT',
+    'GITHUB_TOKEN',
+    'TEST_TOKEN_X',
+    'TEST_MODEL_KEY',
+    'TEST_MODEL_KEY_2',
+  );
   process.env.AGENT_HOMES_CONFIG = configPath;
   delete process.env.AGENT_HOMES_ROOT;
   _resetCacheForTests();
@@ -192,6 +205,183 @@ describe('resolveHome', () => {
     (a as { remote: string }).remote = 'mutated';
     const b = resolveHome('CB');
     expect(b.remote).toBe('file:///x');
+  });
+});
+
+describe('model block (#128)', () => {
+  test('valid model block on default loads', () => {
+    process.env.TEST_MODEL_KEY = 'sk-test';
+    writeConfig({
+      default: {
+        remote: 'file:///x',
+        model: {
+          name: 'claude-opus-4-7',
+          base_url: 'https://api.anthropic.com/v1',
+          api_key_env: 'TEST_MODEL_KEY',
+        },
+      },
+      channels: {},
+    });
+    const f = loadHomesConfig();
+    expect(f.default.model?.name).toBe('claude-opus-4-7');
+    expect(f.default.model?.api_key_env).toBe('TEST_MODEL_KEY');
+  });
+
+  test('partial model block throws at boot', () => {
+    process.env.TEST_MODEL_KEY = 'sk-test';
+    writeConfig({
+      default: {
+        remote: 'file:///x',
+        model: {
+          name: 'claude-opus-4-7',
+          api_key_env: 'TEST_MODEL_KEY',
+          // base_url missing
+        },
+      },
+      channels: {},
+    });
+    expect(() => loadHomesConfig()).toThrow(/model\.base_url required/);
+  });
+
+  test('model.api_key_env pointing at unset env var throws at boot', () => {
+    delete process.env.TEST_MODEL_KEY;
+    writeConfig({
+      default: {
+        remote: 'file:///x',
+        model: {
+          name: 'm',
+          base_url: 'https://example.invalid/v1',
+          api_key_env: 'TEST_MODEL_KEY',
+        },
+      },
+      channels: {},
+    });
+    expect(() => loadHomesConfig()).toThrow(/TEST_MODEL_KEY is not set/);
+  });
+
+  test('non-object model block throws at boot', () => {
+    writeConfig({
+      default: { remote: 'file:///x', model: 'not-an-object' },
+      channels: {},
+    });
+    expect(() => loadHomesConfig()).toThrow(/"model" must be an object/);
+  });
+
+  test('channel-level model block is validated too', () => {
+    process.env.TEST_MODEL_KEY = 'sk-test';
+    delete process.env.TEST_MODEL_KEY_2;
+    writeConfig({
+      default: {
+        remote: 'file:///x',
+        model: {
+          name: 'm',
+          base_url: 'https://example.invalid/v1',
+          api_key_env: 'TEST_MODEL_KEY',
+        },
+      },
+      channels: {
+        C123: {
+          remote: 'file:///y',
+          model: {
+            name: 'm2',
+            base_url: 'https://example.invalid/v2',
+            api_key_env: 'TEST_MODEL_KEY_2',
+          },
+        },
+      },
+    });
+    expect(() => loadHomesConfig()).toThrow(/\[C123\].*TEST_MODEL_KEY_2 is not set/);
+  });
+});
+
+describe('resolveModel', () => {
+  test('channel-specific model wins over default', () => {
+    process.env.TEST_MODEL_KEY = 'sk-a';
+    process.env.TEST_MODEL_KEY_2 = 'sk-b';
+    writeConfig({
+      default: {
+        remote: 'file:///x',
+        model: {
+          name: 'default-model',
+          base_url: 'https://example.invalid/default',
+          api_key_env: 'TEST_MODEL_KEY',
+        },
+      },
+      channels: {
+        C123: {
+          remote: 'file:///y',
+          model: {
+            name: 'channel-model',
+            base_url: 'https://example.invalid/channel',
+            api_key_env: 'TEST_MODEL_KEY_2',
+          },
+        },
+      },
+    });
+    const m = resolveModel('C123', undefined);
+    expect(m?.name).toBe('channel-model');
+    expect(m?.api_key_env).toBe('TEST_MODEL_KEY_2');
+  });
+
+  test('channel without model falls back to default model', () => {
+    process.env.TEST_MODEL_KEY = 'sk-a';
+    writeConfig({
+      default: {
+        remote: 'file:///x',
+        model: {
+          name: 'default-model',
+          base_url: 'https://example.invalid/default',
+          api_key_env: 'TEST_MODEL_KEY',
+        },
+      },
+      channels: {
+        C123: { remote: 'file:///y' },
+      },
+    });
+    const m = resolveModel('C123', undefined);
+    expect(m?.name).toBe('default-model');
+  });
+
+  test('no model anywhere → env fallback wins (current behavior)', () => {
+    writeConfig({
+      default: { remote: 'file:///x' },
+      channels: {},
+    });
+    const fallback = {
+      name: 'env-model',
+      base_url: 'https://env.invalid/v1',
+      api_key_env: 'MODEL_API_KEY',
+    };
+    const m = resolveModel('C123', fallback);
+    expect(m?.name).toBe('env-model');
+    expect(m?.api_key_env).toBe('MODEL_API_KEY');
+  });
+
+  test('no model and no fallback → undefined (caller must surface)', () => {
+    writeConfig({
+      default: { remote: 'file:///x' },
+      channels: {},
+    });
+    expect(resolveModel('C123', undefined)).toBeUndefined();
+  });
+
+  test('returns a fresh snapshot (mutations do not leak back)', () => {
+    process.env.TEST_MODEL_KEY = 'sk-a';
+    writeConfig({
+      default: {
+        remote: 'file:///x',
+        model: {
+          name: 'm',
+          base_url: 'https://example.invalid/v1',
+          api_key_env: 'TEST_MODEL_KEY',
+        },
+      },
+      channels: {},
+    });
+    const a = resolveModel('CA', undefined);
+    if (a) (a as { name: string }).name = 'mutated';
+    const b = resolveModel('CB', undefined);
+    expect(b?.name).toBe('m');
   });
 });
 

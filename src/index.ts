@@ -1,8 +1,8 @@
 import { teardownAllSessions } from './git/bootstrap';
 import { acquire } from './lockfile';
 import { log } from './log';
-import { createCallModel } from './model/gateway';
 import { makeEventHandler } from './runtime/handler';
+import type { ModelTriplet } from './runtime/home-config';
 import { recoverInterruptedSessions } from './runtime/recovery';
 import { reapOrphanSandboxes } from './sandbox';
 import { connect } from './slack/connect';
@@ -21,9 +21,21 @@ if (!appToken || !botToken) {
   log.error('boot', 'SLACK_APP_TOKEN and SLACK_BOT_TOKEN required (see .env.example)');
   process.exit(1);
 }
-if (!modelApiKey) {
-  log.error('boot', 'MODEL_API_KEY (or ANTHROPIC_API_KEY) required (see .env.example)');
-  process.exit(1);
+
+// Env-derived model fallback (#128). Used when a thread's channel doesn't
+// have a per-channel `model` block in homes.json AND the default home doesn't
+// either. Existing single-model deploys carry this fallback only — keeping
+// it works without homes.json changes. The api_key_env name we pin here
+// (`MODEL_API_KEY` or `ANTHROPIC_API_KEY`) is what gets frozen into
+// session.json on first mention; the secret value is read at every call.
+let fallbackModel: ModelTriplet | undefined;
+if (modelApiKey) {
+  const apiKeyEnv = process.env.MODEL_API_KEY ? 'MODEL_API_KEY' : 'ANTHROPIC_API_KEY';
+  fallbackModel = {
+    name: process.env.MODEL_NAME ?? 'claude-sonnet-4-6',
+    base_url: process.env.MODEL_BASE_URL ?? 'https://api.anthropic.com/v1',
+    api_key_env: apiKeyEnv,
+  };
 }
 
 // Single-process lock: two agent instances using the same bot token would
@@ -36,12 +48,6 @@ try {
   log.error('boot', (err as Error).message);
   process.exit(1);
 }
-
-const callModel = createCallModel({
-  apiKey: modelApiKey,
-  baseUrl: process.env.MODEL_BASE_URL ?? 'https://api.anthropic.com/v1',
-  model: process.env.MODEL_NAME ?? 'claude-sonnet-4-6',
-});
 
 // The system prompt is no longer constructed here — the handler composes it
 // per thread from the agent home dir on the first mention (README.md + skills),
@@ -56,7 +62,7 @@ log.info('boot', `connected as bot user ${botUserId}`);
 // network issues — we don't want them to delay the bot from responding
 // to incoming mentions. Each runs as fire-and-forget; failures log a
 // warning and don't take the bot down.
-listen(socket, botUserId, makeEventHandler(web, botToken, botUserId, callModel));
+listen(socket, botUserId, makeEventHandler(web, botToken, botUserId, fallbackModel));
 listenInteractive(socket);
 log.info('boot', 'listening for events');
 
