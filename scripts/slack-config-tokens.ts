@@ -15,11 +15,18 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+export type AppCacheEntry = { app_id: string; install_url: string };
+
+// Cache is a flat JSON object. Well-known top-level keys are listed here;
+// in addition, any other string key maps to an AppCacheEntry — the
+// setup-slack-apps.ts script keys each app it creates by name, so e.g.
+// `agenta`, `agenta-dev`, etc. all live alongside `tester` here.
 export type Cache = {
-  agent?: { app_id: string; install_url: string };
-  tester?: { app_id: string; install_url: string };
+  agent?: AppCacheEntry;
+  tester?: AppCacheEntry;
   config_access_token?: string;
   config_refresh_token?: string;
+  [appName: string]: AppCacheEntry | string | undefined;
 };
 
 const ROOT = join(import.meta.dir, '..');

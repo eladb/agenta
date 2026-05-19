@@ -191,6 +191,7 @@ tests/golden/
 - Agent app: **A0B2WL8UYAZ** (bot user `U0B2WQUHK6Z`, display name `agenta`) — production bot, runs on Fly.
 - Tester app: **A0B33L7CVRA** (bot user used by e2e tests, `agenta-tester`) — drives both the e2e suite and the post-deploy canary.
 - CI app: **A0B49GHNG22** (`agenta-ci`, per PR #66) — used by the e2e step in `.github/workflows/cd.yml`, so prod's Socket Mode is untouched during CI.
+- Dev app: **`agenta-dev`** (#138) — a fourth agent variant used for local iteration on the shared `claude-agents` host: `bun run dev` runs the bot against `.env.dev`, `bun run e2e:dev` runs the e2e suite against it. Same scopes as prod (same `slack-manifests/agent.json`). Bootstrap once with `SLACK_CONFIG_ACCESS_TOKEN=… SLACK_CONFIG_REFRESH_TOKEN=… bun run setup --app-name agenta-dev`; that creates the Slack app via `apps.manifest.create`, pauses for the manual `xapp-` App-Level token step (UI-only), and writes `.env.dev` with `SLACK_APP_TOKEN` + `SLACK_BOT_TOKEN` + the (shared) `TEST_APP_TOKEN` / `TEST_BOT_TOKEN` / `TEST_CHANNEL_ID`. Cached under key `agenta-dev` in `.slack-apps.json`. App ID + bot user ID land in this section after the first bootstrap. The host's `'agent'` lockfile means only one of `bun start` / `bun run dev` / `bun run e2e:dev` can run at a time on this host — that's intentional, matches the single-tenant assumption.
 - Test channel: `C0B307LP274`
 - The canary step in `cd.yml` uses the existing test channel via the `CANARY_CHANNEL_ID` secret (production agent + tester both invited). e2e runs use a fresh `#agenta-e2e-<stamp>` channel created per run by `scripts/run-e2e.ts`.
 
@@ -236,7 +237,7 @@ For CD (`.github/workflows/cd.yml`) — set as GitHub Actions repo secrets, not 
 - `SLACK_BOT_TOKEN` — production agent bot token (canary uses it only to resolve the prod agent's user id; no Socket Mode client connects to it)
 - `CANARY_CHANNEL_ID` — channel both the production agent and the tester are invited to
 
-`.env` is gitignored. `.slack-apps.json` (app-id cache used by the setup script) is also gitignored.
+`.env` is gitignored. `.env.dev` (dev-bot tokens; #138) is gitignored. `.slack-apps.json` (app-id cache used by the setup script) is also gitignored.
 
 ## Running things
 
@@ -248,8 +249,10 @@ bun run canary   # scripts/canary.ts: 3-step smoke test against the running prod
 bun start        # production agent (acquires the 'agent' lockfile; second invocation errors with the running pid)
 bun run lint     # biome check
 bun run format   # biome format --write
-bun run setup    # interactive Slack app creation (apps.manifest.create)
+bun run setup    # interactive Slack app creation (apps.manifest.create) — creates agenta (prod) by default; pass --app-name agenta-dev for the dev variant (writes .env.dev instead of .env)
 bun run deploy   # scripts/deploy-bot-fly.ts: provisions agenta-bot app + agenta_data volume in iad, builds + rolls the bot image
+bun run dev      # like `bun start` but loads `.env.dev` (dev-bot for local iteration on claude-agents; #138)
+bun run e2e:dev  # like `bun run e2e` but loads `.env.dev` (local e2e against agenta-dev; closes the CD round-trip loop)
 # scripts/update-manifest.ts <agent|tester> — push a manifest change to Slack via apps.manifest.update (needs SLACK_CONFIG_ACCESS_TOKEN)
 # scripts/deploy-sandbox-fly.ts — builds + pushes the sandbox image to registry.fly.io/agenta-sandbox:latest (run when sandbox/ changes)
 ```
