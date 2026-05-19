@@ -1,3 +1,5 @@
+import { log } from '../log';
+
 export type TextPart = { type: 'text'; text: string };
 export type ImageUrlPart = { type: 'image_url'; image_url: { url: string } };
 export type ContentPart = TextPart | ImageUrlPart;
@@ -61,6 +63,7 @@ export function createCallModel(config: ModelConfig): CallModel {
       max_tokens: config.maxTokens ?? 4096,
     };
     if (opts?.tools && opts.tools.length > 0) body.tools = opts.tools;
+    log.info('gateway', `→ ${config.model} via ${config.baseUrl}`);
     // OpenRouter recommends these headers (used for ranking/rate-limiting on
     // their free tier). Harmless against Anthropic's native compat endpoint.
     const res = await fetch(`${config.baseUrl}/chat/completions`, {
@@ -77,11 +80,20 @@ export function createCallModel(config: ModelConfig): CallModel {
     if (!res.ok) {
       throw new Error(`model HTTP ${res.status}: ${await res.text()}`);
     }
-    const json = (await res.json()) as {
+    const responseText = await res.text();
+    let json: {
       choices?: Array<{
         message?: { content?: string | null; tool_calls?: ToolCall[] };
       }>;
     };
+    try {
+      json = JSON.parse(responseText);
+    } catch (err) {
+      const preview = responseText.length > 200 ? `${responseText.slice(0, 200)}…` : responseText;
+      throw new Error(
+        `model JSON parse failed (${(err as Error).message}); body preview: ${JSON.stringify(preview)}`,
+      );
+    }
     const msg = json.choices?.[0]?.message;
     if (!msg) throw new Error('model returned no message');
     const content = msg.content ?? null;
