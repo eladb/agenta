@@ -7,6 +7,10 @@
     "C0B4MU6GCFQ": {
       "remote": "git@github.com:eladb/agenta-test-home-alone.git",
       "auth_env": "AGENTA_TEST_HOME_ALONE_DEPLOY_KEY"
+    },
+    "C0B5L9S2Q4Q": {
+      "remote": "git@github.com:eladb/salto-salesforce-playground.git",
+      "auth_env": "SALTO_SALESFORCE_PLAYGROUND_DEPLOY_KEY"
     }
   }
 }
