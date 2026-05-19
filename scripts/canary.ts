@@ -28,9 +28,62 @@ import { threadKey as makeThreadKey } from '../src/runtime/thread';
 import { mention, requireEnv, startTester, waitForReply } from '../tests/e2e/helpers';
 
 const STEP_TIMEOUT_MS = 60_000;
+const FLY_HEALTH_TIMEOUT_MS = 120_000;
 
 function dataDir(): string {
   return process.env.AGENTA_DATA_DIR ?? join(process.cwd(), 'data');
+}
+
+// Polls the Fly Machines API until every machine in the app is `started`
+// with all health checks passing. Ensures we don't fire canary steps at a
+// half-rolled release. No-op when FLY_API_TOKEN / FLY_APP_NAME are unset
+// (local dev against a long-running bot).
+async function waitForFlyHealth(): Promise<void> {
+  const token = process.env.FLY_API_TOKEN;
+  const app = process.env.FLY_APP_NAME;
+  if (!token || !app) {
+    process.stderr.write('canary: skipping Fly health wait (FLY_API_TOKEN/FLY_APP_NAME unset)\n');
+    return;
+  }
+  const url = `https://api.machines.dev/v1/apps/${app}/machines`;
+  const deadline = Date.now() + FLY_HEALTH_TIMEOUT_MS;
+  let lastSummary = '';
+  while (Date.now() < deadline) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      lastSummary = `HTTP ${res.status}`;
+    } else {
+      const machines = (await res.json()) as Array<{
+        id: string;
+        state: string;
+        checks?: Array<{ status: string }>;
+      }>;
+      const summary = machines
+        .map((m) => {
+          const checks = m.checks ?? [];
+          const passing = checks.filter((c) => c.status === 'passing').length;
+          return `${m.id}=${m.state}(${passing}/${checks.length})`;
+        })
+        .join(',');
+      const allReady =
+        machines.length > 0 &&
+        machines.every(
+          (m) =>
+            m.state === 'started' &&
+            (m.checks ?? []).length > 0 &&
+            (m.checks ?? []).every((c) => c.status === 'passing'),
+        );
+      if (allReady) {
+        process.stderr.write(`canary: Fly health OK (${summary})\n`);
+        return;
+      }
+      lastSummary = summary;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error(
+    `Fly health did not converge within ${FLY_HEALTH_TIMEOUT_MS}ms; last=${lastSummary}`,
+  );
 }
 
 async function agentBotUserId(): Promise<string> {
@@ -62,6 +115,7 @@ async function step(
 async function main(): Promise<void> {
   process.stderr.write('canary: resolving env + agent user...\n');
   const channel = requireEnv('TEST_CHANNEL_ID');
+  await waitForFlyHealth();
   const agentUser = await agentBotUserId();
   process.stderr.write(`canary: agent user = ${agentUser}; channel = ${channel}\n`);
   const tester = await startTester();
