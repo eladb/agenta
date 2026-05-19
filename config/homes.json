@@ -3,5 +3,10 @@
     "remote": "https://github.com/eladb/agenta-test-home",
     "auth_env": "GITHUB_TOKEN"
   },
-  "channels": {}
+  "channels": {
+    "C0B4MU6GCFQ": {
+      "remote": "git@github.com:eladb/agenta-test-home-alone.git",
+      "auth_env": "AGENTA_TEST_HOME_ALONE_DEPLOY_KEY"
+    }
+  }
 }
