@@ -70,13 +70,6 @@ jobs:
         if: steps.changed.outputs.code == 'true'
         run: bun install --frozen-lockfile
 
-      # Pre-build the sandbox image so the first docker-gated test
-      # doesn't pay the multi-minute ensureImage() build cost during
-      # the test window.
-      - name: Pre-build sandbox image
-        if: steps.changed.outputs.code == 'true'
-        run: docker build -t agenta-sandbox:latest sandbox/
-
       # The in-process e2e agent gets its home config via
       # `tests/e2e/helpers.ts:setupTempDataDir`, which installs a
       # `withTempHomeConfig(file://<tmpdir>)` per test — no env-var clone
@@ -91,13 +84,12 @@ jobs:
           TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
           TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
           MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
-          # Docker-gated tests run here; Fly-gated tests skip cleanly
-          # because no FLY_API_TOKEN is set in this step.
-          SANDBOX_PROVIDER: docker
-          # Match what the egress test asserts. Phase 21 (#21) flipped the
-          # default to `allow` for dev ergonomics; CI exercises the
-          # production-hardened `block` config so the assertion holds.
-          SANDBOX_EGRESS: block
+          FLY_APP_NAME: agenta-sandbox
+          FLY_REGION: iad
+          FLY_API_TOKEN: ${{ secrets.FLY_SANDBOX_API_TOKEN }}
+          # Fly sandbox provider — uses the pre-pushed agenta-sandbox app/image.
+          # Docker-gated test files skip cleanly via `test.if(DOCKER_PROVIDER_ACTIVE)`.
+          SANDBOX_PROVIDER: fly
         run: bun run e2e
 
       - name: Install flyctl

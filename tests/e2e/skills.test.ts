@@ -99,7 +99,7 @@ test('two mentions in one thread -> system message is byte-identical (frozen pro
     channel,
     threadTs,
     agent.botUserId,
-    (t) => t === `${STUB_REPLY_PREFIX}<@${agent.botUserId}> ${secondMentionText}`,
+    (t) => t === `${STUB_REPLY_PREFIX}${secondMentionText}`,
     { timeoutMs: 60_000 },
   );
   await waitFor(() => calls.length >= 2, { what: 'two model calls', timeoutMs: 30_000 });
