@@ -28,6 +28,12 @@ name: CD
 # green so the timeline stays clean. The skip allowlist lives in
 # `.ci-ignore` at the repo root.
 #
+# Prod-only changes (config/homes.json, fly.toml, slack-manifests, etc.)
+# skip the e2e step but still run deploy + canary — e2e wouldn't
+# exercise those paths anyway (helpers.ts overrides AGENT_HOMES_CONFIG
+# per run; the test Slack apps are separate from prod). That allowlist
+# lives in `.ci-e2e-ignore`.
+#
 # Concurrency: serialize runs AND preempt in-flight runs when a newer
 # commit lands. Reasons —
 # (a) only one agenta-ci Socket Mode client at a time, else two CI
@@ -76,7 +82,7 @@ jobs:
       # needed any more (#87 dropped the AGENT_HOME single-repo env).
 
       - name: E2E
-        if: steps.changed.outputs.code == 'true'
+        if: steps.changed.outputs.e2e_relevant == 'true'
         env:
           # Dedicated CI Slack app — see header comment for why.
           SLACK_APP_TOKEN: ${{ secrets.CI_SLACK_APP_TOKEN }}
@@ -115,6 +121,10 @@ jobs:
           FLY_APP_NAME: agenta-bot
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: bun run canary
+
+      - name: Prod-only change — E2E skipped
+        if: steps.changed.outputs.code == 'true' && steps.changed.outputs.e2e_relevant == 'false'
+        run: echo "Only .ci-e2e-ignore-allowlisted paths changed; skipping e2e (deploy + canary still run)."
 
       - name: Doc-only — CD skipped
         if: steps.changed.outputs.code == 'false'

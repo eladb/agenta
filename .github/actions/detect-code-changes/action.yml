@@ -1,14 +1,20 @@
 name: Detect code changes
 description: >
   Sets `outputs.code=true` if any path outside the `.ci-ignore`
-  allowlist (at repo root) changed in this PR / push. Used by both
-  `ci.yml` and `cd.yml` to skip work for doc-only changes while still
-  reporting a green check (so branch protection is satisfied).
+  allowlist (at repo root) changed in this PR / push. Also sets
+  `outputs.e2e_relevant=true` if any changed path is outside BOTH
+  `.ci-ignore` AND `.ci-e2e-ignore` — i.e. e2e would actually be
+  exercising something that changed. Used by both `ci.yml` and
+  `cd.yml`: doc-only changes skip everything; prod-only changes
+  (e.g. config/homes.json) skip e2e but still deploy + canary.
 
 outputs:
   code:
-    description: '`true` when at least one non-allowlisted path changed; `false` otherwise.'
+    description: '`true` when at least one non-`.ci-ignore` path changed; `false` otherwise.'
     value: ${{ steps.detect.outputs.code }}
+  e2e_relevant:
+    description: '`true` when at least one path outside both `.ci-ignore` and `.ci-e2e-ignore` changed.'
+    value: ${{ steps.detect.outputs.e2e_relevant }}
 
 runs:
   using: composite
@@ -22,20 +28,32 @@ runs:
       run: |
         set -euo pipefail
 
-        patterns_file="${GITHUB_WORKSPACE}/.ci-ignore"
-        if [ ! -f "$patterns_file" ]; then
-          echo "No $patterns_file — treating all changes as code." >&2
+        # Build an OR'd alternation from a `.ci-ignore`-style file.
+        # Echoes the regex on stdout, or empty string if the file is
+        # missing / empty / comments-only.
+        build_skip_re() {
+          local f="$1"
+          [ -f "$f" ] || { echo ""; return; }
+          grep -vE '^([[:space:]]*#|[[:space:]]*$)' "$f" \
+            | tr '\n' '|' | sed 's/|$//'
+        }
+
+        doc_re=$(build_skip_re "${GITHUB_WORKSPACE}/.ci-ignore")
+        e2e_re=$(build_skip_re "${GITHUB_WORKSPACE}/.ci-e2e-ignore")
+
+        if [ -z "$doc_re" ]; then
+          echo "No .ci-ignore patterns — treating all changes as code + e2e-relevant." >&2
           echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
-        # Build an OR'd alternation of the non-blank, non-comment lines.
-        skip_re=$(grep -vE '^([[:space:]]*#|[[:space:]]*$)' "$patterns_file" \
-          | tr '\n' '|' | sed 's/|$//')
-        if [ -z "$skip_re" ]; then
-          echo "$patterns_file is empty (or comments only) — treating all changes as code." >&2
-          echo "code=true" >> "$GITHUB_OUTPUT"
-          exit 0
+        # Combined skip pattern (doc OR prod-only). Used to decide
+        # whether e2e is worth running.
+        if [ -n "$e2e_re" ]; then
+          combined_re="${doc_re}|${e2e_re}"
+        else
+          combined_re="$doc_re"
         fi
 
         # Resolve base/head depending on event type.
@@ -53,12 +71,14 @@ runs:
         else
           echo "Unsupported event ${GITHUB_EVENT_NAME} — running tests to be safe." >&2
           echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
         if [ -z "$base" ] || [ -z "$head" ]; then
           echo "Could not resolve base/head — running tests to be safe." >&2
           echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -70,14 +90,22 @@ runs:
         if [ -z "$files" ]; then
           # No diff (e.g. empty merge commit) — nothing to test.
           echo "code=false" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
-        # Any file that does NOT match the skip alternation is a "code"
-        # change. `grep -qvE` returns 0 (true) when at least one line
-        # doesn't match — we want exactly that.
-        if echo "$files" | grep -qvE "$skip_re"; then
+        # `code` = any file outside the doc-only skip list.
+        if echo "$files" | grep -qvE "$doc_re"; then
           echo "code=true" >> "$GITHUB_OUTPUT"
         else
           echo "code=false" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # `e2e_relevant` = any file outside BOTH skip lists.
+        if echo "$files" | grep -qvE "$combined_re"; then
+          echo "e2e_relevant=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "e2e_relevant=false" >> "$GITHUB_OUTPUT"
         fi
