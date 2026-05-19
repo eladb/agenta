@@ -147,6 +147,9 @@ test('new thread after README.md edit -> system prompt reflects the new README.m
 });
 
 test('/delete removes session.json (and the rest of the thread dir)', async () => {
+  // Higher per-test timeout: on the Fly provider, /delete's on-disk cleanup
+  // waits for the Fly Machines DELETE roundtrip, which can take ~20s in CI.
+  // Default bun --timeout for e2e is 30s; bump just this test.
   calls.length = 0;
 
   const seed = `e2e-skills-delete-${Date.now()}`;
@@ -181,9 +184,9 @@ test('/delete removes session.json (and the rest of the thread dir)', async () =
         return true;
       }
     },
-    { what: 'session.json gone after /delete', timeoutMs: 20_000 },
+    { what: 'session.json gone after /delete', timeoutMs: 60_000 },
   );
-});
+}, 120_000);
 
 test('a skill in AGENT_HOME_DIR shows up in the system prompt for a new thread', async () => {
   calls.length = 0;
