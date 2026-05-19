@@ -1,9 +1,9 @@
 name: CI
 
-# Pre-merge gate. Runs on every PR + on every push to main (so the badge
-# stays current even on direct pushes). Unit tests only — e2e tests need
-# real Slack tokens and would deadlock on Socket Mode contention; they
-# live in `cd.yml` and run post-merge.
+# Pre-merge gate on PRs only. CD runs the same unit-test step post-merge
+# on main, so duplicating it here is just noise. Unit tests only — e2e
+# tests need real Slack tokens and would deadlock on Socket Mode
+# contention; they live in `cd.yml` and run post-merge.
 #
 # Doc-only PRs skip the work but the job still completes green so branch
 # protection's required `unit-tests` check is satisfied. The allowlist
@@ -11,8 +11,6 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
-  push:
     branches: [main]
 
 jobs:
