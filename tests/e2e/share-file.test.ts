@@ -114,10 +114,15 @@ test.if(HAS_DOCKER)(
     );
     createdThreads.push(threadTs);
 
+    // 100s timeouts: this test does three model turns inside a brand-new
+    // sandbox. On the Fly provider the first turn pays a 20–40s cold
+    // start for the per-thread machine, then write_file / share_file /
+    // reply each round-trip through the sandbox HTTP server. 60s was
+    // observed too tight in CD 2026-05-19. Test wall clock is 120s.
     await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'file shared', {
-      timeoutMs: 60_000,
+      timeoutMs: 100_000,
     });
-    await waitFor(() => calls.length === 3, { what: 'three model calls', timeoutMs: 60_000 });
+    await waitFor(() => calls.length === 3, { what: 'three model calls', timeoutMs: 100_000 });
 
     // share_file's tool_result should land in the third model call as "shared note.txt …".
     const third = calls[2];
@@ -176,5 +181,5 @@ test.if(HAS_DOCKER)(
     expect(existsSync(local)).toBe(true);
     expect(readFileSync(local, 'utf8')).toBe(content);
   },
-  120_000,
+  150_000,
 );
