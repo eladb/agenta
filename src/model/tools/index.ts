@@ -8,8 +8,10 @@ import { glob } from './glob';
 import { grep } from './grep';
 import { listDirTool } from './list-dir';
 import { readFileTool } from './read-file';
+import { readPage } from './read-page';
 import { shareFile } from './share-file';
 import type { Tool, ToolContext, ToolProgressChunk } from './types';
+import { webSearch } from './web-search';
 import { writeFileTool } from './write-file';
 
 // Re-exports — callers (turn.ts, tests) import these from '../model/tools'.
@@ -22,6 +24,7 @@ export { formatBashResult };
 export const TOOLS: Record<string, Tool> = {
   get_current_time: getCurrentTime,
   fetch_url: fetchUrl,
+  read_page: readPage,
   bash,
   read_file: readFileTool,
   write_file: writeFileTool,
@@ -31,6 +34,7 @@ export const TOOLS: Record<string, Tool> = {
   list_dir: listDirTool,
   ask_user: askUser,
   share_file: shareFile,
+  web_search: webSearch,
 };
 
 export const TOOL_DEFS: ToolDef[] = Object.values(TOOLS).map((t) => t.def);
