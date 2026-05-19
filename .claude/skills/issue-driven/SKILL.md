@@ -20,7 +20,10 @@ Goal: make GitHub issues the canonical place where change requests are specified
 - Typos, comment rewordings, formatter-only changes
 - Reverting an unintended change made earlier in the session
 - One-line config tweaks the user is doing right now interactively
+- Small, self-contained changes the user clearly wants applied now — a new short CI workflow, a single-file script, a tweaked Dockerfile line, a `.gitignore` entry, a one-step PR fixing the obvious thing. If a future reader wouldn't gain anything from a long-form spec beyond the diff + PR description, skip the issue.
 - Direct edits the user explicitly says "just do it, no issue"
+
+The default for small, obviously-scoped changes is: skip the issue, make the change directly on a branch, open a PR with a clear description, enable auto-merge. Reach for an issue when there's spec/discussion worth preserving — alternatives considered, scope debates, future-reader context that won't fit in a PR body.
 
 When in doubt, ask once via `AskUserQuestion` ("Create an issue for this?") and remember the answer for the session.
 
