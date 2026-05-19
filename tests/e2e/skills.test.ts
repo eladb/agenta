@@ -184,7 +184,9 @@ test('/delete removes session.json (and the rest of the thread dir)', async () =
         return true;
       }
     },
-    { what: 'session.json gone after /delete', timeoutMs: 60_000 },
+    // 90s: Fly machine destroy + volume detach occasionally creeps past
+    // 60s (observed 62s in CD 2026-05-19 #43). Test wall clock is 120s.
+    { what: 'session.json gone after /delete', timeoutMs: 90_000 },
   );
 }, 120_000);
 
