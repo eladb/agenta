@@ -1,0 +1,31 @@
+# Paths that DO NOT affect the e2e suite but DO affect the production
+# runtime. When the only changes in a push are paths matched by
+# `.ci-ignore` OR this file, CD skips the e2e step but still runs
+# deploy + canary — the canary catches anything the skip missed.
+#
+# Syntax: POSIX extended regex (egrep), one pattern per line. Same
+# parser as `.ci-ignore`. Lines starting with `#` and blank lines are
+# ignored.
+#
+# Be CONSERVATIVE — only add paths that the e2e suite genuinely cannot
+# exercise. Examples of paths that LOOK skip-safe but aren't:
+#   src/runtime/home-config.ts — covered by unit tests, but a behavior
+#     change should still run e2e to catch downstream effects.
+#   Dockerfile / sandbox/Dockerfile — sandbox image is exercised by e2e.
+
+# Per-channel home routing. tests/e2e/helpers.ts:setupTempDataDir
+# overrides AGENT_HOMES_CONFIG with a per-run file:// config, so the
+# committed file is bypassed during e2e.
+^config/homes\.json$
+
+# Prod-only Fly app config.
+^fly\.toml$
+
+# Production-only Slack app manifests. e2e uses the dedicated agenta-ci
+# / agenta-tester apps, whose manifests aren't in this repo.
+^slack-manifests/.*\.json$
+
+# Scripts that only run after e2e (deploy + canary) or are operator
+# tools never invoked by tests.
+^scripts/deploy-bot-fly\.ts$
+^scripts/canary\.ts$
