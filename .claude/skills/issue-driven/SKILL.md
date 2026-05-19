@@ -64,6 +64,12 @@ Pick the label:
 
 Capture the issue number for the rest of the flow.
 
+### 2.5. Post the link and pause for feedback
+
+Before delegating, surface the freshly-created issue URL to the user and ask if they have comments or changes. Use `AskUserQuestion` with options like "Looks good, proceed" / "I have comments" / "Cancel". Do NOT spawn the subagent until the user confirms — they may want to edit the body, narrow scope, or kill the idea entirely now that they see it in GitHub.
+
+If the user provides comments, update the issue body (`gh issue edit <NN> -R eladb/agenta --body-file -`) before delegating. The issue is the canonical spec — the subagent will read it, not this conversation.
+
 ### 3. Spawn a subagent on a feature branch
 
 Default to delegating the implementation. Don't do the work in the main session unless the user says "I'll just do it here".
