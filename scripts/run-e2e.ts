@@ -103,7 +103,11 @@ try {
     const relPath = `tests/e2e/${file}`;
     console.log(`\nrun-e2e: → ${relPath}`);
     const code: number = await new Promise((resolve) => {
-      const child = spawn('bun', ['test', '--timeout', '30000', relPath], {
+      // 60s test timeout: covers Fly sandbox cold starts (20–40s) and
+      // the connectWithRetry path in startAgent (up to ~42s if first
+      // attempt stalls). The old 30s cap left beforeAll hooks no
+      // headroom when Slack's Socket Mode handshake hiccuped.
+      const child = spawn('bun', ['test', '--timeout', '60000', relPath], {
         stdio: 'inherit',
         env: { ...process.env, TEST_CHANNEL_ID: channelId },
       });

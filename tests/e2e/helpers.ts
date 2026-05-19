@@ -177,6 +177,31 @@ export function withTempHomeConfig(remote: string, authEnvName?: string): HomeCo
   };
 }
 
+// Wrap connect() with a per-attempt timeout + single retry. Slack
+// Socket Mode's apps.connections.open + WSS handshake occasionally
+// stalls past 30s with no error (observed in CD 2026-05-19). With the
+// run-e2e test-runner timeout at 60s, this gives us two ~20s attempts
+// and a clear error message if both fail, instead of an opaque
+// beforeAll timeout that leaves `agent` undefined and crashes afterAll.
+async function connectWithRetry(appToken: string, botToken: string): Promise<Awaited<ReturnType<typeof connect>>> {
+  const attemptMs = 20_000;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await Promise.race([
+        connect(appToken, botToken),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`connect timed out after ${attemptMs}ms (attempt ${attempt})`)), attemptMs),
+        ),
+      ]);
+    } catch (err) {
+      if (attempt === 2) throw err;
+      // Brief backoff before retry so Slack has a moment to recover.
+      await new Promise((r) => setTimeout(r, 1_000));
+    }
+  }
+  throw new Error('unreachable');
+}
+
 export async function startAgent(callModel: CallModel = stubCallModel): Promise<Agent> {
   const appToken = requireEnv('SLACK_APP_TOKEN');
   const botToken = requireEnv('SLACK_BOT_TOKEN');
@@ -186,7 +211,7 @@ export async function startAgent(callModel: CallModel = stubCallModel): Promise<
   // pid pointer instead of letting tests flake silently.
   const lock = acquire('agent');
   try {
-    const agent = await connect(appToken, botToken);
+    const agent = await connectWithRetry(appToken, botToken);
     listen(
       agent.socket,
       agent.botUserId,
