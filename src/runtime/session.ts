@@ -72,6 +72,7 @@ export async function startOrQueue(
     ...(prior?.sandbox !== undefined ? { sandbox: prior.sandbox } : {}),
     ...(prior?.git !== undefined ? { git: prior.git } : {}),
     ...(prior?.home !== undefined ? { home: prior.home } : {}),
+    ...(prior?.model !== undefined ? { model: prior.model } : {}),
   });
   // Lets runTurn signal "I consumed a mid-turn mention" so the post-turn
   // pending-check doesn't kick off a redundant follow-up turn.
@@ -95,6 +96,7 @@ export async function startOrQueue(
         ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
         ...(carry?.git !== undefined ? { git: carry.git } : {}),
         ...(carry?.home !== undefined ? { home: carry.home } : {}),
+        ...(carry?.model !== undefined ? { model: carry.model } : {}),
       });
     }
   } finally {
@@ -126,6 +128,7 @@ export async function signalStop(
       ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
       ...(carry?.git !== undefined ? { git: carry.git } : {}),
       ...(carry?.home !== undefined ? { home: carry.home } : {}),
+      ...(carry?.model !== undefined ? { model: carry.model } : {}),
     });
     s.abort.abort();
     log.info('session', `[${tk}] stop signaled`);
