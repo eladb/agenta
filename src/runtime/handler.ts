@@ -14,6 +14,7 @@ import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
 import { type HomeConfig, resolveHome, resolveTransport } from './home-config';
+import { refreshHomeMirror } from './home-refresh';
 import { signalStop, startOrQueue } from './session';
 import { readSession, writeSession } from './session-store';
 import { threadKey } from './thread';
@@ -154,6 +155,14 @@ async function resolveSystemPrompt(
   // only affect new threads. Tests bypass the config file via the
   // AGENT_HOME_DIR env override (see `resolveAgentHomeForPrompt`).
   const home = resolveHome(channelId);
+  // Refresh the host-side mirror before composing the prompt so a fresh
+  // thread picks up upstream README.md / skills/ changes since the bot
+  // last booted (#120). Non-fatal: errors are logged and we fall through
+  // to whatever is on disk. Skipped for the AGENT_HOME_DIR test override
+  // so unit/e2e tests don't try to fetch from a tmpdir.
+  if (!process.env.AGENT_HOME_DIR) {
+    await refreshHomeMirror(home);
+  }
   const agentHomeDir = resolveAgentHomeForPrompt(home);
   const composed = await buildSystemPrompt(agentHomeDir);
   // First-mention resolution: look up the originating Slack user once and
