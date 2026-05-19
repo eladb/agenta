@@ -31,7 +31,7 @@ import { startTunnel, stopTunnel, type TunnelHandle } from './ws-tunnel';
 // sandbox installs into ~/.ssh on direct-mode bootstrap.
 const AGENTA_ROOT = join(import.meta.dir, '..', '..');
 const HOOKS_DIR = join(AGENTA_ROOT, 'git-hooks');
-const KNOWN_HOSTS_PATH = join(HOOKS_DIR, 'known_hosts');
+export const KNOWN_HOSTS_PATH = join(HOOKS_DIR, 'known_hosts');
 
 // Read the pinned known_hosts bundle once at module load — bundling it
 // at start time matches the spec ("read at process start, embedded into
