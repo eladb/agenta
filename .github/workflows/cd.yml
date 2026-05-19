@@ -50,7 +50,10 @@ on:
 
 concurrency:
   group: cd
-  cancel-in-progress: true
+  # Queue runs instead of cancelling: a follow-on doc-only push hits .ci-ignore
+  # and no-ops, but if it cancels an in-flight real deploy, prod can be left on
+  # the old image (incident 2026-05-19, fix #116).
+  cancel-in-progress: false
 
 jobs:
   cd:
