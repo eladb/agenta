@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
@@ -8,6 +7,7 @@ import { ensureImage } from '../../src/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
+  DOCKER_PROVIDER_ACTIVE,
   deleteThread,
   getDataDir,
   requireEnv,
@@ -20,14 +20,7 @@ import {
   waitForReply,
 } from './helpers';
 
-function dockerAvailable(): boolean {
-  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
-    stdio: 'ignore',
-  });
-  return r.status === 0;
-}
-
-const HAS_DOCKER = dockerAvailable();
+const HAS_DOCKER = DOCKER_PROVIDER_ACTIVE;
 
 let agent: Agent;
 let tester: Tester;
