@@ -1,12 +1,23 @@
 #!/usr/bin/env bun
-// Interactive setup for the two Slack apps (agent + tester).
-// Uses Slack configuration tokens to create apps from manifest, then prompts
-// you to install each app and paste back the resulting tokens.
+// Interactive setup for the agent + tester Slack apps.
+// Uses Slack configuration tokens to create apps from manifest, then
+// prompts you to install each app and paste back the resulting tokens.
+//
+// By default, creates the production `agenta` app (cached under key
+// `agent` for backwards compatibility) and writes credentials to `.env`.
+//
+// Pass `--app-name <name>` (e.g. `--app-name agenta-dev`) to create a
+// variant of the agent app from the same manifest. Variants are cached
+// under their own key and write credentials to `.env.dev`. The tester
+// app is always shared — when running in a variant flow, tester
+// credentials are still requested (so .env.dev is self-contained) but
+// no new tester app is created.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import {
+  type AppCacheEntry,
   type Cache,
   loadCache,
   saveCache,
@@ -15,13 +26,23 @@ import {
 } from './slack-config-tokens';
 
 const ROOT = join(import.meta.dir, '..');
-const MANIFESTS = {
-  agent: join(ROOT, 'slack-manifests/agent.json'),
-  tester: join(ROOT, 'slack-manifests/tester.json'),
-};
-const ENV_PATH = join(ROOT, '.env');
+const AGENT_MANIFEST = join(ROOT, 'slack-manifests/agent.json');
+const TESTER_MANIFEST = join(ROOT, 'slack-manifests/tester.json');
 
-type AppKey = 'agent' | 'tester';
+// The default agent app name (used both as the Slack app name in the
+// manifest patch and as the cache key for backwards compatibility).
+const DEFAULT_AGENT_APP_NAME = 'agenta';
+
+// Backwards-compat: the original cache stored the default agent entry
+// under the key `agent`. Keep using that key when --app-name is left at
+// the default. Variants (e.g. agenta-dev) use their own name as the key.
+function agentCacheKey(appName: string): string {
+  return appName === DEFAULT_AGENT_APP_NAME ? 'agent' : appName;
+}
+
+function envPathFor(appName: string): string {
+  return join(ROOT, appName === DEFAULT_AGENT_APP_NAME ? '.env' : '.env.dev');
+}
 
 type ManifestCreateResp = {
   ok: true;
@@ -30,8 +51,22 @@ type ManifestCreateResp = {
   oauth_authorize_url: string;
 };
 
-async function createApp(access: string, manifestPath: string): Promise<ManifestCreateResp> {
-  const manifest = readFileSync(manifestPath, 'utf8');
+type ManifestJson = { display_information?: { name?: string } } & Record<string, unknown>;
+
+function readManifest(path: string, overrideName?: string): string {
+  const raw = readFileSync(path, 'utf8');
+  if (!overrideName) return raw;
+  const parsed = JSON.parse(raw) as ManifestJson;
+  parsed.display_information = { ...(parsed.display_information ?? {}), name: overrideName };
+  return JSON.stringify(parsed);
+}
+
+async function createApp(
+  access: string,
+  manifestPath: string,
+  appName?: string,
+): Promise<ManifestCreateResp> {
+  const manifest = readManifest(manifestPath, appName);
   return slackApi<ManifestCreateResp>('apps.manifest.create', access, { manifest });
 }
 
@@ -39,21 +74,36 @@ async function deleteApp(access: string, appId: string): Promise<void> {
   await slackApi('apps.manifest.delete', access, { app_id: appId });
 }
 
-async function ensureCreated(
-  cache: Cache,
-  key: AppKey,
-): Promise<{ app_id: string; install_url: string }> {
+async function ensureAgent(cache: Cache, appName: string): Promise<AppCacheEntry> {
+  const key = agentCacheKey(appName);
   const existing = cache[key];
-  if (existing) {
-    console.log(`[${key}] already created: ${existing.app_id}`);
+  if (existing && typeof existing !== 'string') {
+    console.log(`[${appName}] already created: ${existing.app_id}`);
     return existing;
   }
-  console.log(`[${key}] creating app from ${MANIFESTS[key]}...`);
-  const resp = await withTokenRefresh(cache, (access) => createApp(access, MANIFESTS[key]));
-  const entry = { app_id: resp.app_id, install_url: resp.oauth_authorize_url };
+  console.log(`[${appName}] creating app from ${AGENT_MANIFEST}...`);
+  const resp = await withTokenRefresh(cache, (access) =>
+    createApp(access, AGENT_MANIFEST, appName === DEFAULT_AGENT_APP_NAME ? undefined : appName),
+  );
+  const entry: AppCacheEntry = { app_id: resp.app_id, install_url: resp.oauth_authorize_url };
   cache[key] = entry;
   saveCache(cache);
-  console.log(`[${key}] created: ${resp.app_id}`);
+  console.log(`[${appName}] created: ${resp.app_id}`);
+  return entry;
+}
+
+async function ensureTester(cache: Cache): Promise<AppCacheEntry> {
+  const existing = cache.tester;
+  if (existing) {
+    console.log(`[tester] already created: ${existing.app_id}`);
+    return existing;
+  }
+  console.log(`[tester] creating app from ${TESTER_MANIFEST}...`);
+  const resp = await withTokenRefresh(cache, (access) => createApp(access, TESTER_MANIFEST));
+  const entry: AppCacheEntry = { app_id: resp.app_id, install_url: resp.oauth_authorize_url };
+  cache.tester = entry;
+  saveCache(cache);
+  console.log(`[tester] created: ${resp.app_id}`);
   return entry;
 }
 
@@ -77,10 +127,10 @@ async function promptToken(
   }
 }
 
-function writeEnv(values: Record<string, string>, force: boolean): void {
-  if (existsSync(ENV_PATH) && !force) {
+function writeEnv(path: string, values: Record<string, string>, force: boolean): void {
+  if (existsSync(path) && !force) {
     console.log(
-      `\n.env already exists. Re-run with --force to overwrite, or paste these manually:`,
+      `\n${path} already exists. Re-run with --force to overwrite, or paste these manually:`,
     );
     for (const [k, v] of Object.entries(values)) console.log(`${k}=${v}`);
     return;
@@ -88,34 +138,38 @@ function writeEnv(values: Record<string, string>, force: boolean): void {
   const body = Object.entries(values)
     .map(([k, v]) => `${k}=${v}`)
     .join('\n');
-  writeFileSync(ENV_PATH, `${body}\n`);
-  console.log(`\nwrote ${ENV_PATH}`);
+  writeFileSync(path, `${body}\n`);
+  console.log(`\nwrote ${path}`);
 }
 
-async function runCreate(opts: { force: boolean }): Promise<void> {
+async function runCreate(opts: { force: boolean; appName: string }): Promise<void> {
+  const { appName } = opts;
   const cache = loadCache();
-  const agent = await ensureCreated(cache, 'agent');
-  const tester = await ensureCreated(cache, 'tester');
+  const agent = await ensureAgent(cache, appName);
+  const tester = await ensureTester(cache);
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    console.log('\n--- install both apps ---');
-    console.log(`agent:  ${agent.install_url}`);
-    console.log(`tester: ${tester.install_url}`);
+    console.log('\n--- install apps ---');
+    console.log(`${appName}: ${agent.install_url}`);
+    console.log(`tester:  ${tester.install_url}`);
     console.log(`open each, click "Allow", then come back here.`);
+    console.log(
+      `(if the tester was already installed in a previous run, you can skip its install link)`,
+    );
     await prompt(rl, 'press enter when both are installed: ');
 
     console.log('\n--- bot tokens ---');
     console.log("on each app's install confirmation, copy the Bot User OAuth Token (xoxb-...)");
-    const agentBot = await promptToken(rl, 'AGENT bot token', 'xoxb-');
+    const agentBot = await promptToken(rl, `${appName.toUpperCase()} bot token`, 'xoxb-');
     const testerBot = await promptToken(rl, 'TESTER bot token', 'xoxb-');
 
     console.log('\n--- app-level tokens (Socket Mode) ---');
     console.log(
-      `agent:  ${basicInfoUrl(agent.app_id)} -> App-Level Tokens -> Generate Token and Scopes`,
+      `${appName}: ${basicInfoUrl(agent.app_id)} -> App-Level Tokens -> Generate Token and Scopes (scope: connections:write)`,
     );
     console.log(`tester: ${basicInfoUrl(tester.app_id)} -> same. Add scope: connections:write`);
-    const agentApp = await promptToken(rl, 'AGENT app-level token', 'xapp-');
+    const agentApp = await promptToken(rl, `${appName.toUpperCase()} app-level token`, 'xapp-');
     const testerApp = await promptToken(rl, 'TESTER app-level token', 'xapp-');
 
     console.log('\n--- test channel ---');
@@ -125,6 +179,7 @@ async function runCreate(opts: { force: boolean }): Promise<void> {
     const channelId = await prompt(rl, 'paste TEST_CHANNEL_ID (C...): ');
 
     writeEnv(
+      envPathFor(appName),
       {
         SLACK_APP_TOKEN: agentApp,
         SLACK_BOT_TOKEN: agentBot,
@@ -135,32 +190,69 @@ async function runCreate(opts: { force: boolean }): Promise<void> {
       opts.force,
     );
 
-    console.log('\nnext: invite both bots to the channel, then `bun run e2e`');
+    if (appName === DEFAULT_AGENT_APP_NAME) {
+      console.log('\nnext: invite both bots to the channel, then `bun run e2e`');
+    } else {
+      console.log(`\nnext: invite ${appName} + tester to the channel, then \`bun run e2e:dev\``);
+      console.log(`(or \`bun run dev\` to run the dev bot interactively)`);
+    }
   } finally {
     rl.close();
   }
 }
 
-async function runDelete(): Promise<void> {
+async function runDelete(appName: string): Promise<void> {
   const cache = loadCache();
-  for (const key of ['agent', 'tester'] as const) {
-    const id = cache[key]?.app_id;
-    if (!id) {
-      console.log(`[${key}] no cached app id; skipping`);
+  const targets: Array<{ label: string; key: string }> = [
+    { label: appName, key: agentCacheKey(appName) },
+  ];
+  // Only nuke the (shared) tester when deleting the default agent setup.
+  if (appName === DEFAULT_AGENT_APP_NAME) {
+    targets.push({ label: 'tester', key: 'tester' });
+  }
+  for (const { label, key } of targets) {
+    const entry = cache[key];
+    if (!entry || typeof entry === 'string') {
+      console.log(`[${label}] no cached app id; skipping`);
       continue;
     }
-    console.log(`[${key}] deleting ${id}...`);
-    await withTokenRefresh(cache, (access) => deleteApp(access, id));
+    console.log(`[${label}] deleting ${entry.app_id}...`);
+    await withTokenRefresh(cache, (access) => deleteApp(access, entry.app_id));
     delete cache[key];
     saveCache(cache);
   }
-  console.log('done. note: .env not touched.');
+  console.log('done. note: env files not touched.');
 }
 
-const args = process.argv.slice(2);
-const force = args.includes('--force');
-if (args.includes('--delete')) {
-  await runDelete();
+function parseArgs(argv: string[]): { force: boolean; del: boolean; appName: string } {
+  let appName = DEFAULT_AGENT_APP_NAME;
+  let force = false;
+  let del = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--force') force = true;
+    else if (a === '--delete') del = true;
+    else if (a === '--app-name') {
+      const next = argv[i + 1];
+      if (!next) {
+        console.error('--app-name requires a value');
+        process.exit(2);
+      }
+      appName = next;
+      i++;
+    } else if (a.startsWith('--app-name=')) {
+      appName = a.slice('--app-name='.length);
+    } else {
+      console.error(`unknown arg: ${a}`);
+      process.exit(2);
+    }
+  }
+  return { force, del, appName };
+}
+
+const { force, del, appName } = parseArgs(process.argv.slice(2));
+if (del) {
+  await runDelete(appName);
 } else {
-  await runCreate({ force });
+  await runCreate({ force, appName });
 }
