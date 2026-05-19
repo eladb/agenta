@@ -10,7 +10,12 @@
     },
     "C0B5L9S2Q4Q": {
       "remote": "git@github.com:eladb/salto-salesforce-playground.git",
-      "auth_env": "SALTO_SALESFORCE_PLAYGROUND_DEPLOY_KEY"
+      "auth_env": "SALTO_SALESFORCE_PLAYGROUND_DEPLOY_KEY",
+      "model": {
+        "name": "claude-opus-4-7",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key_env": "ANTHROPIC_API_KEY"
+      }
     }
   }
 }
