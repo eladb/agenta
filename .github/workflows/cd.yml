@@ -75,10 +75,8 @@ jobs:
       # `withTempHomeConfig(file://<tmpdir>)` per test — no env-var clone
       # needed any more (#87 dropped the AGENT_HOME single-repo env).
 
-      # TEMPORARILY DISABLED — see #105. Re-enable when the suite is reliably green
-      # (#101 + #102 + #103 + the commands.test.ts /delete failure all fixed).
       - name: E2E
-        if: false
+        if: steps.changed.outputs.code == 'true'
         env:
           # Dedicated CI Slack app — see header comment for why.
           SLACK_APP_TOKEN: ${{ secrets.CI_SLACK_APP_TOKEN }}
