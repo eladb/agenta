@@ -11,6 +11,7 @@ import { readFileTool } from './read-file';
 import { readPage } from './read-page';
 import { shareFile } from './share-file';
 import type { Tool, ToolContext, ToolProgressChunk } from './types';
+import { webSearch } from './web-search';
 import { writeFileTool } from './write-file';
 
 // Re-exports — callers (turn.ts, tests) import these from '../model/tools'.
@@ -33,6 +34,7 @@ export const TOOLS: Record<string, Tool> = {
   list_dir: listDirTool,
   ask_user: askUser,
   share_file: shareFile,
+  web_search: webSearch,
 };
 
 export const TOOL_DEFS: ToolDef[] = Object.values(TOOLS).map((t) => t.def);
