@@ -215,7 +215,24 @@ export async function startAgent(callModel: CallModel = stubCallModel): Promise<
     listen(
       agent.socket,
       agent.botUserId,
-      makeEventHandler(agent.web, botToken, agent.botUserId, callModel),
+      // Stub fallback triplet (#128) — tests inject `callModel` directly via
+      // the override so the triplet is only used as a placeholder for the
+      // first-mention freeze into session.json. The api_key_env points at a
+      // synthetic var so anything that ever DID try to read it would fail
+      // loudly instead of silently picking up the real prod key. Set the var
+      // so loadHomesConfig's validation (when channels.json carries a model
+      // block) doesn't reject it.
+      makeEventHandler(
+        agent.web,
+        botToken,
+        agent.botUserId,
+        {
+          name: 'stub-model',
+          base_url: 'http://stub.invalid',
+          api_key_env: 'AGENTA_TEST_STUB_KEY',
+        },
+        callModel,
+      ),
     );
     return { ...agent, lock };
   } catch (err) {
