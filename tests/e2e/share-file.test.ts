@@ -134,18 +134,19 @@ test.if(HAS_DOCKER)(
 
     // The Slack thread now contains a message with an attached file.
     // Slack's files.uploadV2 has eventual consistency vs conversations.replies —
-    // the upload can succeed (tool_result reports file_id=…) before the
-    // attached message is visible in the thread listing. Poll briefly
-    // instead of one-shot fetching.
+    // both the attached message AND the file's metadata (name/mimetype) can
+    // populate at different beats. Poll until the file object actually has
+    // a name set, not just until any files-bearing message appears. 30s
+    // deadline because Slack metadata propagation has been observed up to
+    // ~25s in CD (CD #38 2026-05-19 hit `name === undefined` at 15s).
     let fileMsg: { files?: Array<{ name?: string; mimetype?: string }> } | undefined;
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const replies = await tester.web.conversations.replies({ channel, ts: threadTs });
-      fileMsg = (replies.messages ?? []).find(
-        (m) =>
-          Array.isArray((m as { files?: unknown[] }).files) &&
-          (m as { files: unknown[] }).files.length > 0,
-      ) as { files?: Array<{ name?: string; mimetype?: string }> } | undefined;
+      fileMsg = (replies.messages ?? []).find((m) => {
+        const files = (m as { files?: Array<{ name?: string }> }).files;
+        return Array.isArray(files) && files.length > 0 && typeof files[0]?.name === 'string';
+      }) as { files?: Array<{ name?: string; mimetype?: string }> } | undefined;
       if (fileMsg) break;
       await new Promise((r) => setTimeout(r, 500));
     }
