@@ -525,6 +525,16 @@ export async function runTurn(
       // there. While the next model call is in flight the message
       // still shows THIS round's content; the 🤔 reaction is the
       // user-facing "still working" signal.
+      //
+      // Pretty mode: after the last tool completes, swap the body to a
+      // "Thinking" beat so the previous tool's `_running command…_` doesn't
+      // linger while the model processes results. The next iteration's
+      // content (or the final reply) overwrites this immediately when the
+      // model returns.
+      if (pretty) {
+        prettyCurrentTool = '';
+        prettyProgress = 'Thinking';
+      }
       await repaint();
     }
   } catch (err) {
