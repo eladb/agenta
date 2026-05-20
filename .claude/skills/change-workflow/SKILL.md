@@ -1,9 +1,9 @@
 ---
-name: issue-driven
+name: change-workflow
 description: GitHub-issue-driven change workflow. Every non-trivial change starts with `gh issue create`; the implementation is then delegated to a subagent on a feature branch that opens a PR closing the issue. Issues double as long-term memory — closed phases, open gotchas, open proposals. Invoke this when the user requests a change ("let's add X", "change Y to Z", "fix Z"). Skip for trivial edits.
 ---
 
-# issue-driven
+# change-workflow
 
 Goal: make GitHub issues the canonical place where change requests are specified, discussed, and remembered. Implementation happens on a feature branch driven by a subagent. When you need to look up issues, query GitHub directly with `gh` (see "Looking up issues" below) — there is no local index to keep in sync.
 
