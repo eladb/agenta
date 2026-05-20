@@ -42,7 +42,7 @@ Title format: short and recall-friendly. The title is the search key. Examples:
 - `Socket Mode liveness watchdog`
 - `Fix: WS tunnel must forward all sandbox endpoint headers`
 
-Surface the draft via `AskUserQuestion` before creating — options: Apply as drafted / Edit before applying / Skip the issue.
+If there are genuine design forks the user hasn't already weighed in on (provider choice, scope of phase 1, persistence strategy, etc.), resolve them via `AskUserQuestion` BEFORE drafting the body. Once forks are resolved, just create the issue — don't ask the user to approve a draft they've effectively already specified. The post-creation pause in step 2.5 is where they get to see the result and push back.
 
 ### 2. Create the issue
 
@@ -67,6 +67,8 @@ Capture the issue number for the rest of the flow.
 ### 2.5. Post the link and pause for feedback
 
 Before delegating, surface the freshly-created issue URL to the user and ask if they have comments or changes. Use `AskUserQuestion` with options like "Looks good, proceed" / "I have comments" / "Cancel". Do NOT spawn the subagent until the user confirms — they may want to edit the body, narrow scope, or kill the idea entirely now that they see it in GitHub.
+
+Print the URL plain — no markdown bold (no `**…**`), no link syntax. Just the raw `https://github.com/eladb/agenta/issues/<NN>` on its own line. Slack-style users read these in the terminal and the asterisks render as literal asterisks there.
 
 If the user provides comments, update the issue body (`gh issue edit <NN> -R eladb/agenta --body-file -`) before delegating. The issue is the canonical spec — the subagent will read it, not this conversation.
 
