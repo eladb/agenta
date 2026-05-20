@@ -14,15 +14,17 @@ import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { createDedupe, dedupeKey } from './dedupe';
 import {
+  type DisplayConfig,
   type HomeConfig,
   type ModelTriplet,
+  resolveDisplay,
   resolveHome,
   resolveModel,
   resolveTransport,
 } from './home-config';
 import { refreshHomeMirror } from './home-refresh';
 import { signalStop, startOrQueue } from './session';
-import { readSession, setModel, writeSession } from './session-store';
+import { readSession, setDisplay, setModel, writeSession } from './session-store';
 import { threadKey } from './thread';
 
 const isDuplicate = createDedupe();
@@ -134,7 +136,7 @@ async function handleMessage(
   // config/homes.json change in the meantime. `clearSession` writes idle
   // (preserving these) so the file is there across turns; only `/delete`
   // removes it.
-  const { prompt, model } = await resolveSystemPromptAndModel(
+  const { prompt, model, display } = await resolveSystemPromptAndModel(
     web,
     tk,
     e.channel,
@@ -165,11 +167,17 @@ async function handleMessage(
   // on the common case.
   kickoffEnsureContainer(tk);
 
-  await startOrQueue(web, callModel, prompt, {
-    channel: e.channel,
-    threadTs: e.threadTs,
-    threadKey: tk,
-  });
+  await startOrQueue(
+    web,
+    callModel,
+    prompt,
+    {
+      channel: e.channel,
+      threadTs: e.threadTs,
+      threadKey: tk,
+    },
+    display.style,
+  );
 }
 
 async function resolveSystemPromptAndModel(
@@ -178,12 +186,19 @@ async function resolveSystemPromptAndModel(
   channelId: string,
   userId: string,
   fallbackModel: ModelTriplet | undefined,
-): Promise<{ prompt: string; model: ModelTriplet }> {
+): Promise<{ prompt: string; model: ModelTriplet; display: DisplayConfig }> {
   const existing = await readSession(tk);
   if (existing?.system_prompt !== undefined && existing.model !== undefined) {
     // Both already frozen — reuse them. Same frozen-per-thread invariant as
-    // the prompt: mid-thread model swaps would be surprising.
-    return { prompt: existing.system_prompt, model: existing.model };
+    // the prompt: mid-thread model swaps would be surprising. Display may
+    // not exist on pre-#141 threads — backfill from current config (defaults
+    // to verbose, so existing threads see zero behavior change).
+    let display = existing.display;
+    if (display === undefined) {
+      display = resolveDisplay(channelId);
+      await setDisplay(tk, display);
+    }
+    return { prompt: existing.system_prompt, model: existing.model, display };
   }
   if (existing?.system_prompt !== undefined && existing.model === undefined) {
     // Threads created before #128 don't have a frozen model — resolve fresh
@@ -196,7 +211,12 @@ async function resolveSystemPromptAndModel(
       );
     }
     await setModel(tk, resolved);
-    return { prompt: existing.system_prompt, model: resolved };
+    let display = existing.display;
+    if (display === undefined) {
+      display = resolveDisplay(channelId);
+      await setDisplay(tk, display);
+    }
+    return { prompt: existing.system_prompt, model: resolved, display };
   }
   // Resolve + freeze the per-channel home (#87) on first mention. The
   // snapshot is just the HomeConfig (remote + auth_env); slug/transport/
@@ -221,6 +241,7 @@ async function resolveSystemPromptAndModel(
   if (!process.env.AGENT_HOME_DIR) {
     await refreshHomeMirror(home);
   }
+  const display = resolveDisplay(channelId);
   const agentHomeDir = resolveAgentHomeForPrompt(home);
   const composed = await buildSystemPrompt(agentHomeDir);
   // First-mention resolution: look up the originating Slack user once and
@@ -239,8 +260,9 @@ async function resolveSystemPromptAndModel(
     git: creator ? { ref: refFor(tk), creator } : undefined,
     home,
     model,
+    display,
   });
-  return { prompt: composed, model };
+  return { prompt: composed, model, display };
 }
 
 // Test override hatch: `AGENT_HOME_DIR` short-circuits the configured

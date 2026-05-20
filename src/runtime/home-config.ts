@@ -37,10 +37,22 @@ export type ModelTriplet = {
   api_key_env: string;
 };
 
+// Per-channel UI mode (#141). `verbose` is the existing single-message-per-turn
+// debug surface (tool labels, provisioning lines, checklist). `pretty` is a
+// polished progress surface for end-user channels — model `content` as the
+// progress line, humanized fallback labels when content is null, footer
+// `_ran N tools_` on the final reply. Default is `verbose`. Frozen into
+// session.json on first mention, same shape as `model`.
+export type DisplayStyle = 'verbose' | 'pretty';
+export type DisplayConfig = {
+  style: DisplayStyle;
+};
+
 export type HomeConfig = {
   remote: string;
   auth_env?: string;
   model?: ModelTriplet;
+  display?: DisplayConfig;
 };
 
 export type Transport = 'tunneled-file' | 'tunneled-mirror' | 'direct';
@@ -235,11 +247,28 @@ function validateModel(name: string, model: unknown): void {
   }
 }
 
+function validateDisplay(name: string, display: unknown): void {
+  if (display === undefined) return;
+  if (typeof display !== 'object' || display === null || Array.isArray(display)) {
+    throw new Error(`[${name}] "display" must be an object if present`);
+  }
+  const d = display as Record<string, unknown>;
+  if (typeof d.style !== 'string') {
+    throw new Error(`[${name}] display.style required (string)`);
+  }
+  if (d.style !== 'verbose' && d.style !== 'pretty') {
+    throw new Error(
+      `[${name}] unknown display.style ${JSON.stringify(d.style)} (allowed: "verbose" | "pretty")`,
+    );
+  }
+}
+
 function validateEntry(name: string, home: HomeConfig): void {
   if (typeof home.remote !== 'string' || home.remote.length === 0) {
     throw new Error(`[${name}] missing required string "remote"`);
   }
   validateModel(name, home.model);
+  validateDisplay(name, home.display);
   if (isSshStyle(home.remote)) {
     if (typeof home.auth_env !== 'string' || home.auth_env.length === 0) {
       throw new Error(`[${name}] auth_env required for ssh:// / git@ URLs`);
@@ -343,6 +372,17 @@ export function resolveModel(
   if (specific?.model) return { ...specific.model };
   if (file.default.model) return { ...file.default.model };
   return fallback ? { ...fallback } : undefined;
+}
+
+// Resolve the per-thread display style (#141). Channel-specific `display`
+// block wins, else the default's, else `"verbose"`. Pure lookup — no env
+// fallback because display is a UX choice, not a deploy-wide knob.
+export function resolveDisplay(channelId: string, path?: string): DisplayConfig {
+  const file = loadHomesConfig(path);
+  const specific = file.channels[channelId];
+  if (specific?.display) return { ...specific.display };
+  if (file.default.display) return { ...file.default.display };
+  return { style: 'verbose' };
 }
 
 // For tests — drop the module-level cache so a new AGENT_HOMES_CONFIG

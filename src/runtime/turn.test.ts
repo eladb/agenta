@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { CallModel, Message } from '../model/gateway';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { readEvents } from '../persistence/store';
-import { runTurn } from './turn';
+import { prettyToolLabel, runTurn } from './turn';
 
 function makeWebStub(): {
   // biome-ignore lint/suspicious/noExplicitAny: stub mimics WebClient surface used by turn.ts
@@ -615,6 +615,200 @@ describe('runTurn with tools', () => {
       expect(reactionsAdded.some((r) => r.ts === ts && r.name === 'wheel')).toBe(true);
       expect(reactionsRemoved.some((r) => r.ts === ts && r.name === 'wheel')).toBe(true);
     }
+  });
+
+  test('pretty mode (#141): default verbose path unchanged when displayStyle omitted', async () => {
+    const { web, edits, posts } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'final reply' };
+    };
+    await runTurn(web, callModel, 'sys', input);
+    // Verbose: the round message includes the tool's describe() label.
+    const sawVerboseLabel =
+      posts.some((p) => p.text.includes('get current time')) ||
+      edits.some((e) => e.text.includes('get current time'));
+    expect(sawVerboseLabel).toBe(true);
+    // No footer — verbose mode.
+    expect(edits[edits.length - 1]?.text).toBe('final reply');
+  });
+
+  test('pretty mode (#141): progress line comes from model content', async () => {
+    const { web, edits, posts } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: 'Let me check the readme...',
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'final reply' };
+    };
+    await runTurn(web, callModel, 'sys', input, undefined, undefined, 'pretty');
+    // Progress line uses the model's content, not the humanized label.
+    const sawContent =
+      posts.some((p) => p.text.includes('Let me check the readme')) ||
+      edits.some((e) => e.text.includes('Let me check the readme'));
+    expect(sawContent).toBe(true);
+    // Verbose-mode debug labels do NOT appear in pretty progress lines.
+    const allBodies = [...posts.map((p) => p.text), ...edits.map((e) => e.text)];
+    const intermediateBodies = allBodies.filter((b) => !b.includes('final reply'));
+    expect(intermediateBodies.some((b) => b.includes('get current time'))).toBe(false);
+  });
+
+  test('pretty mode (#141): fallback to humanized labels when content is null', async () => {
+    const { web, edits, posts } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'final reply' };
+    };
+    await runTurn(web, callModel, 'sys', input, undefined, undefined, 'pretty');
+    const allBodies = [...posts.map((p) => p.text), ...edits.map((e) => e.text)];
+    expect(allBodies.some((b) => b.includes('Checking time'))).toBe(true);
+  });
+
+  test('pretty mode (#141): multiple tool calls comma-join humanized labels when content is null', async () => {
+    const { web, edits, posts } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'a',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+            {
+              id: 'b',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'final' };
+    };
+    await runTurn(web, callModel, 'sys', input, undefined, undefined, 'pretty');
+    const allBodies = [...posts.map((p) => p.text), ...edits.map((e) => e.text)];
+    expect(allBodies.some((b) => b.includes('Checking time, Checking time'))).toBe(true);
+  });
+
+  test('pretty mode (#141): final reply has _ran N tools_ footer when N >= 1', async () => {
+    const { web, edits } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'final reply' };
+    };
+    await runTurn(web, callModel, 'sys', input, undefined, undefined, 'pretty');
+    const last = edits[edits.length - 1]?.text ?? '';
+    expect(last).toContain('final reply');
+    // Footer appears with singular form for N=1.
+    expect(last).toContain('ran 1 tool');
+  });
+
+  test('pretty mode (#141): plural footer for N >= 2', async () => {
+    const { web, edits } = makeWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'a',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+            {
+              id: 'b',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'all done' };
+    };
+    await runTurn(web, callModel, 'sys', input, undefined, undefined, 'pretty');
+    const last = edits[edits.length - 1]?.text ?? '';
+    expect(last).toContain('ran 2 tools');
+  });
+
+  test('pretty mode (#141): footer omitted when N=0 (no tools ran)', async () => {
+    const { web, posts } = makeWebStub();
+    const callModel: CallModel = async () => ({ role: 'assistant', content: 'hello' });
+    await runTurn(web, callModel, 'sys', input, undefined, undefined, 'pretty');
+    // No tools ran, no live message ever lazy-created — final posts fresh.
+    const reply = posts[posts.length - 1]?.text;
+    expect(reply).toBe('hello');
+    expect(reply?.includes('ran 0')).toBe(false);
+    expect(reply?.includes('ran ')).toBe(false);
+  });
+
+  test('prettyToolLabel: known + unknown', () => {
+    expect(prettyToolLabel('bash')).toBe('Running command');
+    expect(prettyToolLabel('web_search')).toBe('Searching the web');
+    expect(prettyToolLabel('read_file')).toBe('Reading file');
+    expect(prettyToolLabel('ask_user')).toBe('Asking');
+    // Unknown → raw name.
+    expect(prettyToolLabel('frobnicate')).toBe('frobnicate');
   });
 
   test('reactions are cleared on abort path', async () => {
