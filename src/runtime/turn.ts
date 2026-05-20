@@ -178,13 +178,15 @@ export async function runTurn(
   // No-op when there's still nothing to show (empty header + empty
   // lines) — Slack rejects empty posts, and there's nothing to update.
   const repaint = async (): Promise<void> => {
+    // Pretty mode body: the currently-running tool takes precedence and
+    // REPLACES the model's progress text — the previous content is fully
+    // overwritten, not appended to. Falling back to the model's content
+    // when no tool is mid-execution. Either way, just one line at a time.
     const body = pretty
-      ? prettyProgress.length > 0
-        ? prettyCurrentTool.length > 0
-          ? `*${prettyProgress}*\n_${prettyCurrentTool}…_`
-          : `*${prettyProgress}*`
-        : prettyCurrentTool.length > 0
-          ? `_${prettyCurrentTool}…_`
+      ? prettyCurrentTool.length > 0
+        ? `_${prettyCurrentTool}…_`
+        : prettyProgress.length > 0
+          ? `*${prettyProgress}*`
           : ''
       : renderRound(liveHeader, liveLines);
     if (body.length === 0) return;
@@ -320,6 +322,11 @@ export async function runTurn(
         // Reset the per-tool sub-line; it'll be set again at each tool's
         // execution below.
         prettyCurrentTool = '';
+        // Paint the model's content immediately so the user sees it before
+        // the first tool replaces the body. Without this, the first repaint
+        // in the for-loop below sets prettyCurrentTool and the content text
+        // never becomes visible.
+        await repaint();
       }
 
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
