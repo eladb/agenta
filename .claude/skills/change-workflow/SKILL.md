@@ -90,17 +90,33 @@ Agent(
   4. Run `bun test src` before committing — must be green.
   5. Commit with a **Conventional Commits** subject ending in `(#<NN>)` so GitHub auto-links. Format: `<type>(<scope>): <subject> (#<NN>)`. Types: feat, fix, docs, chore, refactor, test, perf, build, ci, style, revert. Do NOT include `Closes #<NN>` in commits (that goes on the PR).
   6. Push the branch and open a PR. The PR **title must also use Conventional Commits** (typically the same as the commit subject). PR body contains `Closes #<NN>` so merging closes the issue.
-  7. Enable auto-merge so the PR lands as soon as branch-protection's required `unit-tests` check passes:
-     `gh pr merge <PR#> -R eladb/agenta --auto --squash --delete-branch`
-  8. Report the PR URL.
+  7. Report the PR URL.
 
   Notes:
+  - DO NOT enable auto-merge. The main session arms it after an optional local test pass against the dev bot — see the change-workflow skill's step 3.5.
   - DO NOT run `bun run format` (biome rewrites unrelated files — see memory).
   - DO NOT touch CLAUDE.md unless the issue specifies a documentation change (the wrap-session skill handles docs).
   - DO NOT amend or force-push.
   - Use `pwd` to confirm worktree path; all paths must be relative to that root."
 )
 ```
+
+### 3.5. Optional: test against the dev bot before arming auto-merge
+
+After the subagent reports the PR URL, ask the user whether they want to try the change live against the dev bot (`agenta-dev`, A0B5ZQ802F2) before the PR auto-merges. Use `AskUserQuestion` with options like "Yes, let's try it" / "Skip — just merge" / "Show me the diff first".
+
+If the user wants to test:
+1. Fetch the branch into the main repo: `git fetch origin <branch>` then `git checkout <branch>` (or `git worktree add` if the main checkout has dirty state you can't lose).
+2. Start the dev bot in the background: `bun --env-file=.env.dev src/index.ts` via `Bash run_in_background: true` (or `bun run dev`). The bot acquires the `'agent'` lockfile; only one of `bun start` / `bun run dev` / `bun run e2e:dev` can run at a time on this host.
+3. Tell the user the dev bot user is `@agenta2` (U0B596TUNTW) and pick a channel both the dev bot and they are in. Wait for their feedback.
+4. Iterate: if they spot a bug, edit the code on the branch, commit + push, the dev bot will need a restart (kill the background process and start a new one) to pick up changes. If the issue spec needs to change, update it via `gh issue edit` and consider re-delegating.
+5. When they say "looks good", stop the background dev bot (kill the process — DON'T close the chrome browser or other shared services), check out main locally, then arm auto-merge:
+   `gh pr merge <PR#> -R eladb/agenta --auto --squash --delete-branch`
+
+If the user skips testing, arm auto-merge immediately:
+`gh pr merge <PR#> -R eladb/agenta --auto --squash --delete-branch`
+
+Auto-merge from here behaves exactly as before — PR lands when branch protection's `unit-tests` check passes.
 
 If the change is trivial enough to keep in this session (a one-line fix, a typo), still create the issue, commit with `(#NN)` in the main worktree, push, open the PR, and `gh pr merge <N> --auto --squash --delete-branch` so it lands on green — but the default is delegate.
 
@@ -146,7 +162,7 @@ gh issue list -R eladb/agenta --state all --search "socket mode"
 - **Labels are exclusive**: an issue gets exactly one of `phase` / `gotcha` / `proposed`. GitHub default labels (`bug`, `enhancement`, `documentation`) can be added on top as descriptors.
 - **One change request, one issue**. If a request grows new scope mid-flight, file a second issue for the new piece and reference it.
 - **Don't open an issue retroactively** to "document" something that was committed without one. Leave history alone — the commit message and CLAUDE.md phase entry already serve that purpose. Backfill is a one-time migration, not an ongoing habit.
-- **Auto-merge is the default**. Once a PR is open, run `gh pr merge <N> --auto --squash --delete-branch` — branch protection's required `unit-tests` check gates the actual merge, so this just lets the PR land itself when green. Skip auto-merge ONLY when the user has said something like "let me review this one first" or the change is unusually risky (irreversible migration, scope-creeping refactor) — surface that as a question before opening the PR if you're unsure.
+- **Auto-merge is the default, but armed by the main session, not the subagent.** Step 3.5 inserts an optional local-test pass against the dev bot before arming. If the user skips the test, arm immediately after the subagent reports the PR. Skip auto-merge entirely ONLY when the user has said something like "let me review this one first" or the change is unusually risky (irreversible migration, scope-creeping refactor).
 
 ## What NOT to do
 
