@@ -164,9 +164,14 @@ export async function runTurn(
 
   // Pretty-mode progress line. Set whenever the model emits a new round —
   // takes the model's `content` if present, otherwise a comma-joined list of
-  // humanized tool labels. Rendered as a single italic line. Verbose mode
+  // humanized tool labels. Rendered as a single bold line. Verbose mode
   // ignores this field entirely.
   let prettyProgress = '';
+  // Pretty-mode "currently running" indicator. Updated per tool execution so
+  // the user sees `_reading file…_` swap to `_running command…_` while a
+  // single iteration's tool list runs. Cleared between iterations and on the
+  // final reply.
+  let prettyCurrentTool = '';
 
   // Render the current round into Slack. Lazy: posts the message the
   // first time renderRound returns non-empty content, edits thereafter.
@@ -175,8 +180,12 @@ export async function runTurn(
   const repaint = async (): Promise<void> => {
     const body = pretty
       ? prettyProgress.length > 0
-        ? `*${prettyProgress}*`
-        : ''
+        ? prettyCurrentTool.length > 0
+          ? `*${prettyProgress}*\n_${prettyCurrentTool}…_`
+          : `*${prettyProgress}*`
+        : prettyCurrentTool.length > 0
+          ? `_${prettyCurrentTool}…_`
+          : ''
       : renderRound(liveHeader, liveLines);
     if (body.length === 0) return;
     if (liveTs) {
@@ -267,7 +276,10 @@ export async function runTurn(
             messages.push({ role: 'assistant', content: text });
             liveHeader = text;
             liveLines = [];
-            if (pretty) prettyProgress = text;
+            if (pretty) {
+              prettyProgress = text;
+              prettyCurrentTool = '';
+            }
             await repaint();
           }
           continue;
@@ -305,6 +317,9 @@ export async function runTurn(
           text.length > 0
             ? text
             : toolCalls.map((tc) => prettyToolLabel(tc.function.name)).join(', ');
+        // Reset the per-tool sub-line; it'll be set again at each tool's
+        // execution below.
+        prettyCurrentTool = '';
       }
 
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
@@ -390,6 +405,13 @@ export async function runTurn(
         liveLines.push(label);
         const liveIdx = liveLines.length;
         liveLines.push('…');
+        // Pretty mode: surface the per-tool transition as a small italic
+        // sub-line under the round's progress text. Without this, a single
+        // model iteration that emits N tool calls would show the same
+        // progress line for the entire run — the user couldn't tell that
+        // anything is happening between the initial "Let me look at…" and
+        // the final reply (observed 2026-05-20).
+        if (pretty) prettyCurrentTool = prettyToolLabel(tc.function.name);
         await repaint();
 
         let liveBuffer = '';
