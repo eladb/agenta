@@ -10,6 +10,7 @@ import { readEvents } from '../persistence/store';
 import { ensureContainer, isSandboxReady, syncAttachmentsToSandbox } from '../sandbox';
 import { addReaction, editMessage, postInThread, removeReaction } from '../slack/post';
 import { parseCommand } from './commands';
+import type { DisplayStyle } from './home-config';
 import { redact } from './redact';
 
 export type TurnInput = {
@@ -37,6 +38,30 @@ const LIVE_EDIT_INTERVAL_MS = 800;
 // bot is doing, and removed when the turn finishes.
 const REACTION_THINKING = 'thinking_face';
 const REACTION_STEERING = 'wheel';
+
+// Humanized tool labels for pretty mode (#141). Pure lookup — the model's
+// `content` text takes precedence; this is the fallback when content is
+// null/empty. Falls back to the raw tool name for unknown tools so a new
+// tool added without an entry here is still displayed (just not prettily).
+const PRETTY_TOOL_LABELS: Record<string, string> = {
+  bash: 'Running command',
+  web_search: 'Searching the web',
+  read_page: 'Reading a page',
+  read_file: 'Reading file',
+  write_file: 'Writing file',
+  edit_file: 'Editing file',
+  grep: 'Searching code',
+  glob: 'Listing files',
+  list_dir: 'Listing directory',
+  get_current_time: 'Checking time',
+  fetch_url: 'Fetching URL',
+  share_file: 'Sharing file',
+  ask_user: 'Asking',
+};
+
+export function prettyToolLabel(name: string): string {
+  return PRETTY_TOOL_LABELS[name] ?? name;
+}
 
 function toolLabel(tc: ToolCall): string {
   // Short human-readable label from the tool's own describe(). Falls back
@@ -122,7 +147,13 @@ export async function runTurn(
   input: TurnInput,
   signal?: AbortSignal,
   onMidTurnConsume?: () => void,
+  displayStyle: DisplayStyle = 'verbose',
 ): Promise<void> {
+  const pretty = displayStyle === 'pretty';
+  // Count tool calls executed across the whole turn — used for the pretty-
+  // mode footer (`_ran N tools_`). Includes failures so the count matches
+  // user expectations ("the bot tried N things").
+  let toolsRan = 0;
   // "Live" message tracks ONLY the current round. When the next round
   // begins (model returns more text + tool calls), we leave this message
   // frozen and post a new one. When the final reply lands, we post it as
@@ -131,12 +162,22 @@ export async function runTurn(
   let liveHeader = '';
   let liveLines: string[] = [];
 
+  // Pretty-mode progress line. Set whenever the model emits a new round —
+  // takes the model's `content` if present, otherwise a comma-joined list of
+  // humanized tool labels. Rendered as a single italic line. Verbose mode
+  // ignores this field entirely.
+  let prettyProgress = '';
+
   // Render the current round into Slack. Lazy: posts the message the
   // first time renderRound returns non-empty content, edits thereafter.
   // No-op when there's still nothing to show (empty header + empty
   // lines) — Slack rejects empty posts, and there's nothing to update.
   const repaint = async (): Promise<void> => {
-    const body = renderRound(liveHeader, liveLines);
+    const body = pretty
+      ? prettyProgress.length > 0
+        ? `*${prettyProgress}*`
+        : ''
+      : renderRound(liveHeader, liveLines);
     if (body.length === 0) return;
     if (liveTs) {
       await editMessage(web, input.channel, liveTs, body).catch(() => {});
@@ -226,14 +267,20 @@ export async function runTurn(
             messages.push({ role: 'assistant', content: text });
             liveHeader = text;
             liveLines = [];
+            if (pretty) prettyProgress = text;
             await repaint();
           }
           continue;
         }
         // Truly final. Replace the live message with the clean final
         // reply, or post fresh if the model never exercised a tool and
-        // there's no live message yet.
-        const reply = text.length > 0 ? text : '(empty reply)';
+        // there's no live message yet. In pretty mode, append the
+        // `_ran N tools_` footer when any tool ran during the turn.
+        const baseReply = text.length > 0 ? text : '(empty reply)';
+        const reply =
+          pretty && toolsRan > 0
+            ? `${baseReply}\n*ran ${toolsRan} ${toolsRan === 1 ? 'tool' : 'tools'}*`
+            : baseReply;
         if (liveTs) {
           await editMessage(web, input.channel, liveTs, reply).catch(() => {});
         } else {
@@ -250,6 +297,15 @@ export async function runTurn(
       // something non-empty to show.
       liveHeader = text;
       liveLines = [];
+      // Pretty mode: progress line is the model's content if present, else
+      // a comma-joined list of humanized tool labels. Tool failures don't
+      // change this — the next iteration's content (or final reply) will.
+      if (pretty) {
+        prettyProgress =
+          text.length > 0
+            ? text
+            : toolCalls.map((tc) => prettyToolLabel(tc.function.name)).join(', ');
+      }
 
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
 
@@ -353,6 +409,7 @@ export async function runTurn(
             }
           : undefined;
 
+        toolsRan += 1;
         await record({
           event_id: newEventId(),
           thread_key: input.threadKey,

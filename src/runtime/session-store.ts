@@ -3,7 +3,7 @@ import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from '../log';
 import { dataRoot, ensureThreadDir, threadDir } from '../persistence/store';
-import type { HomeConfig, ModelTriplet } from './home-config';
+import type { DisplayConfig, HomeConfig, ModelTriplet } from './home-config';
 
 // Provider-tagged routing info for a thread's sandbox. Persisted into
 // session.json so per-thread sandboxes survive a bot restart: on the next
@@ -79,6 +79,10 @@ export type SessionState = {
   // mid-conversation. Only the env-var NAME is stored; the secret value is
   // read at every call via `process.env[api_key_env]`.
   model?: ModelTriplet;
+  // Frozen per-thread display style (#141). Snapshotted from
+  // `resolveDisplay(channelId)` on first mention so mid-thread homes.json
+  // swaps don't change the UX mid-conversation. Missing = `verbose` (default).
+  display?: DisplayConfig;
 };
 
 const RUNTIME_FILENAME = 'session.json';
@@ -133,6 +137,7 @@ export async function clearSession(threadKey: string): Promise<void> {
     ...(existing?.git !== undefined ? { git: existing.git } : {}),
     ...(existing?.home !== undefined ? { home: existing.home } : {}),
     ...(existing?.model !== undefined ? { model: existing.model } : {}),
+    ...(existing?.display !== undefined ? { display: existing.display } : {}),
   });
 }
 
@@ -240,6 +245,32 @@ export async function setModel(
     ...(model !== undefined ? { model } : {}),
   };
   if (model === undefined) delete next.model;
+  await writeSession(threadKey, next);
+}
+
+// Atomic read-modify-write of the `display` config (#141). Symmetric with
+// setModel. Called once on first mention from `handler.ts`. `undefined`
+// clears the field (the thread reverts to verbose default on read).
+export async function setDisplay(
+  threadKey: string,
+  display: DisplayConfig | undefined,
+): Promise<void> {
+  const existing = await readSession(threadKey);
+  if (!existing) {
+    if (display === undefined) return;
+    await writeSession(threadKey, {
+      status: 'idle',
+      updated_at: new Date().toISOString(),
+      display,
+    });
+    return;
+  }
+  const next: SessionState = {
+    ...existing,
+    updated_at: new Date().toISOString(),
+    ...(display !== undefined ? { display } : {}),
+  };
+  if (display === undefined) delete next.display;
   await writeSession(threadKey, next);
 }
 

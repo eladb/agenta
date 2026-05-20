@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   _resetCacheForTests,
   loadHomesConfig,
+  resolveDisplay,
   resolveHome,
   resolveModel,
   resolveTransport,
@@ -382,6 +383,82 @@ describe('resolveModel', () => {
     if (a) (a as { name: string }).name = 'mutated';
     const b = resolveModel('CB', undefined);
     expect(b?.name).toBe('m');
+  });
+});
+
+describe('display block (#141)', () => {
+  test('missing block → resolveDisplay defaults to verbose', () => {
+    writeConfig({
+      default: { remote: 'file:///x' },
+      channels: {},
+    });
+    expect(resolveDisplay('Cany').style).toBe('verbose');
+  });
+
+  test('channel-specific display wins over default', () => {
+    writeConfig({
+      default: { remote: 'file:///x', display: { style: 'verbose' } },
+      channels: {
+        C123: { remote: 'file:///y', display: { style: 'pretty' } },
+      },
+    });
+    expect(resolveDisplay('C123').style).toBe('pretty');
+    expect(resolveDisplay('Cother').style).toBe('verbose');
+  });
+
+  test('channel without display falls back to default display', () => {
+    writeConfig({
+      default: { remote: 'file:///x', display: { style: 'pretty' } },
+      channels: {
+        C123: { remote: 'file:///y' },
+      },
+    });
+    expect(resolveDisplay('C123').style).toBe('pretty');
+  });
+
+  test('unknown style throws at boot', () => {
+    writeConfig({
+      default: { remote: 'file:///x', display: { style: 'fancy' } },
+      channels: {},
+    });
+    expect(() => loadHomesConfig()).toThrow(/unknown display\.style/);
+  });
+
+  test('missing style throws at boot', () => {
+    writeConfig({
+      default: { remote: 'file:///x', display: {} },
+      channels: {},
+    });
+    expect(() => loadHomesConfig()).toThrow(/display\.style required/);
+  });
+
+  test('non-object display block throws at boot', () => {
+    writeConfig({
+      default: { remote: 'file:///x', display: 'pretty' },
+      channels: {},
+    });
+    expect(() => loadHomesConfig()).toThrow(/"display" must be an object/);
+  });
+
+  test('channel-level display block is validated too', () => {
+    writeConfig({
+      default: { remote: 'file:///x' },
+      channels: {
+        C123: { remote: 'file:///y', display: { style: 'nope' } },
+      },
+    });
+    expect(() => loadHomesConfig()).toThrow(/\[C123\].*unknown display\.style/);
+  });
+
+  test('resolveDisplay returns a fresh snapshot', () => {
+    writeConfig({
+      default: { remote: 'file:///x', display: { style: 'pretty' } },
+      channels: {},
+    });
+    const a = resolveDisplay('CA');
+    (a as { style: string }).style = 'verbose';
+    const b = resolveDisplay('CB');
+    expect(b.style).toBe('pretty');
   });
 });
 

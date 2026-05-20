@@ -2,6 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import { log } from '../log';
 import type { CallModel } from '../model/gateway';
 import { postInThread } from '../slack/post';
+import type { DisplayStyle } from './home-config';
 import { clearSession, readSession, writeSession } from './session-store';
 import { runTurn, type TurnInput } from './turn';
 
@@ -48,6 +49,7 @@ export async function startOrQueue(
   callModel: CallModel,
   systemPrompt: string,
   input: TurnInput,
+  displayStyle: DisplayStyle = 'verbose',
 ): Promise<void> {
   const s = getSession(input.threadKey);
   // Track the frozen prompt for this thread on the in-memory session so all
@@ -73,6 +75,7 @@ export async function startOrQueue(
     ...(prior?.git !== undefined ? { git: prior.git } : {}),
     ...(prior?.home !== undefined ? { home: prior.home } : {}),
     ...(prior?.model !== undefined ? { model: prior.model } : {}),
+    ...(prior?.display !== undefined ? { display: prior.display } : {}),
   });
   // Lets runTurn signal "I consumed a mid-turn mention" so the post-turn
   // pending-check doesn't kick off a redundant follow-up turn.
@@ -82,7 +85,15 @@ export async function startOrQueue(
   try {
     while (true) {
       s.abort = new AbortController();
-      await runTurn(web, callModel, systemPrompt, input, s.abort.signal, onMidTurnConsume);
+      await runTurn(
+        web,
+        callModel,
+        systemPrompt,
+        input,
+        s.abort.signal,
+        onMidTurnConsume,
+        displayStyle,
+      );
       if (!s.pending) break;
       s.pending = false;
       // If /stop fired during the turn we are now in 'stopping'; flip back
@@ -97,6 +108,7 @@ export async function startOrQueue(
         ...(carry?.git !== undefined ? { git: carry.git } : {}),
         ...(carry?.home !== undefined ? { home: carry.home } : {}),
         ...(carry?.model !== undefined ? { model: carry.model } : {}),
+        ...(carry?.display !== undefined ? { display: carry.display } : {}),
       });
     }
   } finally {
@@ -129,6 +141,7 @@ export async function signalStop(
       ...(carry?.git !== undefined ? { git: carry.git } : {}),
       ...(carry?.home !== undefined ? { home: carry.home } : {}),
       ...(carry?.model !== undefined ? { model: carry.model } : {}),
+      ...(carry?.display !== undefined ? { display: carry.display } : {}),
     });
     s.abort.abort();
     log.info('session', `[${tk}] stop signaled`);
