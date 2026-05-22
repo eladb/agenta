@@ -8,6 +8,7 @@ import { reapOrphanSandboxes } from './sandbox';
 import { connect } from './slack/connect';
 import { listen } from './slack/events';
 import { listenInteractive } from './slack/interactive';
+import { startWatchdog } from './slack/watchdog';
 
 const appToken = process.env.SLACK_APP_TOKEN;
 const botToken = process.env.SLACK_BOT_TOKEN;
@@ -100,6 +101,12 @@ const healthServer = Bun.serve({
   },
 });
 log.info('boot', `health on http://0.0.0.0:${healthServer.port}/health`);
+
+// Socket Mode liveness watchdog (#41, addresses #27). Periodic auth.test
+// ping; after 3 consecutive failures the process exits and Fly restarts us.
+// The @slack/socket-mode library has no clean force-reconnect API and we
+// don't trust it to shake out of the silent-deaf state on its own.
+startWatchdog({ web });
 
 // Announce any in-flight sessions that died with the previous process.
 // listSessions() scans data/{thread_key}/session.json.
