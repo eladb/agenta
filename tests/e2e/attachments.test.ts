@@ -15,7 +15,7 @@ import {
   resetStubCalls,
   STUB_REPLY_PREFIX,
   setupTempDataDir,
-  shutdown,
+  safeShutdown,
   startAgent,
   startTester,
   stubCalls,
@@ -34,15 +34,15 @@ beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
   [agent, tester] = await Promise.all([startAgent(), startTester()]);
-});
+}, 120_000);
 
 afterAll(async () => {
   for (const ts of createdThreads) {
     await deleteThread(tester, agent, channel, ts);
   }
-  await shutdown(agent, tester);
+  await safeShutdown(agent, tester);
   cleanupTempDataDir();
-});
+}, 120_000);
 
 beforeEach(() => {
   resetStubCalls();

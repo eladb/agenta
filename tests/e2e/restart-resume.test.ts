@@ -12,7 +12,7 @@ import {
   requireEnv,
   STUB_REPLY_PREFIX,
   setupTempDataDir,
-  shutdown,
+  safeShutdown,
   startAgent,
   startTester,
   stubCallModel,
@@ -29,16 +29,15 @@ beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
   tester = await startTester();
-});
+}, 120_000);
 
 afterAll(async () => {
   for (const ts of createdThreads) {
     if (agent) await deleteThread(tester, agent, channel, ts);
   }
-  if (agent) await shutdown(agent, tester);
-  else await tester.socket.disconnect();
+  await safeShutdown(agent, tester);
   cleanupTempDataDir();
-});
+}, 120_000);
 
 test('boot recovery resumes a turn for a queued mention with status=running', async () => {
   // 1. Seed the parent message in a real Slack thread (so the thread

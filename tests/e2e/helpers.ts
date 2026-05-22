@@ -399,6 +399,26 @@ export async function shutdown(agent: Agent, tester: Tester): Promise<void> {
   tester.lock.release();
 }
 
+// Tolerant variant for `afterAll`: handles partial setup (one or both of
+// agent/tester may be undefined if `beforeAll` timed out or threw before
+// both sockets came up). Per-disconnect errors are swallowed so cleanup
+// never masks the underlying setup failure.
+export async function safeShutdown(
+  agent: Agent | undefined,
+  tester: Tester | undefined,
+): Promise<void> {
+  const disconnects: Promise<unknown>[] = [];
+  if (agent) disconnects.push(agent.socket.disconnect());
+  if (tester) disconnects.push(tester.socket.disconnect());
+  await Promise.allSettled(disconnects);
+  try {
+    agent?.lock.release();
+  } catch {}
+  try {
+    tester?.lock.release();
+  } catch {}
+}
+
 export async function waitFor(
   check: () => boolean,
   opts: { timeoutMs?: number; intervalMs?: number; what?: string } = {},

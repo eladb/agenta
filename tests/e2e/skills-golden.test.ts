@@ -13,7 +13,7 @@ import {
   mention,
   requireEnv,
   setupTempDataDirFromFixture,
-  shutdown,
+  safeShutdown,
   startAgent,
   startTester,
   type Tester,
@@ -51,17 +51,16 @@ beforeAll(async () => {
   // Note: each test calls `startAgent(callModel)` itself so the golden CallModel
   // is per-test (positional replay is scoped to one test's call sequence).
   tester = await startTester();
-});
+}, 120_000);
 
 afterAll(async () => {
   if (!ENABLED) return;
   for (const ts of createdThreads) {
     await deleteThread(tester, agent, channel, ts);
   }
-  if (agent) await shutdown(agent, tester);
-  else await tester.socket.disconnect();
+  await safeShutdown(agent, tester);
   cleanupTempDataDir();
-});
+}, 120_000);
 
 test.skipIf(!ENABLED)(
   'loads and uses python-charts',

@@ -28,7 +28,7 @@ import {
   requireEnv,
   STUB_REPLY_PREFIX,
   setupTempDataDir,
-  shutdown,
+  safeShutdown,
   startAgent,
   startTester,
   type Tester,
@@ -90,17 +90,17 @@ if (!DOCKER_PROVIDER_ACTIVE) {
 
     channel = requireEnv('TEST_CHANNEL_ID');
     [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
-  });
+  }, 120_000);
 
   afterAll(async () => {
     for (const ts of createdThreadTs) {
       await deleteThread(tester, agent, channel, ts);
     }
-    await shutdown(agent, tester);
+    await safeShutdown(agent, tester);
     homeOverride.restore();
     cleanupTempDataDir();
     rmSync(repoPath, { recursive: true, force: true });
-  });
+  }, 120_000);
 
   describe('git-backed agent home over WS tunnel', () => {
     test('mention triggers bootstrap; sandbox can clone and push back to allowed ref', async () => {
