@@ -1,18 +1,19 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { appendFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync } from 'node:fs';
 import { newEventId, nowIso } from '../../src/persistence/events';
-import { ensureThreadDir, messagesPath, threadDir } from '../../src/persistence/store';
+import { messagesPath } from '../../src/persistence/store';
 import { recoverInterruptedSessions } from '../../src/runtime/recovery';
+import { readSession, writeSession } from '../../src/runtime/session-store';
 import { threadKey as makeThreadKey } from '../../src/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
   deleteThread,
+  mention,
   requireEnv,
   STUB_REPLY_PREFIX,
   setupTempDataDir,
-  safeShutdown,
+  shutdown,
   startAgent,
   startTester,
   stubCallModel,
@@ -29,58 +30,60 @@ beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
   tester = await startTester();
-}, 120_000);
+});
 
 afterAll(async () => {
   for (const ts of createdThreads) {
     if (agent) await deleteThread(tester, agent, channel, ts);
   }
-  await safeShutdown(agent, tester);
+  if (agent) await shutdown(agent, tester);
+  else await tester.socket.disconnect();
   cleanupTempDataDir();
-}, 120_000);
+});
 
 test('boot recovery resumes a turn for a queued mention with status=running', async () => {
-  // 1. Seed the parent message in a real Slack thread (so the thread
-  //    exists on Slack's side and we can poll replies). Use the tester
-  //    bot's tokens directly — the agent isn't running yet.
-  const parent = await tester.web.chat.postMessage({
+  // 1. Boot the agent first. Socket Mode is connected before we post
+  //    anything, so we don't trip the Socket Mode replay window (#165):
+  //    when the parent message lands, the agent sees it live and processes
+  //    it as a real turn, leaving an assistant `message` event in JSONL
+  //    that serves as a boundary for findPendingMention.
+  agent = await startAgent(stubCallModel);
+
+  // 2. Tester posts a real mention. The agent picks it up, runs a turn,
+  //    and stub-replies with `stub: <@BOTUSERID> restart-resume parent`.
+  const threadTs = await mention(
+    tester,
+    agent.botUserId,
     channel,
-    text: 'restart-resume parent',
-  });
-  if (!parent.ts) throw new Error('no parent ts');
-  const threadTs = parent.ts;
+    undefined,
+    'restart-resume parent',
+  );
   createdThreads.push(threadTs);
 
-  const uniq = `resume-${Date.now()}`;
-
-  // 2. Simulate "bot died mid-turn with queued mention":
-  //    - session.json: status='running'
-  //    - JSONL: a slack message event whose text contains the bot mention
-  //
-  //    Discover the agent's bot user id without starting Socket Mode by
-  //    resolving from auth.test using just the bot token (the helper for
-  //    that lives inside connect(); we replicate the minimum).
-  const { WebClient } = await import('@slack/web-api');
-  const probe = new WebClient(requireEnv('SLACK_BOT_TOKEN'));
-  const auth = await probe.auth.test();
-  const botUserId = auth.user_id;
-  if (!botUserId) throw new Error('could not resolve agent bot user id');
-
-  const tk = makeThreadKey(channel, threadTs);
-  ensureThreadDir(tk);
-
-  // Write a session.json with status: running and the frozen prompt.
-  const sessionPath = join(threadDir(tk), 'session.json');
-  writeFileSync(
-    sessionPath,
-    JSON.stringify({
-      status: 'running',
-      updated_at: nowIso(),
-      system_prompt: 'you are a test agent',
-    }),
+  // 3. Wait for the parent's stub reply — once that arrives, JSONL has
+  //    [parent-mention, assistant-reply] and the assistant event is the
+  //    boundary recovery's findPendingMention will look past.
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
+    t.startsWith(STUB_REPLY_PREFIX),
   );
 
-  // Append a slack mention event into JSONL.
+  const tk = makeThreadKey(channel, threadTs);
+
+  // 4. Simulate the bot dying mid-turn on a queued mention: flip
+  //    session.json back to status='running' while preserving every other
+  //    field the prior turn populated (system_prompt, sandbox, git, home,
+  //    model, display — see session-preservation-invariant memory / #135).
+  const existing = await readSession(tk);
+  if (!existing) throw new Error('expected session.json after parent turn');
+  await writeSession(tk, {
+    ...existing,
+    status: 'running',
+    updated_at: nowIso(),
+  });
+
+  // 5. Append a queued mention into JSONL — this is the event recovery
+  //    should re-kick a turn for.
+  const uniq = `resume-${Date.now()}`;
   const ev = {
     event_id: newEventId(),
     thread_key: tk,
@@ -91,17 +94,13 @@ test('boot recovery resumes a turn for a queued mention with status=running', as
     payload: {
       slack_ts: `${Date.now() / 1000}`,
       user: tester.botUserId,
-      text: `<@${botUserId}> ${uniq}`,
+      text: `<@${agent.botUserId}> ${uniq}`,
     },
   };
   appendFileSync(messagesPath(tk), `${JSON.stringify(ev)}\n`);
 
-  // 3. Boot the agent (registers event handler + acquires socket). Then
-  //    explicitly invoke recoverInterruptedSessions — production runs
-  //    this from src/index.ts at boot, but the test harness's
-  //    `startAgent` only wires up the listener. Passing the same stub
-  //    call_model so the resumed turn echoes through STUB_REPLY_PREFIX.
-  agent = await startAgent();
+  // 6. Run recovery explicitly (production calls this from src/index.ts on
+  //    boot; the test harness's startAgent only wires the listener).
   await recoverInterruptedSessions({
     web: agent.web,
     botUserId: agent.botUserId,
@@ -113,11 +112,15 @@ test('boot recovery resumes a turn for a queued mention with status=running', as
     callModelOverride: stubCallModel,
   });
 
-  // 4. Assert the bot posted both the restart notice and a reply to the
-  //    queued mention.
+  // 7. Assert: restart notice posted + the resumed turn's stub reply
+  //    contains the queued mention's unique text.
   await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => /restarted/i.test(t));
-  const replyText = await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
-    t.startsWith(STUB_REPLY_PREFIX),
+  const replyText = await waitForReply(
+    tester,
+    channel,
+    threadTs,
+    agent.botUserId,
+    (t) => t.startsWith(STUB_REPLY_PREFIX) && t.includes(uniq),
   );
   expect(replyText).toContain(uniq);
 });
