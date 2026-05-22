@@ -8,3 +8,4 @@ data/
 .slack-apps.json
 .claude/*
 !.claude/skills/
+.nightly-cycle-summary.md
