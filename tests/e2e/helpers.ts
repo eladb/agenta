@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
@@ -101,6 +101,40 @@ export function setupTempDataDir(): string {
   // 'repository not found'.
   defaultHomeDir = mkdtempSync(join(tmpdir(), 'agenta-e2e-home-'));
   writeFileSync(join(defaultHomeDir, 'README.md'), 'agenta e2e home\n');
+  const gitRun = (...args: string[]): void => {
+    const r = spawnSync('git', args, { cwd: defaultHomeDir, stdio: 'ignore' });
+    if (r.status !== 0) {
+      throw new Error(`git ${args.join(' ')} failed (status ${r.status}) in ${defaultHomeDir}`);
+    }
+  };
+  gitRun('init', '--initial-branch=main', '--quiet');
+  gitRun('add', '.');
+  gitRun(
+    '-c',
+    'user.email=e2e@agenta',
+    '-c',
+    'user.name=e2e',
+    'commit',
+    '-q',
+    '-m',
+    'initial',
+  );
+  defaultHomeOverride = withTempHomeConfig(`file://${defaultHomeDir}`);
+  return dataDir;
+}
+
+// Like `setupTempDataDir`, but seeds the temp home from a checked-in
+// fixture directory (e.g. `tests/e2e/fixtures/python-charts-home/`)
+// instead of an empty README.md. Used by tests that need specific
+// content in the agent home — e.g. `skills-golden.test.ts` needs a
+// `python-charts` skill so the prompt builder projects it. The fixture
+// dir is copied (not symlinked) so the per-test working tree is
+// isolated and can be git-init'd in place.
+export function setupTempDataDirFromFixture(fixtureDir: string): string {
+  dataDir = mkdtempSync(join(tmpdir(), 'agenta-e2e-'));
+  process.env.AGENTA_DATA_DIR = dataDir;
+  defaultHomeDir = mkdtempSync(join(tmpdir(), 'agenta-e2e-home-'));
+  cpSync(fixtureDir, defaultHomeDir, { recursive: true });
   const gitRun = (...args: string[]): void => {
     const r = spawnSync('git', args, { cwd: defaultHomeDir, stdio: 'ignore' });
     if (r.status !== 0) {

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { dataRoot, messagesPath } from '../../src/persistence/store';
 import { threadKey } from '../../src/runtime/thread';
 import { ensureImage } from '../../src/sandbox/docker';
@@ -12,7 +12,7 @@ import {
   DOCKER_PROVIDER_ACTIVE,
   mention,
   requireEnv,
-  setupTempDataDir,
+  setupTempDataDirFromFixture,
   shutdown,
   startAgent,
   startTester,
@@ -43,7 +43,9 @@ const createdThreads: string[] = [];
 
 beforeAll(async () => {
   if (!ENABLED) return;
-  setupTempDataDir();
+  // Seed the temp home with the checked-in python-charts fixture so the
+  // skills block lands in the system prompt. (#102)
+  setupTempDataDirFromFixture(join(import.meta.dir, 'fixtures', 'python-charts-home'));
   channel = requireEnv('TEST_CHANNEL_ID');
   await ensureImage();
   // Note: each test calls `startAgent(callModel)` itself so the golden CallModel
@@ -61,8 +63,7 @@ afterAll(async () => {
   cleanupTempDataDir();
 });
 
-// TODO(#102): re-enable once the temp home includes a python-charts skill fixture.
-test.skip(
+test(
   'loads and uses python-charts',
   async () => {
     const { callModel, flush } = createGoldenCallModel(
