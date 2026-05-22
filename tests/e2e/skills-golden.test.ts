@@ -63,7 +63,7 @@ afterAll(async () => {
   cleanupTempDataDir();
 });
 
-test(
+test.skipIf(!ENABLED)(
   'loads and uses python-charts',
   async () => {
     const { callModel, flush } = createGoldenCallModel(
