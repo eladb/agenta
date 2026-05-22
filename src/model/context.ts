@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { log } from '../log';
 import { sanitize } from '../persistence/attachments';
 import type { AgentaEvent, AttachmentRef, ToolCallEvent } from '../persistence/events';
 import { readEvents, threadDir } from '../persistence/store';
@@ -54,10 +55,42 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
     }
   }
 
+  // Project edits + deletes against prior user messages keyed by slack_ts
+  // (#39). We don't mutate the JSONL — this is a projection-only collapse:
+  //   - last edit wins for repeated edits on the same slack_ts
+  //   - delete wins over any edits on the same slack_ts (message dropped)
+  //   - orphan edit/delete (no matching prior message) → warn + skip
+  // Edits/deletes on assistant messages are ignored (slack/events.ts already
+  // filters bot-authored edits, so this only protects against malformed
+  // history).
+  const userSlackTs = new Set<string>();
+  for (const e of events) {
+    if (e.source === 'slack' && e.type === 'message') userSlackTs.add(e.payload.slack_ts);
+  }
+  const editedText = new Map<string, string>();
+  const deletedTs = new Set<string>();
+  for (const e of events) {
+    if (e.source !== 'slack') continue;
+    if (e.type === 'edit') {
+      if (!userSlackTs.has(e.payload.slack_ts)) {
+        log.warn('context', `orphan edit for slack_ts=${e.payload.slack_ts}; skipping`);
+        continue;
+      }
+      editedText.set(e.payload.slack_ts, e.payload.new_text);
+    } else if (e.type === 'delete') {
+      if (!userSlackTs.has(e.payload.slack_ts)) {
+        log.warn('context', `orphan delete for slack_ts=${e.payload.slack_ts}; skipping`);
+        continue;
+      }
+      deletedTs.add(e.payload.slack_ts);
+    }
+  }
+
   const messages: Message[] = [{ role: 'system', content: systemPrompt }];
   for (const e of events) {
     if (e.source === 'slack' && e.type === 'message') {
-      const text = e.payload.text;
+      if (deletedTs.has(e.payload.slack_ts)) continue;
+      const text = editedText.get(e.payload.slack_ts) ?? e.payload.text;
       const files = e.payload.files ?? [];
       // Hint the model where the synced files live inside the sandbox. The
       // bot's lazy-sync pushes data/{tk}/attachments/<file_id>-<safeName>
