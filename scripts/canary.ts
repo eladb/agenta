@@ -87,6 +87,13 @@ async function waitForFlyHealth(): Promise<void> {
 }
 
 async function agentBotUserId(): Promise<string> {
+  // Prefer an explicit env var so canary can run from a host whose `.env`
+  // doesn't carry the prod agent's xoxb-/xapp- credentials (e.g. dev hosts
+  // where having prod's SLACK_APP_TOKEN would split-brain Socket Mode).
+  // Falls back to auth.test for backwards compat with CD, where
+  // SLACK_BOT_TOKEN is a GitHub secret.
+  const explicit = process.env.CANARY_TARGET_USER_ID;
+  if (explicit && explicit.length > 0) return explicit;
   const web = new WebClient(requireEnv('SLACK_BOT_TOKEN'));
   const auth = await web.auth.test();
   if (!auth.user_id) throw new Error('agent auth.test returned no user_id');
@@ -138,7 +145,13 @@ async function main(): Promise<void> {
         agentUser,
         // Any non-empty reply from the agent counts. The "thinking…" placeholder
         // is also a reply from the agent, so wait for it to mutate into prose.
-        (text) => text.length > 0 && !text.includes('thinking…') && !text.includes('•'),
+        // Reject `error: <msg>` replies — turn.ts posts those on model failure,
+        // which would otherwise satisfy the predicate and mask a broken bot (#84).
+        (text) =>
+          text.length > 0 &&
+          !text.includes('thinking…') &&
+          !text.includes('•') &&
+          !/^error: /.test(text),
         { timeoutMs: STEP_TIMEOUT_MS },
       );
       return `reply length ${reply.length}`;

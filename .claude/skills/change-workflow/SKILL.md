@@ -107,9 +107,9 @@ After the subagent reports the PR URL, ask the user whether they want to try the
 
 If the user wants to test:
 1. Fetch the branch into the main repo: `git fetch origin <branch>` then `git checkout <branch>` (or `git worktree add` if the main checkout has dirty state you can't lose).
-2. Start the dev bot in the background: `bun --env-file=.env.dev src/index.ts` via `Bash run_in_background: true` (or `bun run dev`). The bot acquires the `'agent'` lockfile; only one of `bun start` / `bun run dev` / `bun run e2e:dev` can run at a time on this host.
-3. Tell the user the dev bot user is `@agenta2` (U0B596TUNTW) and pick a channel both the dev bot and they are in. Wait for their feedback.
-4. Iterate: if they spot a bug, edit the code on the branch, commit + push, the dev bot will need a restart (kill the background process and start a new one) to pick up changes. If the issue spec needs to change, update it via `gh issue edit` and consider re-delegating.
+2. Start the dev bot in the background: `bun start` via `Bash run_in_background: true`. On the claude-agents host, `.env` is wired to the dev bot (agenta-dev). The bot acquires the `'agent'` lockfile; only one of `bun start` / `bun run e2e` can run at a time on this host.
+3. Tell the user the dev bot user is `@agenta-dev` (U0B596TUNTW) and pick a channel both the dev bot and they are in. Wait for their feedback.
+4. Iterate: if they spot a bug, edit the code on the branch, commit + push, the dev bot will need a restart (kill the background process via `kill -9 <pid>` then start a new one) to pick up changes. SIGTERM via `pkill -f "bun.*src/index"` sometimes doesn't take — go straight to `kill -9` after one polite attempt. If the issue spec needs to change, update it via `gh issue edit` and consider re-delegating.
 5. When they say "looks good", stop the background dev bot (kill the process — DON'T close the chrome browser or other shared services), check out main locally, then arm auto-merge:
    `gh pr merge <PR#> -R eladb/agenta --auto --squash --delete-branch`
 
