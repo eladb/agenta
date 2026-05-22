@@ -110,7 +110,7 @@ startWatchdog({ web });
 
 // Announce any in-flight sessions that died with the previous process.
 // listSessions() scans data/{thread_key}/session.json.
-recoverInterruptedSessions(web).catch((err) => {
+recoverInterruptedSessions({ web, botUserId, fallbackModel }).catch((err) => {
   log.warn('boot', `recovery failed: ${(err as Error).message}`);
 });
 
