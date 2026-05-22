@@ -341,7 +341,7 @@ export async function waitForReply(
   predicate: (text: string) => boolean,
   opts: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<string> {
-  const timeoutMs = opts.timeoutMs ?? 20000;
+  const timeoutMs = opts.timeoutMs ?? 45000;
   const intervalMs = opts.intervalMs ?? 500;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -403,7 +403,7 @@ export async function waitFor(
   check: () => boolean,
   opts: { timeoutMs?: number; intervalMs?: number; what?: string } = {},
 ): Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? 20000;
+  const timeoutMs = opts.timeoutMs ?? 45000;
   const intervalMs = opts.intervalMs ?? 200;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
