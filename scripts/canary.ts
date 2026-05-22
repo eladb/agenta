@@ -138,7 +138,13 @@ async function main(): Promise<void> {
         agentUser,
         // Any non-empty reply from the agent counts. The "thinking…" placeholder
         // is also a reply from the agent, so wait for it to mutate into prose.
-        (text) => text.length > 0 && !text.includes('thinking…') && !text.includes('•'),
+        // Reject `error: <msg>` replies — turn.ts posts those on model failure,
+        // which would otherwise satisfy the predicate and mask a broken bot (#84).
+        (text) =>
+          text.length > 0 &&
+          !text.includes('thinking…') &&
+          !text.includes('•') &&
+          !/^error: /.test(text),
         { timeoutMs: STEP_TIMEOUT_MS },
       );
       return `reply length ${reply.length}`;
