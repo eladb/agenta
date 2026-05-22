@@ -51,13 +51,24 @@ type ManifestCreateResp = {
   oauth_authorize_url: string;
 };
 
-type ManifestJson = { display_information?: { name?: string } } & Record<string, unknown>;
+type ManifestJson = {
+  display_information?: { name?: string };
+  features?: { bot_user?: { display_name?: string } } & Record<string, unknown>;
+} & Record<string, unknown>;
 
 function readManifest(path: string, overrideName?: string): string {
   const raw = readFileSync(path, 'utf8');
   if (!overrideName) return raw;
   const parsed = JSON.parse(raw) as ManifestJson;
+  // Patch BOTH the app name and the bot user's display name so the bot user
+  // shows up as `<overrideName>` in Slack instead of `agenta` (with Slack
+  // auto-suffixing to disambiguate a duplicate in the workspace). Observed
+  // on the first agenta-dev bootstrap — bot landed as `agenta2`.
   parsed.display_information = { ...(parsed.display_information ?? {}), name: overrideName };
+  parsed.features = {
+    ...(parsed.features ?? {}),
+    bot_user: { ...(parsed.features?.bot_user ?? {}), display_name: overrideName },
+  };
   return JSON.stringify(parsed);
 }
 

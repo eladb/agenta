@@ -87,6 +87,13 @@ async function waitForFlyHealth(): Promise<void> {
 }
 
 async function agentBotUserId(): Promise<string> {
+  // Prefer an explicit env var so canary can run from a host whose `.env`
+  // doesn't carry the prod agent's xoxb-/xapp- credentials (e.g. dev hosts
+  // where having prod's SLACK_APP_TOKEN would split-brain Socket Mode).
+  // Falls back to auth.test for backwards compat with CD, where
+  // SLACK_BOT_TOKEN is a GitHub secret.
+  const explicit = process.env.CANARY_TARGET_USER_ID;
+  if (explicit && explicit.length > 0) return explicit;
   const web = new WebClient(requireEnv('SLACK_BOT_TOKEN'));
   const auth = await web.auth.test();
   if (!auth.user_id) throw new Error('agent auth.test returned no user_id');
