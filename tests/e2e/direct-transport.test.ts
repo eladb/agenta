@@ -34,7 +34,7 @@ import {
   requireEnv,
   STUB_REPLY_PREFIX,
   setupTempDataDir,
-  shutdown,
+  safeShutdown,
   startAgent,
   startTester,
   type Tester,
@@ -127,13 +127,13 @@ if (!SHOULD_RUN) {
         `direct-transport e2e setup: ls-remote failed (${probe.status}): ${probe.stderr}`,
       );
     }
-  });
+  }, 120_000);
 
   afterAll(async () => {
     for (const ts of createdThreadTs) {
       await deleteThread(tester, agent, channel, ts);
     }
-    await shutdown(agent, tester);
+    await safeShutdown(agent, tester);
     homeOverride.restore();
     cleanupTempDataDir();
     delete process.env[AUTH_ENV];
@@ -146,7 +146,7 @@ if (!SHOULD_RUN) {
         console.warn(`[direct-transport] failed to delete ${ref}: ${r.stderr}`);
       }
     }
-  });
+  }, 120_000);
 
   describe('direct SSH transport', () => {
     test('mention triggers direct bootstrap; sandbox commits + pushes session branch to GitHub', async () => {
