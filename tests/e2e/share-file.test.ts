@@ -12,7 +12,7 @@ import {
   mention,
   requireEnv,
   setupTempDataDir,
-  shutdown,
+  safeShutdown,
   startAgent,
   startTester,
   type Tester,
@@ -54,16 +54,16 @@ beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
   [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
-});
+}, 120_000);
 
 afterAll(async () => {
   if (!HAS_DOCKER) return;
   for (const ts of createdThreads) {
     await deleteThread(tester, agent, channel, ts);
   }
-  await shutdown(agent, tester);
+  await safeShutdown(agent, tester);
   cleanupTempDataDir();
-});
+}, 120_000);
 
 test.if(HAS_DOCKER)(
   'share_file: writes a file in the sandbox, shares it to the thread, persists JSONL + local copy',

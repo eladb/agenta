@@ -12,7 +12,7 @@ import {
   mention,
   requireEnv,
   setupTempDataDir,
-  shutdown,
+  safeShutdown,
   startAgent,
   startTester,
   type Tester,
@@ -51,16 +51,16 @@ beforeAll(async () => {
   // Build/pull the sandbox image up front so the first mention doesn't time out.
   await ensureImage();
   [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
-});
+}, 120_000);
 
 afterAll(async () => {
   if (!HAS_DOCKER) return;
   for (const ts of createdThreads) {
     await deleteThread(tester, agent, channel, ts);
   }
-  await shutdown(agent, tester);
+  await safeShutdown(agent, tester);
   cleanupTempDataDir();
-});
+}, 120_000);
 
 test.if(HAS_DOCKER)(
   'bash tool: model can execute a command in the sandbox container',

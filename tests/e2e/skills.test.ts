@@ -13,7 +13,7 @@ import {
   requireEnv,
   STUB_REPLY_PREFIX,
   setupTempDataDir,
-  shutdown,
+  safeShutdown,
   startAgent,
   startTester,
   type Tester,
@@ -58,18 +58,18 @@ beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
   [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
-});
+}, 120_000);
 
 afterAll(async () => {
   for (const ts of createdThreads) {
     await deleteThread(tester, agent, channel, ts);
   }
-  await shutdown(agent, tester);
+  await safeShutdown(agent, tester);
   cleanupTempDataDir();
   if (originalAgentHomeEnv === undefined) delete process.env.AGENT_HOME_DIR;
   else process.env.AGENT_HOME_DIR = originalAgentHomeEnv;
   rmSync(agentHomeDir, { recursive: true, force: true });
-});
+}, 120_000);
 
 // TODO(#103): re-enable once the second-mention-in-same-thread bug is fixed.
 test.skip('two mentions in one thread -> system message is byte-identical (frozen prompt)', async () => {
