@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { appendEvent } from '../persistence/store';
@@ -54,7 +54,125 @@ describe('buildMessages', () => {
     ]);
   });
 
-  it('skips edit and delete events', async () => {
+  it('projects a simple edit by rewriting the user message text in place', async () => {
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: "what's 2+2" },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'edit',
+      payload: { slack_ts: '1', new_text: "what's 3+3" },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toEqual([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: "what's 3+3" },
+    ]);
+  });
+
+  it('drops a deleted user message entirely from the projection', async () => {
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: 'first' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '2', text: 'oops' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'delete',
+      payload: { slack_ts: '2' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '3', text: 'last' },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toEqual([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'first' },
+      { role: 'user', content: 'last' },
+    ]);
+  });
+
+  it('collapses multiple edits to the same slack_ts (last edit wins)', async () => {
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: 'v0' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'edit',
+      payload: { slack_ts: '1', new_text: 'v1' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'edit',
+      payload: { slack_ts: '1', new_text: 'v2' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'edit',
+      payload: { slack_ts: '1', new_text: 'v3' },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toEqual([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'v3' },
+    ]);
+  });
+
+  it('delete wins when an edit and a delete target the same slack_ts', async () => {
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: 'original' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'edit',
+      payload: { slack_ts: '1', new_text: 'edited' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'delete',
+      payload: { slack_ts: '1' },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toEqual([{ role: 'system', content: 'sys' }]);
+  });
+
+  it('logs and skips an edit whose slack_ts has no prior message (no throw)', async () => {
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: 'real' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'edit',
+      payload: { slack_ts: '999', new_text: 'phantom' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'delete',
+      payload: { slack_ts: '999' },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toEqual([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'real' },
+    ]);
+  });
+
+  it('does not mutate the JSONL when projecting edits + deletes', async () => {
     await appendEvent('t', {
       source: 'slack',
       type: 'message',
@@ -67,14 +185,18 @@ describe('buildMessages', () => {
     });
     await appendEvent('t', {
       source: 'slack',
-      type: 'delete',
-      payload: { slack_ts: '1' },
+      type: 'message',
+      payload: { slack_ts: '2', text: 'goodbye' },
     });
-    const m = await buildMessages('t', 'sys');
-    expect(m).toEqual([
-      { role: 'system', content: 'sys' },
-      { role: 'user', content: 'hello' },
-    ]);
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'delete',
+      payload: { slack_ts: '2' },
+    });
+    const before = readFileSync(join(dir, 't', 'messages.jsonl'), 'utf-8');
+    await buildMessages('t', 'sys');
+    const after = readFileSync(join(dir, 't', 'messages.jsonl'), 'utf-8');
+    expect(after).toBe(before);
   });
 
   it('inlines an image attachment as an image_url data URI', async () => {

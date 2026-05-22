@@ -230,7 +230,6 @@ For the setup script only (rotates every 12h):
 
 For CD (`.github/workflows/cd.yml`) — set as GitHub Actions repo secrets, not in `.env`:
 - `CI_SLACK_APP_TOKEN`, `CI_SLACK_BOT_TOKEN` — dedicated `agenta-ci` Slack app (e2e step)
-- `AGENT_HOME_READ_TOKEN` — (CI legacy) was used to clone the agent home into `$RUNNER_TEMP` before #87. The e2e suite now self-provisions a `file://` home config via `setupTempDataDir`, so the clone step in `cd.yml` is gone. The secret stays defined so the rename can land independently when issued via UI.
 - `TEST_APP_TOKEN`, `TEST_BOT_TOKEN` — tester credentials (same as local e2e)
 - `MODEL_API_KEY` — model gateway key for the in-process agent during e2e
 - `FLY_API_TOKEN` — deploy token (generate with `flyctl tokens create deploy -a agenta-bot`)

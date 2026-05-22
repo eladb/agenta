@@ -12,7 +12,8 @@ import type { DeleteMessage, EditMessage, IncomingEvent, NormalMessage } from '.
 import { postInThread } from '../slack/post';
 import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
-import { createDedupe, dedupeKey } from './dedupe';
+import { dedupeKey } from './dedupe';
+import { isDuplicate } from './dedupe-store';
 import {
   type DisplayConfig,
   type HomeConfig,
@@ -26,8 +27,6 @@ import { refreshHomeMirror } from './home-refresh';
 import { signalStop, startOrQueue } from './session';
 import { readSession, setDisplay, setModel, writeSession } from './session-store';
 import { threadKey } from './thread';
-
-const isDuplicate = createDedupe();
 
 // `fallbackModel` is the env-derived triplet (MODEL_NAME / MODEL_BASE_URL /
 // MODEL_API_KEY) — used when neither the channel's nor the default home's
@@ -68,7 +67,7 @@ async function handleMessage(
     ts: e.ts,
     text: e.text,
   });
-  if (isDuplicate(key)) {
+  if (await isDuplicate(key)) {
     log.info('handler', `dropped duplicate ${key}`);
     return;
   }
@@ -130,6 +129,24 @@ async function handleMessage(
     return;
   }
 
+  await kickoffTurn(web, tk, e.channel, e.threadTs, e.user, fallbackModel, callModelOverride);
+}
+
+// Shared seam: handler.handleMessage uses this after recording a mention;
+// recovery.ts uses it to re-fire a turn for a thread that died with a
+// queued mention. Splits out the prompt/model resolve + sandbox warmup +
+// startOrQueue from the Slack-event-specific preamble (dedupe, file
+// download, JSONL append). Caller must have already recorded the
+// triggering mention(s) into JSONL.
+export async function kickoffTurn(
+  web: WebClient,
+  tk: string,
+  channel: string,
+  threadTs: string,
+  userId: string,
+  fallbackModel: ModelTriplet | undefined,
+  callModelOverride: CallModel | undefined,
+): Promise<void> {
   // Per-thread frozen system prompt + per-channel home: composed on the
   // first mention and persisted into session.json so every subsequent turn
   // in this thread sees the same prompt + home even if README.md / skills /
@@ -139,8 +156,8 @@ async function handleMessage(
   const { prompt, model, display } = await resolveSystemPromptAndModel(
     web,
     tk,
-    e.channel,
-    e.user,
+    channel,
+    userId,
     fallbackModel,
   );
   // Build the per-thread callModel from the frozen triplet (env-name only —
@@ -172,8 +189,8 @@ async function handleMessage(
     callModel,
     prompt,
     {
-      channel: e.channel,
-      threadTs: e.threadTs,
+      channel,
+      threadTs,
       threadKey: tk,
     },
     display.style,
@@ -305,7 +322,7 @@ async function resolveCreator(
 }
 
 async function handleEdit(e: EditMessage): Promise<void> {
-  if (e.eventId && isDuplicate(`id:${e.eventId}`)) return;
+  if (e.eventId && (await isDuplicate(`id:${e.eventId}`))) return;
   const tk = threadKey(e.channel, e.threadTs);
   await record({
     event_id: newEventId(),
@@ -324,7 +341,7 @@ async function handleEdit(e: EditMessage): Promise<void> {
 }
 
 async function handleDelete(e: DeleteMessage): Promise<void> {
-  if (e.eventId && isDuplicate(`id:${e.eventId}`)) return;
+  if (e.eventId && (await isDuplicate(`id:${e.eventId}`))) return;
   const tk = threadKey(e.channel, e.threadTs);
   await deleteAttachmentsForSlackTs(tk, e.deletedTs);
   await record({
