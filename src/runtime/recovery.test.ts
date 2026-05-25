@@ -98,8 +98,8 @@ describe('recoverInterruptedSessions', () => {
   test('posts a notice for each non-idle session.json then flips it to idle', async () => {
     const tk1 = threadKey('C123', '1700000000.000100');
     const tk2 = threadKey('C456', '1700000001.000200');
-    await writeSession(tk1, { status: 'running', updated_at: 't', system_prompt: 'sp1' });
-    await writeSession(tk2, { status: 'stopping', updated_at: 't', system_prompt: 'sp2' });
+    await writeSession(tk1, { status: 'running', updated_at: 't' });
+    await writeSession(tk2, { status: 'stopping', updated_at: 't' });
 
     const { web, posts } = makeWebStub();
     await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
@@ -111,14 +111,12 @@ describe('recoverInterruptedSessions', () => {
     expect(byChannel.C123?.text).toMatch(/running/);
     expect(byChannel.C456?.text).toMatch(/stopping/);
 
-    // After clearing the entry transitions to idle with system_prompt
+    // After clearing the entry transitions to idle
     // preserved. The next mention picks the prompt back up.
     const after1 = await readSession(tk1);
     const after2 = await readSession(tk2);
     expect(after1?.status).toBe('idle');
-    expect(after1?.system_prompt).toBe('sp1');
     expect(after2?.status).toBe('idle');
-    expect(after2?.system_prompt).toBe('sp2');
   });
 
   test('no-op when there are no interrupted sessions', async () => {
@@ -129,7 +127,7 @@ describe('recoverInterruptedSessions', () => {
 
   test('idle entries do not trigger boot announcements', async () => {
     const tk = threadKey('C9', '1700000099.000100');
-    await writeSession(tk, { status: 'idle', updated_at: 't', system_prompt: 'sp' });
+    await writeSession(tk, { status: 'idle', updated_at: 't' });
     const { web, posts } = makeWebStub();
     await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
     expect(posts).toEqual([]);

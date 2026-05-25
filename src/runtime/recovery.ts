@@ -33,7 +33,7 @@ export type RecoveryDeps = {
 export async function recoverInterruptedSessions(deps: RecoveryDeps): Promise<void> {
   const { web, botUserId, fallbackModel, callModelOverride } = deps;
   // Idle entries exist for any thread that has ever been mentioned (the
-  // frozen system_prompt lives there). Filter to non-idle so we only
+  // frozen routing lives there). Filter to non-idle so we only
   // announce real interruptions.
   const interrupted = (await listSessions()).filter(
     ({ state }) => state.status === 'running' || state.status === 'stopping',
