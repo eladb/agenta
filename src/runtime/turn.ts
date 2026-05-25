@@ -196,8 +196,15 @@ export async function runTurn(
     if (pretty) {
       const lines: string[] = [];
       if (prettyProgress.length > 0) lines.push(`*${prettyProgress}*`);
-      if (prettyCurrentTool.length > 0) lines.push(`_${prettyCurrentTool}…_`);
-      else if (prettyLastTool.length > 0) lines.push(`_${prettyLastTool}_`);
+      // Only show the tool sub-line when it adds information beyond the
+      // progress line. When model content is empty the progress falls back
+      // to the humanized tool label — showing it again as the italic
+      // sub-line is redundant ("Running command" + "_Running command…_").
+      const toolLine = prettyCurrentTool.length > 0 ? prettyCurrentTool : prettyLastTool;
+      const toolSuffix = prettyCurrentTool.length > 0 ? '…' : '';
+      if (toolLine.length > 0 && toolLine !== prettyProgress) {
+        lines.push(`_${toolLine}${toolSuffix}_`);
+      }
       body = lines.join('\n');
     } else {
       body = renderRound(liveHeader, liveLines);
