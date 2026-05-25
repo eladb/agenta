@@ -493,6 +493,7 @@ export async function runTurn(
                 channel: input.channel,
                 threadTs: input.threadTs,
                 checklistTs: liveTs ?? input.threadTs,
+                modelContent: liveHeader.length > 0 ? liveHeader : undefined,
               },
               signal,
             );
