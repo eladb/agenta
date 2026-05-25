@@ -81,7 +81,14 @@ export const askUser: Tool = {
     // ask is pending; once it settles, turn.ts's next updateChecklist call
     // edits the message back to plain text (and editMessage clears the
     // blocks so the buttons disappear).
-    const blocks = buildAskBlocks(kind as AskKind, question, options, placeholder);
+    //
+    // When the model emitted content text this iteration (ctx.modelContent),
+    // prepend it as a context block above the question so the user keeps
+    // the model's reasoning visible alongside the interactive controls.
+    const askBlocks = buildAskBlocks(kind as AskKind, question, options, placeholder);
+    const blocks = ctx.modelContent
+      ? [{ type: 'section', text: { type: 'mrkdwn', text: ctx.modelContent } }, ...askBlocks]
+      : askBlocks;
     try {
       await editBlocksMessage(web, channel, messageTs, question, blocks);
     } catch (err) {

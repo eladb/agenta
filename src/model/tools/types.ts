@@ -18,6 +18,11 @@ export type ToolContext = {
   // appears inline with the turn's progress instead of out-of-order below
   // the final reply.
   checklistTs?: string;
+  // The model's latest content text from this iteration (liveHeader in
+  // turn.ts). ask_user prepends it above the interactive blocks so the
+  // user keeps the model's reasoning/context visible alongside the
+  // choices.
+  modelContent?: string;
 };
 
 export type Tool = {
