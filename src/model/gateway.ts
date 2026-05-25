@@ -237,16 +237,31 @@ export function translateToBedrock(messages: Message[]): {
       continue;
     }
     // role === 'tool' — Anthropic embeds these as tool_result blocks
-    // inside a user turn. Group consecutive tool messages into one user
-    // turn so multi-tool turns produce a single user message.
+    // inside a user turn. The API requires tool_result blocks in the user
+    // turn IMMEDIATELY after the assistant turn containing the tool_use.
+    //
+    // In OpenAI format, a user message can appear between an assistant's
+    // tool_calls and its tool results (mid-turn steering). In Anthropic
+    // format that's invalid — tool_results must come first. We handle
+    // this by prepending the tool_result into the existing user turn
+    // (before any text blocks) when one already exists after the last
+    // assistant turn, or by creating a fresh user turn otherwise.
     const block: AnthropicToolResultBlock = {
       type: 'tool_result',
       tool_use_id: m.tool_call_id,
       content: m.content,
     };
     const last = out[out.length - 1];
-    if (last && last.role === 'user' && last.content.every((b) => b.type === 'tool_result')) {
-      last.content.push(block);
+    if (last && last.role === 'user') {
+      // Find the insertion point: after existing tool_result blocks but
+      // before any text/image/document blocks. This ensures tool_results
+      // cluster at the front of the user turn (satisfying the API) while
+      // user text from steering follows.
+      let insertIdx = 0;
+      while (insertIdx < last.content.length && last.content[insertIdx]?.type === 'tool_result') {
+        insertIdx++;
+      }
+      last.content.splice(insertIdx, 0, block);
     } else {
       out.push({ role: 'user', content: [block] });
     }
