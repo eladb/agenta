@@ -276,7 +276,6 @@ describe('flyProvider', () => {
     await writeSession(TK, {
       status: 'idle',
       updated_at: 't',
-      system_prompt: 'preserve',
       sandbox: {
         provider: 'fly',
         machine_id: 'old-dead-machine',
@@ -343,7 +342,6 @@ describe('flyProvider', () => {
     // Token preserved so anyone holding the bearer header keeps working.
     expect(session.sandbox.token).toBe('preserved-token');
     // System prompt + other fields untouched.
-    expect(session.system_prompt).toBe('preserve');
   });
 
   test('ensure: persisted record with non-fly provider is cleared and ignored', async () => {
@@ -384,7 +382,6 @@ describe('flyProvider', () => {
     await writeSession(TK, {
       status: 'idle',
       updated_at: 't',
-      system_prompt: 'preserve-me',
       sandbox: { provider: 'fly', machine_id: 'dead-machine', token: 'dead-tok' },
     });
 
@@ -418,15 +415,13 @@ describe('flyProvider', () => {
     if (session?.sandbox?.provider !== 'fly') throw new Error('unreachable');
     expect(session.sandbox.machine_id).toBe('new-machine');
     // Regression: re-provision must preserve other session fields.
-    expect(session.system_prompt).toBe('preserve-me');
   });
 
-  test('remove: clears the sandbox field while preserving status + system_prompt', async () => {
+  test('remove: clears the sandbox field while preserving status + sandbox + home', async () => {
     const TK = 'tk-remove';
     await writeSession(TK, {
       status: 'idle',
       updated_at: 't',
-      system_prompt: 'keep-me',
       sandbox: { provider: 'fly', machine_id: 'm-rm', token: 't' },
     });
     // Seed in-memory state so remove() makes the DELETE call.
@@ -465,7 +460,6 @@ describe('flyProvider', () => {
     const after = await readSession(TK);
     expect(after?.sandbox).toBeUndefined();
     expect(after?.status).toBe('idle');
-    expect(after?.system_prompt).toBe('keep-me');
   });
 
   test('killAll: sweeps every session.json sandbox field across data/*', async () => {
@@ -477,7 +471,6 @@ describe('flyProvider', () => {
     await writeSession('b', {
       status: 'idle',
       updated_at: 't',
-      system_prompt: 'keep',
       sandbox: { provider: 'fly', machine_id: 'mB', token: 't' },
     });
 
@@ -496,7 +489,6 @@ describe('flyProvider', () => {
     await flyProvider.killAll();
     expect((await readSession('a'))?.sandbox).toBeUndefined();
     expect((await readSession('b'))?.sandbox).toBeUndefined();
-    expect((await readSession('b'))?.system_prompt).toBe('keep');
   });
 
   test('listAll: returns ids of every fly machine with the agenta- prefix', async () => {

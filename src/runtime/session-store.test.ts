@@ -43,30 +43,16 @@ describe('session-store', () => {
     expect(after?.status).toBe('idle');
   });
 
-  test('clearSession preserves system_prompt across the running -> idle transition', async () => {
-    const prompt = 'frozen system prompt for this thread';
-    await writeSession('tk-prompt', {
-      status: 'running',
-      updated_at: 't',
-      system_prompt: prompt,
-    });
-    await clearSession('tk-prompt');
-    const after = await readSession('tk-prompt');
-    expect(after?.status).toBe('idle');
-    expect(after?.system_prompt).toBe(prompt);
-  });
-
-  test('clearSession on a thread without prior state writes idle with no system_prompt', async () => {
+  test('clearSession on a thread without prior state writes a bare idle record', async () => {
     await clearSession('never-existed');
     const after = await readSession('never-existed');
     expect(after?.status).toBe('idle');
-    expect(after?.system_prompt).toBeUndefined();
   });
 
   test('listSessions includes idle entries (recovery filters separately)', async () => {
     await writeSession('a', { status: 'running', updated_at: 't' });
     await writeSession('b', { status: 'stopping', updated_at: 't' });
-    await writeSession('c', { status: 'idle', updated_at: 't', system_prompt: 'p' });
+    await writeSession('c', { status: 'idle', updated_at: 't' });
     // Thread with no session.json shouldn't appear.
     writeFileSync(join(dataDir, 'd'), '');
     const out = await listSessions();
@@ -74,7 +60,6 @@ describe('session-store', () => {
     expect(keys).toEqual(['a', 'b', 'c']);
     const c = out.find((e) => e.threadKey === 'c');
     expect(c?.state.status).toBe('idle');
-    expect(c?.state.system_prompt).toBe('p');
   });
 
   test('listSessions returns [] when data dir is missing', async () => {
@@ -101,9 +86,9 @@ describe('session-store', () => {
 
   test('readSession returns the idle state correctly', async () => {
     const tk = 'idle-thread';
-    await writeSession(tk, { status: 'idle', updated_at: 't', system_prompt: 'sp' });
+    await writeSession(tk, { status: 'idle', updated_at: 't' });
     const out = await readSession(tk);
-    expect(out).toEqual({ status: 'idle', updated_at: 't', system_prompt: 'sp' });
+    expect(out).toEqual({ status: 'idle', updated_at: 't' });
   });
 
   test('the session.json file is at the expected path', async () => {
@@ -111,17 +96,12 @@ describe('session-store', () => {
     expect(existsSync(join(dataDir, 'tk', 'session.json'))).toBe(true);
   });
 
-  test('setSandbox preserves status and system_prompt on writes', async () => {
-    await writeSession('tk-sb', {
-      status: 'running',
-      updated_at: 't0',
-      system_prompt: 'hello prompt',
-    });
+  test('setSandbox preserves status on writes', async () => {
+    await writeSession('tk-sb', { status: 'running', updated_at: 't0' });
     const rec: SandboxRecord = { provider: 'docker', container_name: 'agenta-tk-sb', token: 'tok' };
     await setSandbox('tk-sb', rec);
     const after = await readSession('tk-sb');
     expect(after?.status).toBe('running');
-    expect(after?.system_prompt).toBe('hello prompt');
     expect(after?.sandbox).toEqual(rec);
   });
 
@@ -130,13 +110,11 @@ describe('session-store', () => {
     await writeSession('tk-clear', {
       status: 'idle',
       updated_at: 't',
-      system_prompt: 'p',
       sandbox: rec,
     });
     await setSandbox('tk-clear', undefined);
     const after = await readSession('tk-clear');
     expect(after?.status).toBe('idle');
-    expect(after?.system_prompt).toBe('p');
     expect(after?.sandbox).toBeUndefined();
   });
 
@@ -158,13 +136,11 @@ describe('session-store', () => {
     await writeSession('tk-keep', {
       status: 'running',
       updated_at: 't',
-      system_prompt: 'p',
       sandbox: rec,
     });
     await clearSession('tk-keep');
     const after = await readSession('tk-keep');
     expect(after?.status).toBe('idle');
-    expect(after?.system_prompt).toBe('p');
     expect(after?.sandbox).toEqual(rec);
   });
 
@@ -192,12 +168,10 @@ describe('session-store', () => {
     await writeSession('tk-home-merge', {
       status: 'running',
       updated_at: 't',
-      system_prompt: 'sp',
     });
     await setHome('tk-home-merge', { remote: 'file:///x' });
     const after = await readSession('tk-home-merge');
     expect(after?.status).toBe('running');
-    expect(after?.system_prompt).toBe('sp');
     expect(after?.home).toEqual({ remote: 'file:///x' });
   });
 
@@ -205,20 +179,17 @@ describe('session-store', () => {
     await writeSession('tk-home-clear', {
       status: 'idle',
       updated_at: 't',
-      system_prompt: 'sp',
       home: { remote: 'file:///x' },
     });
     await setHome('tk-home-clear', undefined);
     const after = await readSession('tk-home-clear');
     expect(after?.home).toBeUndefined();
-    expect(after?.system_prompt).toBe('sp');
   });
 
   test('clearSession preserves the home record across the running -> idle transition', async () => {
     await writeSession('tk-home-keep', {
       status: 'running',
       updated_at: 't',
-      system_prompt: 'p',
       home: { remote: 'file:///x' },
     });
     await clearSession('tk-home-keep');

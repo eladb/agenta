@@ -19,9 +19,6 @@ type Session = {
   // batching: after the current turn finishes we run one more turn that
   // picks up everything queued (the JSONL already has the new messages).
   pending: boolean;
-  // Frozen system prompt for this thread. Threaded through every
-  // writeSession call so the file always carries it forward.
-  systemPrompt?: string;
 };
 
 const sessions = new Map<string, Session>();
@@ -52,9 +49,6 @@ export async function startOrQueue(
   displayStyle: DisplayStyle = 'verbose',
 ): Promise<void> {
   const s = getSession(input.threadKey);
-  // Track the frozen prompt for this thread on the in-memory session so all
-  // subsequent runtime writes carry it forward.
-  s.systemPrompt = systemPrompt;
   if (s.status !== 'idle') {
     s.pending = true;
     log.info('session', `[${input.threadKey}] queued (status=${s.status})`);
@@ -70,7 +64,6 @@ export async function startOrQueue(
   await writeSession(input.threadKey, {
     status: 'running',
     updated_at: nowIso(),
-    system_prompt: systemPrompt,
     ...(prior?.sandbox !== undefined ? { sandbox: prior.sandbox } : {}),
     ...(prior?.git !== undefined ? { git: prior.git } : {}),
     ...(prior?.home !== undefined ? { home: prior.home } : {}),
@@ -103,7 +96,6 @@ export async function startOrQueue(
       await writeSession(input.threadKey, {
         status: 'running',
         updated_at: nowIso(),
-        system_prompt: systemPrompt,
         ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
         ...(carry?.git !== undefined ? { git: carry.git } : {}),
         ...(carry?.home !== undefined ? { home: carry.home } : {}),
@@ -136,7 +128,6 @@ export async function signalStop(
     await writeSession(tk, {
       status: 'stopping',
       updated_at: nowIso(),
-      ...(s.systemPrompt !== undefined ? { system_prompt: s.systemPrompt } : {}),
       ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
       ...(carry?.git !== undefined ? { git: carry.git } : {}),
       ...(carry?.home !== undefined ? { home: carry.home } : {}),
