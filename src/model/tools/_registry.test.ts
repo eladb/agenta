@@ -24,6 +24,7 @@ describe('TOOL_DEFS', () => {
       'list_dir',
       'ask_user',
       'salto_cli',
+      'github_create_pr',
     ]) {
       expect(names.has(expected)).toBe(true);
     }
