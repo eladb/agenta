@@ -20,8 +20,18 @@ RUN bun install --production --frozen-lockfile
 FROM oven/bun:1-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      git ca-certificates jq python3 openssh-client \
+      git ca-certificates jq python3 openssh-client curl \
  && rm -rf /var/lib/apt/lists/*
+
+# Salto CLI on the bot host (not the sandbox). The salto_* tools shell
+# out to `salto-cloud` here, using SALTO_API_TOKEN from the bot's env
+# (Fly secret in prod). Pinned version — release shape is a single
+# static ELF binary at the tarball root, extracted to /usr/local/bin.
+ARG SALTO_CLI_VERSION=1.4.4
+RUN curl -fsSL "https://cli.salto.io/release/${SALTO_CLI_VERSION}/linux-x64.tar.gz" \
+      | tar -xz -C /usr/local/bin \
+ && chmod +x /usr/local/bin/salto-cloud \
+ && /usr/local/bin/salto-cloud --version
 
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
