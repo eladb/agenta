@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildSystemPrompt } from './prompt';
+import { buildSystemPrompt, UNIVERSAL_PROMPT_SUFFIX } from './prompt';
 
 let agentHome: string;
 
@@ -25,11 +25,11 @@ function writeSkill(slug: string, frontmatter: string, body = ''): void {
 }
 
 describe('buildSystemPrompt', () => {
-  test('README.md alone (no skills dir) -> output is README.md verbatim', async () => {
+  test('README.md alone (no skills dir) -> README.md followed by the universal suffix', async () => {
     const body = 'You are a bot.\nBe nice.';
     writeBot(body);
     const out = await buildSystemPrompt(agentHome, undefined);
-    expect(out).toBe(body);
+    expect(out).toBe(`${body}\n\n${UNIVERSAL_PROMPT_SUFFIX}`);
   });
 
   test('README.md + two valid skills -> Available skills block with sorted JSON array', async () => {
@@ -90,15 +90,23 @@ describe('buildSystemPrompt', () => {
   test('SYSTEM_PROMPT env prefix is prepended with a blank line before README.md', async () => {
     writeBot('BOT body');
     const out = await buildSystemPrompt(agentHome, 'PREFIX TEXT');
-    expect(out).toBe('PREFIX TEXT\n\nBOT body');
+    expect(out).toBe(`PREFIX TEXT\n\nBOT body\n\n${UNIVERSAL_PROMPT_SUFFIX}`);
   });
 
-  test('zero skills -> no "Available skills" section in output', async () => {
+  test('zero skills -> no "Available skills" section in output (but suffix still present)', async () => {
     writeBot('BOT only');
     // No skills dir at all.
     const out = await buildSystemPrompt(agentHome, undefined);
     expect(out).not.toContain('Available skills');
-    expect(out).toBe('BOT only');
+    expect(out).toBe(`BOT only\n\n${UNIVERSAL_PROMPT_SUFFIX}`);
+  });
+
+  test('universal suffix is always present, even with no README and no skills', async () => {
+    // No README, no skills — minimal home.
+    const out = await buildSystemPrompt(agentHome, undefined);
+    expect(out).toBe(UNIVERSAL_PROMPT_SUFFIX);
+    expect(out).toContain('ask_user');
+    expect(out).toContain('Asking the user');
   });
 
   test('zero skills with empty skills dir present -> still omit Available skills', async () => {
@@ -106,7 +114,7 @@ describe('buildSystemPrompt', () => {
     mkdirSync(join(agentHome, 'skills'), { recursive: true });
     const out = await buildSystemPrompt(agentHome, undefined);
     expect(out).not.toContain('Available skills');
-    expect(out).toBe('BOT only');
+    expect(out).toBe(`BOT only\n\n${UNIVERSAL_PROMPT_SUFFIX}`);
   });
 
   test('skill without frontmatter delimiters is skipped', async () => {
