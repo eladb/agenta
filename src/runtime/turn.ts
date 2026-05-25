@@ -58,6 +58,7 @@ const PRETTY_TOOL_LABELS: Record<string, string> = {
   share_file: 'Sharing file',
   ask_user: 'Asking',
   salto_cli: 'Running Salto CLI',
+  github_create_pr: 'Opening GitHub PR',
 };
 
 export function prettyToolLabel(name: string): string {

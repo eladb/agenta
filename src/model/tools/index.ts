@@ -4,6 +4,7 @@ import { bash, formatBashResult } from './bash';
 import { editFileTool } from './edit-file';
 import { fetchUrl } from './fetch-url';
 import { getCurrentTime } from './get-current-time';
+import { githubCreatePr } from './github-create-pr';
 import { glob } from './glob';
 import { grep } from './grep';
 import { listDirTool } from './list-dir';
@@ -37,6 +38,7 @@ export const TOOLS: Record<string, Tool> = {
   share_file: shareFile,
   web_search: webSearch,
   salto_cli: saltoCli,
+  github_create_pr: githubCreatePr,
 };
 
 export const TOOL_DEFS: ToolDef[] = Object.values(TOOLS).map((t) => t.def);
