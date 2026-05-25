@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { createCallModel } from './gateway';
+import { createCallModel, translateFromBedrock, translateToBedrock } from './gateway';
 
 const ORIG_FETCH = globalThis.fetch;
 
@@ -130,5 +130,202 @@ describe('createCallModel', () => {
     });
     const call = createCallModel({ apiKey: 'k', baseUrl: 'https://x.test/v1', model: 'm' });
     await expect(call([])).rejects.toThrow(/empty content/);
+  });
+});
+
+describe('createCallModel — bedrock branch', () => {
+  it('POSTs to bedrock-runtime/<region>/model/<id>/invoke with Bearer auth + Anthropic body', async () => {
+    stubFetch({
+      status: 200,
+      body: { content: [{ type: 'text', text: 'hi back' }], stop_reason: 'end_turn' },
+    });
+    const call = createCallModel({
+      apiKey: 'aws-bearer',
+      baseUrl: 'bedrock://us-east-1',
+      model: 'us.anthropic.claude-opus-4-7',
+    });
+    const out = await call([
+      { role: 'system', content: 'be terse' },
+      { role: 'user', content: 'hi' },
+    ]);
+    expect(out).toEqual({ role: 'assistant', content: 'hi back' });
+    expect(lastCall?.url).toBe(
+      'https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-opus-4-7/invoke',
+    );
+    const headers = lastCall?.init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer aws-bearer');
+    // No OpenRouter ranking headers — those are noise on Bedrock.
+    expect(headers['HTTP-Referer']).toBeUndefined();
+    const body = JSON.parse(lastCall?.init?.body as string);
+    expect(body.anthropic_version).toBe('bedrock-2023-05-31');
+    expect(body.system).toBe('be terse');
+    expect(body.messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]);
+    expect(body.model).toBeUndefined(); // model is in the URL path, not the body
+    expect(body.max_tokens).toBeGreaterThan(0);
+  });
+
+  it('translates tools schema OpenAI → Anthropic and forwards them', async () => {
+    stubFetch({
+      status: 200,
+      body: {
+        content: [{ type: 'tool_use', id: 'tu_1', name: 'get_current_time', input: {} }],
+        stop_reason: 'tool_use',
+      },
+    });
+    const call = createCallModel({
+      apiKey: 'k',
+      baseUrl: 'bedrock://us-east-1',
+      model: 'us.anthropic.claude-opus-4-7',
+    });
+    const out = await call([{ role: 'user', content: 'now?' }], {
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'get_current_time', description: 'd', parameters: { type: 'object' } },
+        },
+      ],
+    });
+    expect(out.tool_calls).toEqual([
+      { id: 'tu_1', type: 'function', function: { name: 'get_current_time', arguments: '{}' } },
+    ]);
+    const body = JSON.parse(lastCall?.init?.body as string);
+    expect(body.tools).toEqual([
+      { name: 'get_current_time', description: 'd', input_schema: { type: 'object' } },
+    ]);
+  });
+
+  it('throws on non-2xx and reads apiKeyEnv at call time', async () => {
+    stubFetch({ status: 400, body: 'on-demand throughput not supported' });
+    const call = createCallModel({
+      apiKey: 'k',
+      baseUrl: 'bedrock://us-east-1',
+      model: 'anthropic.claude-opus-4-7',
+    });
+    await expect(call([{ role: 'user', content: 'hi' }])).rejects.toThrow(/model HTTP 400/);
+
+    process.env.BEDROCK_TEST_KEY = 'env-v1';
+    stubFetch({
+      status: 200,
+      body: { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' },
+    });
+    const call2 = createCallModel({
+      apiKeyEnv: 'BEDROCK_TEST_KEY',
+      baseUrl: 'bedrock://us-west-2',
+      model: 'us.anthropic.claude-sonnet-4-6',
+    });
+    await call2([{ role: 'user', content: 'hi' }]);
+    expect((lastCall?.init?.headers as Record<string, string>).Authorization).toBe('Bearer env-v1');
+    delete process.env.BEDROCK_TEST_KEY;
+  });
+
+  it('rejects bedrock:// with no region', () => {
+    expect(() =>
+      createCallModel({
+        apiKey: 'k',
+        baseUrl: 'bedrock://',
+        model: 'us.anthropic.claude-opus-4-7',
+      }),
+    ).toThrow(/bedrock base_url must be bedrock:/);
+  });
+});
+
+describe('translateToBedrock', () => {
+  it('lifts system messages out of messages[] and joins consecutive ones', () => {
+    const { system, messages } = translateToBedrock([
+      { role: 'system', content: 'first' },
+      { role: 'system', content: 'second' },
+      { role: 'user', content: 'hi' },
+    ]);
+    expect(system).toBe('first\n\nsecond');
+    expect(messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]);
+  });
+
+  it('converts image_url data URLs into image blocks; PDFs into document blocks', () => {
+    const { messages } = translateToBedrock([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'see' },
+          {
+            type: 'image_url',
+            image_url: { url: 'data:image/png;base64,iVBOR' },
+          },
+          {
+            type: 'image_url',
+            image_url: { url: 'data:application/pdf;base64,JVBE' },
+          },
+        ],
+      },
+    ]);
+    expect(messages[0]?.content).toEqual([
+      { type: 'text', text: 'see' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBOR' } },
+      {
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data: 'JVBE' },
+      },
+    ]);
+  });
+
+  it('encodes assistant tool_calls as tool_use blocks; consecutive tool messages group into one user turn', () => {
+    const { messages } = translateToBedrock([
+      { role: 'user', content: 'do it' },
+      {
+        role: 'assistant',
+        content: 'sure',
+        tool_calls: [
+          { id: 't1', type: 'function', function: { name: 'f1', arguments: '{"x":1}' } },
+          { id: 't2', type: 'function', function: { name: 'f2', arguments: '' } },
+        ],
+      },
+      { role: 'tool', tool_call_id: 't1', content: 'r1' },
+      { role: 'tool', tool_call_id: 't2', content: 'r2' },
+      { role: 'assistant', content: 'done' },
+    ]);
+    expect(messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'do it' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'sure' },
+          { type: 'tool_use', id: 't1', name: 'f1', input: { x: 1 } },
+          { type: 'tool_use', id: 't2', name: 'f2', input: {} },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 't1', content: 'r1' },
+          { type: 'tool_result', tool_use_id: 't2', content: 'r2' },
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ]);
+  });
+});
+
+describe('translateFromBedrock', () => {
+  it('extracts text + tool_use blocks into OpenAI assistant shape', () => {
+    const out = translateFromBedrock({
+      content: [
+        { type: 'text', text: 'thinking… ' },
+        { type: 'tool_use', id: 'tu_1', name: 'f', input: { a: 1 } },
+        { type: 'text', text: 'done' },
+      ],
+    });
+    expect(out).toEqual({
+      role: 'assistant',
+      content: 'thinking… done',
+      tool_calls: [{ id: 'tu_1', type: 'function', function: { name: 'f', arguments: '{"a":1}' } }],
+    });
+  });
+
+  it('returns content-only assistant when no tool_use blocks present', () => {
+    const out = translateFromBedrock({ content: [{ type: 'text', text: 'hello' }] });
+    expect(out).toEqual({ role: 'assistant', content: 'hello' });
+  });
+
+  it('throws when both text and tool_use are empty', () => {
+    expect(() => translateFromBedrock({ content: [] })).toThrow(/empty content/);
   });
 });

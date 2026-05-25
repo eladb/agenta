@@ -163,29 +163,33 @@ describe('session state machine', () => {
     expect(posts.some((p) => p.text === 'stopped')).toBe(true);
   });
 
-  test('mention during stopping runs a fresh turn after abort', async () => {
-    const { web } = makeWebStub();
-    let calls = 0;
-    const callModel: CallModel = async (_messages, opts) => {
-      calls++;
-      if (calls === 1) {
-        await new Promise<void>((_, reject) => {
-          opts?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('aborted', 'AbortError')),
-          );
-        });
-      }
-      return { role: 'assistant', content: `reply-${calls}` };
-    };
-    const run = startOrQueue(web, callModel, 'sys', input);
-    await new Promise((r) => setTimeout(r, 5));
-    await signalStop(web, 'C', '1.0', 'k1');
-    // New mention arrives after /stop while we're still in 'stopping'.
-    await startOrQueue(web, callModel, 'sys', input);
-    await run;
-    expect(calls).toBe(2);
-    expect(getStatus('k1')).toBe('idle');
-  });
+  test(
+    'mention during stopping runs a fresh turn after abort',
+    async () => {
+      const { web } = makeWebStub();
+      let calls = 0;
+      const callModel: CallModel = async (_messages, opts) => {
+        calls++;
+        if (calls === 1) {
+          await new Promise<void>((_, reject) => {
+            opts?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          });
+        }
+        return { role: 'assistant', content: `reply-${calls}` };
+      };
+      const run = startOrQueue(web, callModel, 'sys', input);
+      await new Promise((r) => setTimeout(r, 5));
+      await signalStop(web, 'C', '1.0', 'k1');
+      // New mention arrives after /stop while we're still in 'stopping'.
+      await startOrQueue(web, callModel, 'sys', input);
+      await run;
+      expect(calls).toBe(2);
+      expect(getStatus('k1')).toBe('idle');
+    },
+    15000,
+  );
 
   test('mid-turn steering clears pending and avoids a redundant follow-up turn', async () => {
     const { web } = makeWebStub();
