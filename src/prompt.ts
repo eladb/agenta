@@ -15,6 +15,29 @@ export type SkillEntry = {
   [extra: string]: unknown;
 };
 
+// Universal closing guidance appended to every system prompt regardless
+// of the home repo. Lives here (not in any home repo's README.md) so the
+// rule is consistent across channels and doesn't drift when a home repo
+// is rewritten or replaced. Keep this short and prescriptive — it's the
+// last thing the model reads before its first turn.
+export const UNIVERSAL_PROMPT_SUFFIX = [
+  '# Asking the user',
+  '',
+  'When you need a decision or input from the user, prefer the `ask_user`',
+  'tool over a plain-text question. It renders interactive Slack controls',
+  '(buttons, single-select, multi-select, or text input) directly in the',
+  'thread — one tap on mobile vs the user typing a reply.',
+  '',
+  '- **buttons** — 2–4 short labeled choices (Yes/No, A/B/C)',
+  '- **select** — pick one from a list of 5+ options',
+  '- **multi_select** — pick any subset from a list',
+  '- **text** — free-form input when the answer is not enumerable',
+  '',
+  'Use `ask_user` whenever the answer space is bounded or enumerable. Skip',
+  'it when you can just do the task; reserve it for genuine forks (which',
+  'file to edit, which env to target, which approach to take).',
+].join('\n');
+
 // Compose the system prompt for a new thread from an agent home directory.
 //
 // `agentHomeDir` is passed by the caller — handler.ts resolves it from
@@ -62,6 +85,7 @@ export async function buildSystemPrompt(
       ].join('\n'),
     );
   }
+  parts.push(UNIVERSAL_PROMPT_SUFFIX);
   return parts.join('\n\n');
 }
 
