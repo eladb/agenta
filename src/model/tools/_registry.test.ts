@@ -23,12 +23,7 @@ describe('TOOL_DEFS', () => {
       'glob',
       'list_dir',
       'ask_user',
-      'salto_deployment_show',
-      'salto_deployment_preview',
-      'salto_deployment_deploy',
-      'salto_deployment_validate',
-      'salto_deployment_sync',
-      'salto_deployment_create_from_pr',
+      'salto_cli',
     ]) {
       expect(names.has(expected)).toBe(true);
     }

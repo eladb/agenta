@@ -9,12 +9,7 @@ import { grep } from './grep';
 import { listDirTool } from './list-dir';
 import { readFileTool } from './read-file';
 import { readPage } from './read-page';
-import { saltoDeploymentCreateFromPr } from './salto-deployment-create-from-pr';
-import { saltoDeploymentDeploy } from './salto-deployment-deploy';
-import { saltoDeploymentPreview } from './salto-deployment-preview';
-import { saltoDeploymentShow } from './salto-deployment-show';
-import { saltoDeploymentSync } from './salto-deployment-sync';
-import { saltoDeploymentValidate } from './salto-deployment-validate';
+import { saltoCli } from './salto-cli';
 import { shareFile } from './share-file';
 import type { Tool, ToolContext, ToolProgressChunk } from './types';
 import { webSearch } from './web-search';
@@ -41,12 +36,7 @@ export const TOOLS: Record<string, Tool> = {
   ask_user: askUser,
   share_file: shareFile,
   web_search: webSearch,
-  salto_deployment_show: saltoDeploymentShow,
-  salto_deployment_preview: saltoDeploymentPreview,
-  salto_deployment_deploy: saltoDeploymentDeploy,
-  salto_deployment_validate: saltoDeploymentValidate,
-  salto_deployment_sync: saltoDeploymentSync,
-  salto_deployment_create_from_pr: saltoDeploymentCreateFromPr,
+  salto_cli: saltoCli,
 };
 
 export const TOOL_DEFS: ToolDef[] = Object.values(TOOLS).map((t) => t.def);

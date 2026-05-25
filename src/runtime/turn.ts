@@ -57,12 +57,7 @@ const PRETTY_TOOL_LABELS: Record<string, string> = {
   fetch_url: 'Fetching URL',
   share_file: 'Sharing file',
   ask_user: 'Asking',
-  salto_deployment_show: 'Looking up Salto deployment',
-  salto_deployment_preview: 'Previewing Salto deployment',
-  salto_deployment_deploy: 'Deploying via Salto',
-  salto_deployment_validate: 'Validating Salto deployment',
-  salto_deployment_sync: 'Syncing Salto deployment',
-  salto_deployment_create_from_pr: 'Creating Salto deployment from PR',
+  salto_cli: 'Running Salto CLI',
 };
 
 export function prettyToolLabel(name: string): string {
