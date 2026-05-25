@@ -172,23 +172,34 @@ export async function runTurn(
   // single iteration's tool list runs. Cleared between iterations and on the
   // final reply.
   let prettyCurrentTool = '';
+  // Pretty-mode "just completed" indicator. Set when a tool finishes, kept
+  // visible until the next tool starts OR the next model iteration begins.
+  // Gives the user context for what the model is processing during the
+  // model-call wait between rounds (previously this slot held the literal
+  // word "Thinking" which replaced the model's own description text).
+  let prettyLastTool = '';
 
   // Render the current round into Slack. Lazy: posts the message the
   // first time renderRound returns non-empty content, edits thereafter.
   // No-op when there's still nothing to show (empty header + empty
   // lines) — Slack rejects empty posts, and there's nothing to update.
   const repaint = async (): Promise<void> => {
-    // Pretty mode body: the currently-running tool takes precedence and
-    // REPLACES the model's progress text — the previous content is fully
-    // overwritten, not appended to. Falling back to the model's content
-    // when no tool is mid-execution. Either way, just one line at a time.
-    const body = pretty
-      ? prettyCurrentTool.length > 0
-        ? `_${prettyCurrentTool}…_`
-        : prettyProgress.length > 0
-          ? `*${prettyProgress}*`
-          : ''
-      : renderRound(liveHeader, liveLines);
+    // Pretty mode body: bold model `content` (the model's own description
+    // of what it's doing) stacked with an optional italic tool indicator
+    // underneath — `_<label>…_` while a tool is running, `_<label>_` after
+    // it completes. Both lines coexist so the user keeps the model's text
+    // for context while tools run, and keeps the last tool name visible
+    // during the model-call wait between iterations.
+    let body: string;
+    if (pretty) {
+      const lines: string[] = [];
+      if (prettyProgress.length > 0) lines.push(`*${prettyProgress}*`);
+      if (prettyCurrentTool.length > 0) lines.push(`_${prettyCurrentTool}…_`);
+      else if (prettyLastTool.length > 0) lines.push(`_${prettyLastTool}_`);
+      body = lines.join('\n');
+    } else {
+      body = renderRound(liveHeader, liveLines);
+    }
     if (body.length === 0) return;
     if (liveTs) {
       await editMessage(web, input.channel, liveTs, body).catch(() => {});
@@ -281,6 +292,7 @@ export async function runTurn(
             if (pretty) {
               prettyProgress = text;
               prettyCurrentTool = '';
+              prettyLastTool = '';
             }
             await repaint();
           }
@@ -320,8 +332,11 @@ export async function runTurn(
             ? text
             : toolCalls.map((tc) => prettyToolLabel(tc.function.name)).join(', ');
         // Reset the per-tool sub-line; it'll be set again at each tool's
-        // execution below.
+        // execution below. Also clear prettyLastTool — the new round's
+        // model content is the freshest context, so the previous round's
+        // "_ran X_" indicator is no longer useful.
         prettyCurrentTool = '';
+        prettyLastTool = '';
         // Paint the model's content immediately so the user sees it before
         // the first tool replaces the body. Without this, the first repaint
         // in the for-loop below sets prettyCurrentTool and the content text
@@ -507,6 +522,16 @@ export async function runTurn(
         });
 
         messages.push({ role: 'tool', tool_call_id: tc.id, content: result.content });
+
+        // Pretty mode: transition the tool indicator from "_<label>…_"
+        // (running) to "_<label>_" (done). The transition is visible
+        // briefly between sequential tools in the same round; if this was
+        // the last tool of the round it persists through the model-call
+        // wait that follows.
+        if (pretty) {
+          prettyLastTool = prettyCurrentTool;
+          prettyCurrentTool = '';
+        }
       }
 
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
@@ -526,15 +551,11 @@ export async function runTurn(
       // still shows THIS round's content; the 🤔 reaction is the
       // user-facing "still working" signal.
       //
-      // Pretty mode: after the last tool completes, swap the body to a
-      // "Thinking" beat so the previous tool's `_running command…_` doesn't
-      // linger while the model processes results. The next iteration's
-      // content (or the final reply) overwrites this immediately when the
-      // model returns.
-      if (pretty) {
-        prettyCurrentTool = '';
-        prettyProgress = 'Thinking';
-      }
+      // Pretty mode: at end of round, `prettyProgress` stays as the
+      // model's own description text and `prettyLastTool` (set when the
+      // last tool finished) stays visible. No "Thinking" placeholder —
+      // the user keeps the model's words + the last tool's name as
+      // context during the model-call wait.
       await repaint();
     }
   } catch (err) {
