@@ -302,6 +302,66 @@ describe('translateToBedrock', () => {
       { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
     ]);
   });
+
+  it('handles user text interleaved between assistant tool_calls and tool results (mid-turn steering)', () => {
+    // OpenAI format allows: assistant(tool_calls) → user(text) → tool(result)
+    // Anthropic requires tool_results immediately after tool_use in the same
+    // user turn. The translator must reorder so tool_results come before text.
+    const { messages } = translateToBedrock([
+      { role: 'user', content: 'do it' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          { id: 't1', type: 'function', function: { name: 'bash', arguments: '{"command":"ls"}' } },
+        ],
+      },
+      { role: 'user', content: 'also do X' },
+      { role: 'tool', tool_call_id: 't1', content: 'file1\nfile2' },
+    ]);
+    expect(messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'do it' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 't1', name: 'bash', input: { command: 'ls' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 't1', content: 'file1\nfile2' },
+          { type: 'text', text: 'also do X' },
+        ],
+      },
+    ]);
+  });
+
+  it('handles multiple tool results after interleaved user text', () => {
+    const { messages } = translateToBedrock([
+      { role: 'user', content: 'go' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          { id: 'a', type: 'function', function: { name: 'f1', arguments: '' } },
+          { id: 'b', type: 'function', function: { name: 'f2', arguments: '' } },
+        ],
+      },
+      { role: 'user', content: 'steering msg' },
+      { role: 'tool', tool_call_id: 'a', content: 'ra' },
+      { role: 'tool', tool_call_id: 'b', content: 'rb' },
+    ]);
+    // tool_results cluster at front, steering text after
+    expect(messages[2]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'a', content: 'ra' },
+        { type: 'tool_result', tool_use_id: 'b', content: 'rb' },
+        { type: 'text', text: 'steering msg' },
+      ],
+    });
+  });
 });
 
 describe('translateFromBedrock', () => {
