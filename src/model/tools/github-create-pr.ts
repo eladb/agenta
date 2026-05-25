@@ -22,6 +22,8 @@ import { join } from 'node:path';
 import { readFile as sandboxReadFile } from '../../sandbox';
 import type { Tool } from './types';
 
+type SubmoduleUpdate = { path: string; sha: string };
+
 type Args = {
   repo: string;
   base: string;
@@ -31,6 +33,7 @@ type Args = {
   patch_path: string;
   commit_message: string;
   draft: boolean;
+  submodule_updates: SubmoduleUpdate[];
 };
 
 function parseArgs(raw: unknown): Args {
@@ -47,6 +50,24 @@ function parseArgs(raw: unknown): Args {
   if (typeof patchPath !== 'string' || patchPath.length === 0) {
     throw new Error('patch_path is required (path inside the sandbox)');
   }
+  const submodule_updates: SubmoduleUpdate[] = [];
+  if (a.submodule_updates !== undefined) {
+    if (!Array.isArray(a.submodule_updates)) {
+      throw new Error('submodule_updates must be an array');
+    }
+    for (const entry of a.submodule_updates) {
+      const e = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
+      if (typeof e.path !== 'string' || e.path.length === 0) {
+        throw new Error('submodule_updates[].path must be a non-empty string');
+      }
+      if (typeof e.sha !== 'string' || !/^[0-9a-f]{40}$/.test(e.sha)) {
+        throw new Error(
+          `submodule_updates[].sha must be a 40-char lowercase hex SHA (got ${JSON.stringify(e.sha)})`,
+        );
+      }
+      submodule_updates.push({ path: e.path, sha: e.sha });
+    }
+  }
   return {
     repo,
     base: typeof a.base === 'string' && a.base.length > 0 ? a.base : 'main',
@@ -57,6 +78,7 @@ function parseArgs(raw: unknown): Args {
     commit_message:
       typeof a.commit_message === 'string' && a.commit_message.length > 0 ? a.commit_message : title,
     draft: a.draft === true,
+    submodule_updates,
   };
 }
 
@@ -149,6 +171,23 @@ export const githubCreatePr: Tool = {
             description: 'Commit message for the patch (default: title)',
           },
           draft: { type: 'boolean', description: 'Open as draft PR' },
+          submodule_updates: {
+            type: 'array',
+            description:
+              'Optional submodule gitlink bumps. `git apply` cannot update gitlinks from a unified diff, so submodule-pointer changes must be passed here. Each entry runs `git update-index --cacheinfo 160000 <sha> <path>` after the patch applies. The submodule must already be registered in the base tree; the submodule itself is NOT cloned. If the only change is a submodule bump, `patch_path` may point at an empty file.',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'Submodule path relative to repo root' },
+                sha: {
+                  type: 'string',
+                  description: '40-char lowercase hex commit SHA to point the submodule at',
+                },
+              },
+              required: ['path', 'sha'],
+              additionalProperties: false,
+            },
+          },
         },
         required: ['repo', 'head_branch', 'title', 'patch_path'],
         additionalProperties: false,
@@ -181,7 +220,11 @@ export const githubCreatePr: Tool = {
       throw new Error(`could not read patch at ${args.patch_path}: ${read.stderr || read.stdout}`);
     }
     const patch = read.stdout;
-    if (patch.length === 0) throw new Error(`patch at ${args.patch_path} is empty`);
+    if (patch.trim().length === 0 && args.submodule_updates.length === 0) {
+      throw new Error(
+        `patch at ${args.patch_path} is empty and no submodule_updates provided — nothing to commit`,
+      );
+    }
 
     const dir = mkdtempSync(join(tmpdir(), 'agenta-pr-'));
     const work = join(dir, 'work');
@@ -217,12 +260,28 @@ export const githubCreatePr: Tool = {
 
       // git apply reads the patch from stdin. --whitespace=nowarn keeps
       // mixed-tab/space patches from blowing up on a strict default.
-      const applied = await run('git', ['apply', '--whitespace=nowarn'], {
-        cwd: work,
-        stdin: patch,
-        signal,
-      });
-      if (applied.code !== 0) fail('git apply', applied);
+      // Skip apply entirely if the patch is whitespace-only (submodule-only PR).
+      if (patch.trim().length > 0) {
+        const applied = await run('git', ['apply', '--whitespace=nowarn'], {
+          cwd: work,
+          stdin: patch,
+          signal,
+        });
+        if (applied.code !== 0) fail('git apply', applied);
+      }
+
+      // 3b. Apply submodule gitlink bumps. `git apply` doesn't handle
+      //     gitlink (mode 160000) updates from a unified diff, so the
+      //     agent passes those out-of-band. Each update-index runs
+      //     against the index directly — no submodule checkout needed.
+      for (const sub of args.submodule_updates) {
+        const upd = await run(
+          'git',
+          ['update-index', '--cacheinfo', `160000,${sub.sha},${sub.path}`],
+          { cwd: work, signal },
+        );
+        if (upd.code !== 0) fail(`git update-index ${sub.path}`, upd);
+      }
 
       // 4. Commit. Identity is local to this one-shot clone, doesn't
       //    touch global git config.

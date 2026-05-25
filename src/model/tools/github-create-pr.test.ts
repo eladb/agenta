@@ -59,6 +59,51 @@ describe('github_create_pr', () => {
       expect(_internal.parseArgs({ ...ok, draft: 1 }).draft).toBe(false);
       expect(_internal.parseArgs({ ...ok, draft: true }).draft).toBe(true);
     });
+
+    test('submodule_updates defaults to empty array', () => {
+      expect(_internal.parseArgs(ok).submodule_updates).toEqual([]);
+    });
+
+    test('submodule_updates accepts valid {path, sha} entries', () => {
+      const sha = 'a'.repeat(40);
+      const r = _internal.parseArgs({
+        ...ok,
+        submodule_updates: [{ path: 'vendor/x', sha }],
+      });
+      expect(r.submodule_updates).toEqual([{ path: 'vendor/x', sha }]);
+    });
+
+    test('submodule_updates rejects malformed SHAs', () => {
+      expect(() =>
+        _internal.parseArgs({ ...ok, submodule_updates: [{ path: 'p', sha: 'short' }] }),
+      ).toThrow(/40-char.*hex/);
+      expect(() =>
+        _internal.parseArgs({
+          ...ok,
+          submodule_updates: [{ path: 'p', sha: `${'a'.repeat(39)}Z` }],
+        }),
+      ).toThrow(/40-char.*hex/);
+      // uppercase hex rejected — git emits lowercase, keep contract tight
+      expect(() =>
+        _internal.parseArgs({ ...ok, submodule_updates: [{ path: 'p', sha: 'A'.repeat(40) }] }),
+      ).toThrow(/40-char.*hex/);
+    });
+
+    test('submodule_updates rejects empty/non-string path', () => {
+      const sha = 'a'.repeat(40);
+      expect(() =>
+        _internal.parseArgs({ ...ok, submodule_updates: [{ path: '', sha }] }),
+      ).toThrow(/path.*non-empty/);
+      expect(() =>
+        _internal.parseArgs({ ...ok, submodule_updates: [{ path: 123, sha }] }),
+      ).toThrow(/path.*non-empty/);
+    });
+
+    test('submodule_updates must be an array', () => {
+      expect(() => _internal.parseArgs({ ...ok, submodule_updates: 'nope' })).toThrow(
+        /submodule_updates.*array/,
+      );
+    });
   });
 
   describe('tokenizedUrl', () => {
