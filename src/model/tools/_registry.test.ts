@@ -25,6 +25,8 @@ describe('TOOL_DEFS', () => {
       'ask_user',
       'salto_cli',
       'github_create_pr',
+      'github_update_pr',
+      'github_pr_comment',
     ]) {
       expect(names.has(expected)).toBe(true);
     }

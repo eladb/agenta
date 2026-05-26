@@ -59,6 +59,8 @@ const PRETTY_TOOL_LABELS: Record<string, string> = {
   ask_user: 'Asking',
   salto_cli: 'Running Salto CLI',
   github_create_pr: 'Opening GitHub PR',
+  github_update_pr: 'Updating PR',
+  github_pr_comment: 'Commenting on PR',
 };
 
 export function prettyToolLabel(name: string): string {
