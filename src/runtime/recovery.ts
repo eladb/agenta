@@ -21,20 +21,16 @@ export type RecoveryDeps = {
 };
 
 // On boot, find any thread whose session.json says it was 'running' or
-// 'stopping' when the previous process died. Post a notice in the thread so
-// the user knows what happened. If the JSONL shows a pending mention that
-// arrived after the last assistant message (i.e. a mention the previous
-// process never got to answer), auto-resume by kicking off a fresh turn —
-// the model context replay via JSONL picks the mention up the same way it
-// would for a regular mid-turn queued message (#44).
+// 'stopping' when the previous process died. Auto-retry the interrupted
+// turn transparently: the JSONL has the full conversation so buildMessages
+// reconstructs the same context the model was processing when it got
+// killed. The user sees a brief gap then gets their answer — no
+// "agent restarted" notice cluttering the thread.
 //
-// Otherwise just clear the runtime entry so the thread starts fresh on the
-// next mention.
+// 'stopping' sessions are NOT retried (the user explicitly issued /stop;
+// retrying would violate that intent). They're just cleared silently.
 export async function recoverInterruptedSessions(deps: RecoveryDeps): Promise<void> {
   const { web, botUserId, fallbackModel, callModelOverride } = deps;
-  // Idle entries exist for any thread that has ever been mentioned (the
-  // frozen routing lives there). Filter to non-idle so we only
-  // announce real interruptions.
   const interrupted = (await listSessions()).filter(
     ({ state }) => state.status === 'running' || state.status === 'stopping',
   );
@@ -47,79 +43,61 @@ export async function recoverInterruptedSessions(deps: RecoveryDeps): Promise<vo
       await clearSession(threadKey);
       continue;
     }
-    const text = `agent restarted — previous turn was interrupted (was ${state.status})`;
-    try {
-      await postInThread(web, decoded.channel, decoded.threadTs, text);
-    } catch (err) {
-      // Slack channel might be archived, message deleted, etc. Don't block
-      // the rest of recovery on a single bad thread.
-      log.warn('recovery', `[${threadKey}] postInThread failed: ${(err as Error).message}`);
-    }
 
-    // Did the previous process die with a pending mention? Scan JSONL.
-    let pending: { user: string } | undefined;
-    try {
-      pending = await findPendingMention(threadKey, botUserId);
-    } catch (err) {
-      log.warn(
-        'recovery',
-        `[${threadKey}] JSONL scan failed: ${(err as Error).message}; clearing without resume`,
-      );
-    }
-
-    if (pending) {
-      // Reset to idle BEFORE kicking off so startOrQueue's idempotent
-      // running-flip writes against a clean state. kickoffTurn does its
-      // own writeSession.
+    // 'stopping' = user issued /stop before the crash. Don't retry — just
+    // clear and let the thread sit idle until the next mention.
+    if (state.status === 'stopping') {
       await clearSession(threadKey);
-      try {
-        await kickoffTurn(
-          web,
-          threadKey,
-          decoded.channel,
-          decoded.threadTs,
-          pending.user,
-          fallbackModel,
-          callModelOverride,
-        );
-        log.info('recovery', `[${threadKey}] auto-resumed pending mention`);
-      } catch (err) {
-        log.warn('recovery', `[${threadKey}] kickoffTurn failed: ${(err as Error).message}`);
-      }
+      log.info('recovery', `[${threadKey}] was stopping; cleared without retry`);
       continue;
     }
 
+    // 'running' = turn was actively in flight. Find the user who triggered
+    // it (needed for kickoffTurn's creator resolution). Fall back to the
+    // bot's own id if we can't determine the originator — the turn will
+    // still fire, just with a generic git identity.
+    const originator = await findLastMentionUser(threadKey, botUserId);
+
+    // Reset to idle BEFORE kicking off so startOrQueue's idempotent
+    // running-flip writes against a clean state.
     await clearSession(threadKey);
+    try {
+      await kickoffTurn(
+        web,
+        threadKey,
+        decoded.channel,
+        decoded.threadTs,
+        originator,
+        fallbackModel,
+        callModelOverride,
+      );
+      log.info('recovery', `[${threadKey}] auto-retried interrupted turn`);
+    } catch (err) {
+      log.warn('recovery', `[${threadKey}] kickoffTurn failed: ${(err as Error).message}`);
+    }
   }
 }
 
-// Returns the user id of the latest unanswered mention in this thread,
-// or undefined if none. A mention is "unanswered" when it sits after the
-// last assistant `message` event (= the boundary that marks "previous turn
-// completed and posted to Slack"). If there's no assistant message at all,
-// every mention since file start counts.
-async function findPendingMention(
-  threadKey: string,
-  botUserId: string,
-): Promise<{ user: string } | undefined> {
-  const events = await readEvents<AgentaEvent>(threadKey);
-  let boundary = -1;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i];
-    if (ev && ev.source === 'assistant' && ev.type === 'message') {
-      boundary = i;
-      break;
+// Returns the user id of the most recent mention in this thread's JSONL.
+// Used by recovery to pass a userId to kickoffTurn (needed for git
+// identity resolution). Falls back to botUserId when no mention is found
+// (shouldn't happen in practice — a 'running' session means at least one
+// mention was recorded).
+async function findLastMentionUser(threadKey: string, botUserId: string): Promise<string> {
+  try {
+    const events = await readEvents<AgentaEvent>(threadKey);
+    const needle = `<@${botUserId}>`;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      if (!ev) continue;
+      if (ev.source !== 'slack' || ev.type !== 'message') continue;
+      const text = ev.payload?.text ?? '';
+      if (text.includes(needle)) {
+        return ev.payload.user;
+      }
     }
+  } catch (err) {
+    log.warn('recovery', `[${threadKey}] JSONL scan failed: ${(err as Error).message}`);
   }
-  const needle = `<@${botUserId}>`;
-  for (let i = events.length - 1; i > boundary; i--) {
-    const ev = events[i];
-    if (!ev) continue;
-    if (ev.source !== 'slack' || ev.type !== 'message') continue;
-    const text = ev.payload?.text ?? '';
-    if (text.includes(needle)) {
-      return { user: ev.payload.user };
-    }
-  }
-  return undefined;
+  return botUserId;
 }
