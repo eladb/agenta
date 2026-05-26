@@ -28,7 +28,7 @@ jobs:
         id: changed
         uses: ./.github/actions/detect-code-changes
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v1
         if: steps.changed.outputs.code == 'true'
         with:
           bun-version: latest

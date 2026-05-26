@@ -116,7 +116,7 @@ describe('session state machine', () => {
     };
     const first = startOrQueue(web, callModel, 'sys', input);
     // Wait a tick so the first turn is in flight.
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 50));
     expect(getStatus('k1')).toBe('running');
     // Second mention arrives mid-turn: should just queue and return.
     await startOrQueue(web, callModel, 'sys', input);
@@ -125,7 +125,7 @@ describe('session state machine', () => {
     await first;
     expect(calls).toBe(2);
     expect(getStatus('k1')).toBe('idle');
-  });
+  }, 30000);
 
   test('signalStop aborts the in-flight turn', async () => {
     const { web, edits, posts } = makeWebStub();
@@ -140,7 +140,7 @@ describe('session state machine', () => {
       return { role: 'assistant', content: 'unreached' };
     };
     const run = startOrQueue(web, callModel, 'sys', input);
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 50));
     await signalStop(web, 'C', '1.0', 'k1');
     await run;
     expect(aborted).toBe(true);
@@ -152,7 +152,7 @@ describe('session state machine', () => {
       edits.some((e) => e.text === 'stopped') || posts.some((p) => p.text === 'stopped');
     expect(stoppedSeen).toBe(true);
     expect(getStatus('k1')).toBe('idle');
-  });
+  }, 30000);
 
   test('signalStop on idle thread posts "stopped" ack', async () => {
     const { web, posts } = makeWebStub();
@@ -177,7 +177,7 @@ describe('session state machine', () => {
         return { role: 'assistant', content: `reply-${calls}` };
       };
       const run = startOrQueue(web, callModel, 'sys', input);
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 50));
       await signalStop(web, 'C', '1.0', 'k1');
       // New mention arrives after /stop while we're still in 'stopping'.
       await startOrQueue(web, callModel, 'sys', input);

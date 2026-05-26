@@ -19,7 +19,6 @@ const BOT_USER = 'U0BOT';
 beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), 'agenta-recovery-'));
   homeDir = mkdtempSync(join(tmpdir(), 'agenta-recovery-home-'));
-  // Minimal README so buildSystemPrompt has something to compose.
   writeFileSync(join(homeDir, 'README.md'), '# test home');
   homesConfigPath = join(homeDir, 'homes.json');
   writeFileSync(
@@ -53,12 +52,18 @@ function makeWebStub(): {
         posts.push(args);
         return { ok: true, ts: `t${posts.length}` };
       }),
+      update: mock(async () => ({ ok: true })),
+      delete: mock(async () => ({ ok: true })),
     },
     users: {
       info: mock(async () => ({
         ok: true,
         user: { real_name: 'Test', profile: { email: 'test@example.com' } },
       })),
+    },
+    reactions: {
+      add: mock(async () => ({ ok: true })),
+      remove: mock(async () => ({ ok: true })),
     },
   };
   return { web, posts };
@@ -95,87 +100,10 @@ function assistantMsg(tk: string, text: string) {
 }
 
 describe('recoverInterruptedSessions', () => {
-  test('posts a notice for each non-idle session.json then flips it to idle', async () => {
-    const tk1 = threadKey('C123', '1700000000.000100');
-    const tk2 = threadKey('C456', '1700000001.000200');
-    await writeSession(tk1, { status: 'running', updated_at: 't' });
-    await writeSession(tk2, { status: 'stopping', updated_at: 't' });
-
-    const { web, posts } = makeWebStub();
-    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
-
-    expect(posts).toHaveLength(2);
-    const byChannel = Object.fromEntries(posts.map((p) => [p.channel, p]));
-    expect(byChannel.C123?.thread_ts).toBe('1700000000.000100');
-    expect(byChannel.C123?.text).toMatch(/restarted/);
-    expect(byChannel.C123?.text).toMatch(/running/);
-    expect(byChannel.C456?.text).toMatch(/stopping/);
-
-    // After clearing the entry transitions to idle
-    // preserved. The next mention picks the prompt back up.
-    const after1 = await readSession(tk1);
-    const after2 = await readSession(tk2);
-    expect(after1?.status).toBe('idle');
-    expect(after2?.status).toBe('idle');
-  });
-
-  test('no-op when there are no interrupted sessions', async () => {
-    const { web, posts } = makeWebStub();
-    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
-    expect(posts).toEqual([]);
-  });
-
-  test('idle entries do not trigger boot announcements', async () => {
-    const tk = threadKey('C9', '1700000099.000100');
-    await writeSession(tk, { status: 'idle', updated_at: 't' });
-    const { web, posts } = makeWebStub();
-    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
-    expect(posts).toEqual([]);
-    expect((await readSession(tk))?.status).toBe('idle');
-  });
-
-  test('Slack post failure does not abort recovery of other threads', async () => {
-    const tk1 = threadKey('C1', '1700000000.000100');
-    const tk2 = threadKey('C2', '1700000001.000200');
-    await writeSession(tk1, { status: 'running', updated_at: 't' });
-    await writeSession(tk2, { status: 'running', updated_at: 't' });
-
-    let calls = 0;
-    const web = {
-      chat: {
-        postMessage: mock(async (args: { channel: string }) => {
-          calls++;
-          if (args.channel === 'C1') throw new Error('channel_not_found');
-          return { ok: true, ts: 'ok' };
-        }),
-      },
-    };
-    await recoverInterruptedSessions({
-      // biome-ignore lint/suspicious/noExplicitAny: stub
-      web: web as any,
-      botUserId: BOT_USER,
-      fallbackModel: undefined,
-    });
-    expect(calls).toBe(2);
-    expect((await readSession(tk1))?.status).toBe('idle');
-    expect((await readSession(tk2))?.status).toBe('idle');
-  });
-
-  test('flips entries with undecodable threadKey to idle without posting', async () => {
-    await writeSession('no-separator', { status: 'running', updated_at: 't' });
-    const { web, posts } = makeWebStub();
-    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
-    expect(posts).toEqual([]);
-    expect((await readSession('no-separator'))?.status).toBe('idle');
-  });
-
-  test('running + slack mention after last assistant msg → resume fires', async () => {
-    const tk = threadKey('C77', '1700000077.000100');
+  test('running session auto-retries (no restart notice posted)', async () => {
+    const tk = threadKey('C123', '1700000000.000100');
     await writeSession(tk, { status: 'running', updated_at: 't' });
-    await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> hi`));
-    await appendEv(tk, assistantMsg(tk, 'reply'));
-    // This is the unanswered mention:
-    await appendEv(tk, slackMsg(tk, 'U2', `<@${BOT_USER}> follow up`));
+    await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> do something`));
 
     const { web, posts } = makeWebStub();
     let kickedOff = 0;
@@ -191,21 +119,17 @@ describe('recoverInterruptedSessions', () => {
       callModelOverride: callModelOverride as any,
     });
 
-    // Restart notice posted.
-    expect(posts[0]?.text).toMatch(/restarted/);
-    // And the model was invoked for the resumed turn (could be one or more
-    // iterations; we just want >=1).
     expect(kickedOff).toBeGreaterThanOrEqual(1);
+    // No "agent restarted" notice — just the model's reply
+    expect(posts.every((p) => !p.text.includes('restarted'))).toBe(true);
   });
 
-  test('running + JSONL has only non-mention slack msg → just clears, no resume', async () => {
-    const tk = threadKey('C77', '1700000077.000101');
-    await writeSession(tk, { status: 'running', updated_at: 't' });
+  test('stopping session is cleared silently without retry', async () => {
+    const tk = threadKey('C456', '1700000001.000200');
+    await writeSession(tk, { status: 'stopping', updated_at: 't' });
     await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> hi`));
-    await appendEv(tk, assistantMsg(tk, 'reply'));
-    await appendEv(tk, slackMsg(tk, 'U2', 'just talking, not a mention'));
 
-    const { web } = makeWebStub();
+    const { web, posts } = makeWebStub();
     let kickedOff = 0;
     const callModelOverride = mock(async () => {
       kickedOff++;
@@ -218,11 +142,36 @@ describe('recoverInterruptedSessions', () => {
       // biome-ignore lint/suspicious/noExplicitAny: stub
       callModelOverride: callModelOverride as any,
     });
+
     expect(kickedOff).toBe(0);
+    expect(posts.every((p) => !p.text.includes('restarted'))).toBe(true);
     expect((await readSession(tk))?.status).toBe('idle');
   });
 
-  test('running + no JSONL → just clears, no resume', async () => {
+  test('no-op when there are no interrupted sessions', async () => {
+    const { web, posts } = makeWebStub();
+    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
+    expect(posts).toEqual([]);
+  });
+
+  test('idle entries do not trigger recovery', async () => {
+    const tk = threadKey('C9', '1700000099.000100');
+    await writeSession(tk, { status: 'idle', updated_at: 't' });
+    const { web, posts } = makeWebStub();
+    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
+    expect(posts).toEqual([]);
+    expect((await readSession(tk))?.status).toBe('idle');
+  });
+
+  test('flips entries with undecodable threadKey to idle without posting', async () => {
+    await writeSession('no-separator', { status: 'running', updated_at: 't' });
+    const { web, posts } = makeWebStub();
+    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
+    expect(posts).toEqual([]);
+    expect((await readSession('no-separator'))?.status).toBe('idle');
+  });
+
+  test('running + no JSONL still retries (buildMessages handles empty JSONL)', async () => {
     const tk = threadKey('C77', '1700000077.000102');
     await writeSession(tk, { status: 'running', updated_at: 't' });
 
@@ -235,30 +184,6 @@ describe('recoverInterruptedSessions', () => {
     await recoverInterruptedSessions({
       web,
       botUserId: BOT_USER,
-      fallbackModel: undefined,
-      // biome-ignore lint/suspicious/noExplicitAny: stub
-      callModelOverride: callModelOverride as any,
-    });
-    expect(kickedOff).toBe(0);
-    expect((await readSession(tk))?.status).toBe('idle');
-  });
-
-  test('stopping + pending mention → resume fires', async () => {
-    const tk = threadKey('C78', '1700000078.000100');
-    await writeSession(tk, { status: 'stopping', updated_at: 't' });
-    // No prior assistant message — every slack mention from file-start
-    // counts as pending.
-    await appendEv(tk, slackMsg(tk, 'U2', `<@${BOT_USER}> ping`));
-
-    const { web } = makeWebStub();
-    let kickedOff = 0;
-    const callModelOverride = mock(async () => {
-      kickedOff++;
-      return { content: 'ok', tool_calls: undefined };
-    });
-    await recoverInterruptedSessions({
-      web,
-      botUserId: BOT_USER,
       fallbackModel: { name: 'm', base_url: 'http://x', api_key_env: 'NOPE' },
       // biome-ignore lint/suspicious/noExplicitAny: stub
       callModelOverride: callModelOverride as any,
@@ -266,20 +191,29 @@ describe('recoverInterruptedSessions', () => {
     expect(kickedOff).toBeGreaterThanOrEqual(1);
   });
 
-  test('unparseable JSONL line does not abort the loop', async () => {
-    const tk1 = threadKey('C90', '1700000090.000100');
-    const tk2 = threadKey('C91', '1700000091.000100');
+  test('kickoffTurn failure does not abort recovery of other threads', async () => {
+    const tk1 = threadKey('C1', '1700000000.000100');
+    const tk2 = threadKey('C2', '1700000001.000200');
     await writeSession(tk1, { status: 'running', updated_at: 't' });
     await writeSession(tk2, { status: 'running', updated_at: 't' });
-    // Write garbage JSONL for tk1.
-    ensureThreadDir(tk1);
-    await writeFile(messagesPath(tk1), '{not valid json\n');
+    await appendEv(tk1, slackMsg(tk1, 'U1', `<@${BOT_USER}> hi`));
+    await appendEv(tk2, slackMsg(tk2, 'U2', `<@${BOT_USER}> hi`));
 
-    const { web, posts } = makeWebStub();
-    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
-    // Both threads got notices posted; both are now idle.
-    expect(posts.length).toBe(2);
+    let calls = 0;
+    const callModelOverride = mock(async () => {
+      calls++;
+      if (calls === 1) throw new Error('boom');
+      return { content: 'ok', tool_calls: undefined };
+    });
+    const { web } = makeWebStub();
+    await recoverInterruptedSessions({
+      web,
+      botUserId: BOT_USER,
+      fallbackModel: { name: 'm', base_url: 'http://x', api_key_env: 'NOPE' },
+      // biome-ignore lint/suspicious/noExplicitAny: stub
+      callModelOverride: callModelOverride as any,
+    });
+    expect(calls).toBe(2);
     expect((await readSession(tk1))?.status).toBe('idle');
-    expect((await readSession(tk2))?.status).toBe('idle');
   });
 });
