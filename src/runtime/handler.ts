@@ -114,6 +114,13 @@ async function handleMessage(
     return;
   }
 
+  if (cmd === 'verbose' || cmd === 'pretty') {
+    await setDisplay(tk, { style: cmd });
+    await postInThread(web, e.channel, e.threadTs, `switched to ${cmd} mode`).catch(() => {});
+    log.info('handler', `[${tk}] /${cmd}`);
+    return;
+  }
+
   if (cmd === 'delete') {
     await postInThread(web, e.channel, e.threadTs, 'deleted (stub)').catch(() => {});
     // Tear down the per-thread WS tunnel + bot-side git HTTP server
