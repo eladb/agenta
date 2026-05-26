@@ -46,7 +46,7 @@ export const saltoCli: Tool = {
     const flat = a.args.filter((x) => typeof x === 'string').join(' ');
     return `salto-cloud ${flat.length > 60 ? `${flat.slice(0, 60)}…` : flat}`;
   },
-  invoke: async (raw, _ctx, signal) => {
+  invoke: async (raw, ctx, signal) => {
     const a = (raw && typeof raw === 'object' ? raw : {}) as { args?: unknown };
     if (!Array.isArray(a.args)) throw new Error('args (string[]) is required');
     const argv: string[] = [];
