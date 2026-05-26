@@ -5,6 +5,8 @@ import { editFileTool } from './edit-file';
 import { fetchUrl } from './fetch-url';
 import { getCurrentTime } from './get-current-time';
 import { githubCreatePr } from './github-create-pr';
+import { githubPrComment } from './github-pr-comment';
+import { githubUpdatePr } from './github-update-pr';
 import { glob } from './glob';
 import { grep } from './grep';
 import { listDirTool } from './list-dir';
@@ -39,6 +41,8 @@ export const TOOLS: Record<string, Tool> = {
   web_search: webSearch,
   salto_cli: saltoCli,
   github_create_pr: githubCreatePr,
+  github_update_pr: githubUpdatePr,
+  github_pr_comment: githubPrComment,
 };
 
 export const TOOL_DEFS: ToolDef[] = Object.values(TOOLS).map((t) => t.def);
