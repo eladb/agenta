@@ -314,7 +314,7 @@ export async function runTurn(
         const baseReply = text.length > 0 ? text : '(empty reply)';
         const reply =
           pretty && toolsRan > 0
-            ? `${baseReply}\n*ran ${toolsRan} ${toolsRan === 1 ? 'tool' : 'tools'}*`
+            ? `${baseReply}\n\n*ran ${toolsRan} ${toolsRan === 1 ? 'tool' : 'tools'}*`
             : baseReply;
         if (liveTs) {
           await editMessage(web, input.channel, liveTs, reply).catch(() => {});
