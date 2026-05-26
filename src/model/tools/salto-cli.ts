@@ -68,10 +68,14 @@ export const saltoCli: Tool = {
       let stdout = '';
       let stderr = '';
       child.stdout?.on('data', (d: Buffer) => {
-        stdout += d.toString('utf-8');
+        const chunk = d.toString('utf-8');
+        stdout += chunk;
+        ctx.onProgress?.({ kind: 'stdout', text: chunk });
       });
       child.stderr?.on('data', (d: Buffer) => {
-        stderr += d.toString('utf-8');
+        const chunk = d.toString('utf-8');
+        stderr += chunk;
+        ctx.onProgress?.({ kind: 'stderr', text: chunk });
       });
       const onAbort = (): void => {
         child.kill('SIGTERM');

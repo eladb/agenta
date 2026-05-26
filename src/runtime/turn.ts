@@ -430,7 +430,7 @@ export async function runTurn(
         // underneath, both plain text (no inline-code / fenced backticks).
         // bash gets the live preview behavior; everything else just shows
         // a result placeholder until the tool returns.
-        const isBash = tc.function.name === 'bash';
+        const hasLivePreview = tc.function.name === 'bash' || tc.function.name === 'salto_cli';
         const label = toolLabel(tc);
         const bulletIdx = liveLines.length;
         liveLines.push(label);
@@ -448,14 +448,14 @@ export async function runTurn(
         let liveBuffer = '';
         let flushTimer: ReturnType<typeof setTimeout> | undefined;
         const scheduleFlush = (): void => {
-          if (flushTimer || liveIdx < 0 || !isBash) return;
+          if (flushTimer || liveIdx < 0 || !hasLivePreview) return;
           flushTimer = setTimeout(() => {
             flushTimer = undefined;
             liveLines[liveIdx] = liveLine(liveBuffer);
             void repaint();
           }, LIVE_EDIT_INTERVAL_MS);
         };
-        const onProgress = isBash
+        const onProgress = hasLivePreview
           ? (chunk: { kind: 'stdout' | 'stderr'; text: string }): void => {
               liveBuffer = (liveBuffer + chunk.text).slice(-1024);
               scheduleFlush();
