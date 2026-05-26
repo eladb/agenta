@@ -281,6 +281,7 @@ describe('translateToBedrock', () => {
       { role: 'tool', tool_call_id: 't1', content: 'r1' },
       { role: 'tool', tool_call_id: 't2', content: 'r2' },
       { role: 'assistant', content: 'done' },
+      { role: 'user', content: 'and now?' },
     ]);
     expect(messages).toEqual([
       { role: 'user', content: [{ type: 'text', text: 'do it' }] },
@@ -300,7 +301,16 @@ describe('translateToBedrock', () => {
         ],
       },
       { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+      { role: 'user', content: [{ type: 'text', text: 'and now?' }] },
     ]);
+  });
+
+  it('strips trailing assistant message (no prefill support)', () => {
+    const { messages } = translateToBedrock([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'partial response' },
+    ]);
+    expect(messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]);
   });
 
   it('handles user text interleaved between assistant tool_calls and tool results (mid-turn steering)', () => {
