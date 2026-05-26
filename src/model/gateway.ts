@@ -266,6 +266,12 @@ export function translateToBedrock(messages: Message[]): {
       out.push({ role: 'user', content: [block] });
     }
   }
+  // Bedrock does not support assistant message prefill — strip a trailing
+  // assistant message (can appear when recovering an interrupted turn whose
+  // last recorded event was an assistant text with no tool_calls).
+  while (out.length > 0 && out[out.length - 1]?.role === 'assistant') {
+    out.pop();
+  }
   return { system, messages: out };
 }
 
