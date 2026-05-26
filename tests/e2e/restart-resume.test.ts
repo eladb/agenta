@@ -45,8 +45,7 @@ test('boot recovery resumes a turn for a queued mention with status=running', as
   // 1. Boot the agent first. Socket Mode is connected before we post
   //    anything, so we don't trip the Socket Mode replay window (#165):
   //    when the parent message lands, the agent sees it live and processes
-  //    it as a real turn, leaving an assistant `message` event in JSONL
-  //    that serves as a boundary for findPendingMention.
+  //    it as a real turn, leaving an assistant `message` event in JSONL.
   agent = await startAgent(stubCallModel);
 
   // 2. Tester posts a real mention. The agent picks it up, runs a turn,
@@ -112,9 +111,9 @@ test('boot recovery resumes a turn for a queued mention with status=running', as
     callModelOverride: stubCallModel,
   });
 
-  // 7. Assert: restart notice posted + the resumed turn's stub reply
-  //    contains the queued mention's unique text.
-  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => /restarted/i.test(t));
+  // 7. Assert: the resumed turn's stub reply contains the queued
+  //    mention's unique text. No "agent restarted" notice is posted
+  //    (auto-retry is transparent to the user since #201).
   const replyText = await waitForReply(
     tester,
     channel,
