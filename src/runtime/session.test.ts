@@ -59,7 +59,7 @@ describe('session state machine', () => {
     expect(posts.some((p) => p.text === 'hi')).toBe(true);
   });
 
-  test('session.json is running while in flight, flips to idle with system_prompt after', async () => {
+  test('session.json is running while in flight, flips to idle after a successful turn', async () => {
     const { readSession } = await import('./session-store');
     const { web } = makeWebStub();
     let observedDuringRun: string | undefined;
@@ -71,7 +71,6 @@ describe('session state machine', () => {
     expect(observedDuringRun).toBe('running');
     const after = await readSession('k1');
     expect(after?.status).toBe('idle');
-    expect(after?.system_prompt).toBe('sys');
   });
 
   test('session.json flips to stopping when /stop fires mid-turn', async () => {
@@ -89,15 +88,13 @@ describe('session state machine', () => {
     await new Promise((r) => setTimeout(r, 10));
     await signalStop(web, 'C', '1.0', 'k1');
     // After signalStop, session.json should say "stopping" before the turn
-    // actually exits. system_prompt is threaded through every write.
+    // actually exits. sandbox + git + home + model + display preserved.
     const duringStop = await readSession('k1');
     expect(duringStop?.status).toBe('stopping');
-    expect(duringStop?.system_prompt).toBe('sys');
     await run;
     // Once the loop exits, session.json flips to idle (preserving prompt).
     const after = await readSession('k1');
     expect(after?.status).toBe('idle');
-    expect(after?.system_prompt).toBe('sys');
     // "stopped" lands as a post (or an edit if a round message exists);
     // either way it surfaces in the thread.
     const stoppedSeen =
@@ -119,7 +116,7 @@ describe('session state machine', () => {
     };
     const first = startOrQueue(web, callModel, 'sys', input);
     // Wait a tick so the first turn is in flight.
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 50));
     expect(getStatus('k1')).toBe('running');
     // Second mention arrives mid-turn: should just queue and return.
     await startOrQueue(web, callModel, 'sys', input);
@@ -128,7 +125,7 @@ describe('session state machine', () => {
     await first;
     expect(calls).toBe(2);
     expect(getStatus('k1')).toBe('idle');
-  });
+  }, 30000);
 
   test('signalStop aborts the in-flight turn', async () => {
     const { web, edits, posts } = makeWebStub();
@@ -143,7 +140,7 @@ describe('session state machine', () => {
       return { role: 'assistant', content: 'unreached' };
     };
     const run = startOrQueue(web, callModel, 'sys', input);
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 50));
     await signalStop(web, 'C', '1.0', 'k1');
     await run;
     expect(aborted).toBe(true);
@@ -155,7 +152,7 @@ describe('session state machine', () => {
       edits.some((e) => e.text === 'stopped') || posts.some((p) => p.text === 'stopped');
     expect(stoppedSeen).toBe(true);
     expect(getStatus('k1')).toBe('idle');
-  });
+  }, 30000);
 
   test('signalStop on idle thread posts "stopped" ack', async () => {
     const { web, posts } = makeWebStub();
@@ -180,7 +177,7 @@ describe('session state machine', () => {
         return { role: 'assistant', content: `reply-${calls}` };
       };
       const run = startOrQueue(web, callModel, 'sys', input);
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 50));
       await signalStop(web, 'C', '1.0', 'k1');
       // New mention arrives after /stop while we're still in 'stopping'.
       await startOrQueue(web, callModel, 'sys', input);

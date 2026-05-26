@@ -46,7 +46,7 @@ export const saltoCli: Tool = {
     const flat = a.args.filter((x) => typeof x === 'string').join(' ');
     return `salto-cloud ${flat.length > 60 ? `${flat.slice(0, 60)}…` : flat}`;
   },
-  invoke: async (raw, _ctx, signal) => {
+  invoke: async (raw, ctx, signal) => {
     const a = (raw && typeof raw === 'object' ? raw : {}) as { args?: unknown };
     if (!Array.isArray(a.args)) throw new Error('args (string[]) is required');
     const argv: string[] = [];
@@ -68,10 +68,14 @@ export const saltoCli: Tool = {
       let stdout = '';
       let stderr = '';
       child.stdout?.on('data', (d: Buffer) => {
-        stdout += d.toString('utf-8');
+        const chunk = d.toString('utf-8');
+        stdout += chunk;
+        ctx.onProgress?.({ kind: 'stdout', text: chunk });
       });
       child.stderr?.on('data', (d: Buffer) => {
-        stderr += d.toString('utf-8');
+        const chunk = d.toString('utf-8');
+        stderr += chunk;
+        ctx.onProgress?.({ kind: 'stderr', text: chunk });
       });
       const onAbort = (): void => {
         child.kill('SIGTERM');

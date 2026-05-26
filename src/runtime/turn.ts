@@ -196,8 +196,15 @@ export async function runTurn(
     if (pretty) {
       const lines: string[] = [];
       if (prettyProgress.length > 0) lines.push(`*${prettyProgress}*`);
-      if (prettyCurrentTool.length > 0) lines.push(`_${prettyCurrentTool}…_`);
-      else if (prettyLastTool.length > 0) lines.push(`_${prettyLastTool}_`);
+      // Only show the tool sub-line when it adds information beyond the
+      // progress line. When model content is empty the progress falls back
+      // to the humanized tool label — showing it again as the italic
+      // sub-line is redundant ("Running command" + "_Running command…_").
+      const toolLine = prettyCurrentTool.length > 0 ? prettyCurrentTool : prettyLastTool;
+      const toolSuffix = prettyCurrentTool.length > 0 ? '…' : '';
+      if (toolLine.length > 0 && toolLine !== prettyProgress) {
+        lines.push(`_${toolLine}${toolSuffix}_`);
+      }
       body = lines.join('\n');
     } else {
       body = renderRound(liveHeader, liveLines);
@@ -307,7 +314,7 @@ export async function runTurn(
         const baseReply = text.length > 0 ? text : '(empty reply)';
         const reply =
           pretty && toolsRan > 0
-            ? `${baseReply}\n*ran ${toolsRan} ${toolsRan === 1 ? 'tool' : 'tools'}*`
+            ? `${baseReply}\n\n*ran ${toolsRan} ${toolsRan === 1 ? 'tool' : 'tools'}*`
             : baseReply;
         if (liveTs) {
           await editMessage(web, input.channel, liveTs, reply).catch(() => {});
@@ -423,7 +430,7 @@ export async function runTurn(
         // underneath, both plain text (no inline-code / fenced backticks).
         // bash gets the live preview behavior; everything else just shows
         // a result placeholder until the tool returns.
-        const isBash = tc.function.name === 'bash';
+        const hasLivePreview = tc.function.name === 'bash' || tc.function.name === 'salto_cli';
         const label = toolLabel(tc);
         const bulletIdx = liveLines.length;
         liveLines.push(label);
@@ -441,14 +448,14 @@ export async function runTurn(
         let liveBuffer = '';
         let flushTimer: ReturnType<typeof setTimeout> | undefined;
         const scheduleFlush = (): void => {
-          if (flushTimer || liveIdx < 0 || !isBash) return;
+          if (flushTimer || liveIdx < 0 || !hasLivePreview) return;
           flushTimer = setTimeout(() => {
             flushTimer = undefined;
             liveLines[liveIdx] = liveLine(liveBuffer);
             void repaint();
           }, LIVE_EDIT_INTERVAL_MS);
         };
-        const onProgress = isBash
+        const onProgress = hasLivePreview
           ? (chunk: { kind: 'stdout' | 'stderr'; text: string }): void => {
               liveBuffer = (liveBuffer + chunk.text).slice(-1024);
               scheduleFlush();
@@ -486,6 +493,7 @@ export async function runTurn(
                 channel: input.channel,
                 threadTs: input.threadTs,
                 checklistTs: liveTs ?? input.threadTs,
+                modelContent: liveHeader.length > 0 ? liveHeader : undefined,
               },
               signal,
             );

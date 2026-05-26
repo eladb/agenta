@@ -25,7 +25,7 @@ import {
 } from './home-config';
 import { refreshHomeMirror } from './home-refresh';
 import { signalStop, startOrQueue } from './session';
-import { readSession, setDisplay, setModel, writeSession } from './session-store';
+import { readSession, setDisplay, setGit, setHome, setModel } from './session-store';
 import { threadKey } from './thread';
 
 // `fallbackModel` is the env-derived triplet (MODEL_NAME / MODEL_BASE_URL /
@@ -111,6 +111,13 @@ async function handleMessage(
 
   if (cmd === 'stop') {
     await signalStop(web, e.channel, e.threadTs, tk);
+    return;
+  }
+
+  if (cmd === 'verbose' || cmd === 'pretty') {
+    await setDisplay(tk, { style: cmd });
+    await postInThread(web, e.channel, e.threadTs, `switched to ${cmd} mode`).catch(() => {});
+    log.info('handler', `[${tk}] /${cmd}`);
     return;
   }
 
@@ -205,80 +212,55 @@ async function resolveSystemPromptAndModel(
   fallbackModel: ModelTriplet | undefined,
 ): Promise<{ prompt: string; model: ModelTriplet; display: DisplayConfig }> {
   const existing = await readSession(tk);
-  if (existing?.system_prompt !== undefined && existing.model !== undefined) {
-    // Both already frozen — reuse them. Same frozen-per-thread invariant as
-    // the prompt: mid-thread model swaps would be surprising. Display may
-    // not exist on pre-#141 threads — backfill from current config (defaults
-    // to verbose, so existing threads see zero behavior change).
-    let display = existing.display;
-    if (display === undefined) {
-      display = resolveDisplay(channelId);
-      await setDisplay(tk, display);
-    }
-    return { prompt: existing.system_prompt, model: existing.model, display };
+
+  // Home / model / display stay frozen per thread — mid-thread swaps would
+  // be surprising. Backfill any missing field from current config (handles
+  // sessions written before each field was added; same shape as the
+  // historical migrations).
+  let home = existing?.home;
+  if (home === undefined) {
+    home = resolveHome(channelId);
+    await setHome(tk, home);
   }
-  if (existing?.system_prompt !== undefined && existing.model === undefined) {
-    // Threads created before #128 don't have a frozen model — resolve fresh
-    // from current config + env fallback and persist alongside the existing
-    // prompt. Mirrors how `git`/`home` got backfilled in earlier migrations.
+  let model = existing?.model;
+  if (model === undefined) {
     const resolved = resolveModel(channelId, fallbackModel);
     if (!resolved) {
       throw new Error(
         `[${tk}] cannot resolve model: no per-channel/default in homes.json and no env fallback (set MODEL_API_KEY + MODEL_BASE_URL + MODEL_NAME, or add a model block to homes.json)`,
       );
     }
-    await setModel(tk, resolved);
-    let display = existing.display;
-    if (display === undefined) {
-      display = resolveDisplay(channelId);
-      await setDisplay(tk, display);
+    model = resolved;
+    await setModel(tk, model);
+  }
+  let display = existing?.display;
+  if (display === undefined) {
+    display = resolveDisplay(channelId);
+    await setDisplay(tk, display);
+  }
+
+  // First-mention only: resolve + cache the originating Slack user's
+  // identity into session.json. bootstrap.ts reads it back so commits
+  // inside the sandbox land under the human's name/email.
+  if (existing?.git?.creator === undefined) {
+    const creator = await resolveCreator(web, userId);
+    if (creator) {
+      await setGit(tk, { ref: refFor(tk), creator });
     }
-    return { prompt: existing.system_prompt, model: resolved, display };
   }
-  // Resolve + freeze the per-channel home (#87) on first mention. The
-  // snapshot is just the HomeConfig (remote + auth_env); slug/transport/
-  // paths recompute on read via `resolveTransport` so future config edits
-  // only affect new threads. Tests bypass the config file via the
-  // AGENT_HOME_DIR env override (see `resolveAgentHomeForPrompt`).
-  const home = resolveHome(channelId);
-  // Resolve the model triplet alongside the home so a misconfigured channel
-  // fails loudly on first mention, not on the first model call. Channel
-  // override > default home's model > env fallback (#128).
-  const model = resolveModel(channelId, fallbackModel);
-  if (!model) {
-    throw new Error(
-      `[${tk}] cannot resolve model: no per-channel/default in homes.json and no env fallback (set MODEL_API_KEY + MODEL_BASE_URL + MODEL_NAME, or add a model block to homes.json)`,
-    );
-  }
-  // Refresh the host-side mirror before composing the prompt so a fresh
-  // thread picks up upstream README.md / skills/ changes since the bot
-  // last booted (#120). Non-fatal: errors are logged and we fall through
-  // to whatever is on disk. Skipped for the AGENT_HOME_DIR test override
-  // so unit/e2e tests don't try to fetch from a tmpdir.
+
+  // The system prompt is rebuilt from disk on every mention so edits to
+  // the universal suffix (prompt.ts) and the home repo's README.md /
+  // skills/ propagate to existing threads on their next mention.
+  // Refresh the host-side mirror first so upstream commits land before
+  // the prompt is composed. Non-fatal: errors are logged and we fall
+  // through to whatever is on disk. Skipped for the AGENT_HOME_DIR test
+  // override so unit/e2e tests don't try to fetch from a tmpdir.
   if (!process.env.AGENT_HOME_DIR) {
     await refreshHomeMirror(home);
   }
-  const display = resolveDisplay(channelId);
   const agentHomeDir = resolveAgentHomeForPrompt(home);
   const composed = await buildSystemPrompt(agentHomeDir);
-  // First-mention resolution: look up the originating Slack user once and
-  // cache their email + name into session.json. bootstrap.ts reads these
-  // back to configure git user.email / user.name inside the sandbox so
-  // commits land under the human's identity, not under the static
-  // "agenta@localhost".
-  const creator = await resolveCreator(web, userId);
-  // Persist as idle so it survives this turn and any future ones. session.ts
-  // will overwrite the file with running/stopping/idle as it transitions,
-  // always carrying `system_prompt` (and `git`, and `home`) forward.
-  await writeSession(tk, {
-    status: 'idle',
-    updated_at: nowIso(),
-    system_prompt: composed,
-    git: creator ? { ref: refFor(tk), creator } : undefined,
-    home,
-    model,
-    display,
-  });
   return { prompt: composed, model, display };
 }
 

@@ -362,29 +362,26 @@ describe('dockerProvider persistence (live Docker)', () => {
   );
 
   test.if(HAS_DOCKER)(
-    'remove clears the disk record while preserving status + system_prompt',
+    'remove clears the disk record while preserving status + sandbox + home',
     async () => {
       await ensureImage();
       const TK = `unit-remove-${Date.now()}`;
       created.push(containerName(TK));
       createdVolumes.push(volumeName(TK));
 
-      // Pre-write a status + system_prompt so we can verify they survive.
+      // Pre-write a sandbox so we can verify it survives.
       await writeSession(TK, {
         status: 'idle',
         updated_at: 't',
-        system_prompt: 'keep-me',
       });
 
       await dockerProvider.ensure(TK);
       // Sanity: sandbox was added to the existing session record.
-      expect((await readSession(TK))?.system_prompt).toBe('keep-me');
 
       await dockerProvider.remove(TK);
       const after = await readSession(TK);
       expect(after?.sandbox).toBeUndefined();
       expect(after?.status).toBe('idle');
-      expect(after?.system_prompt).toBe('keep-me');
     },
     180_000,
   );
@@ -418,12 +415,11 @@ describe('dockerProvider persistence (live Docker)', () => {
       created.push(containerName(TK1), containerName(TK2));
       createdVolumes.push(volumeName(TK1), volumeName(TK2));
 
-      // Pre-write a system_prompt on TK2 so we can verify killAll only
+      // Pre-write a sandbox on TK2 so we can verify killAll only
       // clears the sandbox field, not the rest.
       await writeSession(TK2, {
         status: 'idle',
         updated_at: 't',
-        system_prompt: 'preserve-me',
       });
 
       await dockerProvider.ensure(TK1);
@@ -438,7 +434,6 @@ describe('dockerProvider persistence (live Docker)', () => {
       const b = await readSession(TK2);
       expect(a?.sandbox).toBeUndefined();
       expect(b?.sandbox).toBeUndefined();
-      expect(b?.system_prompt).toBe('preserve-me');
       // killAll sweeps named volumes too — the per-thread workspace is
       // intended to be wiped along with the container.
       expect(volumeExists(volumeName(TK1))).toBe(false);

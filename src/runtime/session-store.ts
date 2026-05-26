@@ -58,18 +58,22 @@ export type GitRecord = {
   creator?: { email: string; name: string };
 };
 
-// Per-thread runtime state. The file now persists even when the thread is
-// idle — it carries the frozen `system_prompt` across turns so each thread's
-// prompt is stable for its lifetime. Recovery filters on status !== 'idle'.
+// Per-thread runtime state. The file persists even when the thread is idle
+// so per-thread routing (sandbox / git / home / model / display) survives
+// across turns. Recovery filters on status !== 'idle'.
 //
 // `home` is a snapshot of the per-channel home config (#87) frozen on first
 // mention. Stored as the raw HomeConfig (remote + auth_env); slug, transport,
 // and paths derive on read via `resolveTransport` so future config edits
 // only affect new threads.
+//
+// The system prompt is intentionally NOT persisted here — it's rebuilt
+// from disk on every mention via `buildSystemPrompt()` so edits to the
+// universal suffix (prompt.ts) and the home repo's README.md / skills/
+// propagate to existing threads on the next mention.
 export type SessionState = {
   status: 'idle' | 'running' | 'stopping';
   updated_at: string;
-  system_prompt?: string;
   sandbox?: SandboxRecord;
   git?: GitRecord;
   home?: HomeConfig;
@@ -123,16 +127,15 @@ export async function readSession(threadKey: string): Promise<SessionState | und
 }
 
 // "Clear" no longer means delete — going idle leaves the file in place with
-// status: 'idle' so the frozen system_prompt + sandbox record survive across
-// turns. Read existing state first so we preserve those fields when
-// transitioning. `/delete` removes the entire thread dir, which takes
-// session.json with it.
+// status: 'idle' so the sandbox / git / home / model / display records
+// survive across turns. Read existing state first so we preserve those
+// fields when transitioning. `/delete` removes the entire thread dir,
+// which takes session.json with it.
 export async function clearSession(threadKey: string): Promise<void> {
   const existing = await readSession(threadKey);
   await writeSession(threadKey, {
     status: 'idle',
     updated_at: new Date().toISOString(),
-    ...(existing?.system_prompt !== undefined ? { system_prompt: existing.system_prompt } : {}),
     ...(existing?.sandbox !== undefined ? { sandbox: existing.sandbox } : {}),
     ...(existing?.git !== undefined ? { git: existing.git } : {}),
     ...(existing?.home !== undefined ? { home: existing.home } : {}),
