@@ -113,8 +113,10 @@ export async function reapOrphanSandboxes(): Promise<void> {
       live.add(sb.machine_id);
       if (sb.volume_id) live.add(sb.volume_id);
     } else if (sb.provider === 'ecs') {
+      // workspace_path is metadata, not a reapable AWS resource. The
+      // shared-EFS-root model (#218) means orphan workspace dirs just
+      // accumulate as files on EFS until a future explicit sweep.
       live.add(sb.task_arn);
-      live.add(sb.access_point_id);
     }
   }
   const orphans = owned.filter((o) => !live.has(o.id));

@@ -9,3 +9,11 @@ data/
 .claude/*
 !.claude/skills/
 .nightly-cycle-summary.md
+
+# Auto-memory: track .claude/projects/-home-<handle>/memory/ but nothing else
+!.claude/projects/
+.claude/projects/*
+!.claude/projects/-home-*/
+.claude/projects/-home-*/*
+!.claude/projects/-home-*/memory/
+!.claude/projects/-home-*/memory/**

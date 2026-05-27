@@ -183,10 +183,11 @@ Fargate has no native auto-stop on idle: each per-thread sandbox runs continuous
    | Stack output | Bot env var |
    |---|---|
    | `ClusterName` | `AGENTA_ECS_SANDBOX_CLUSTER` |
-   | `EfsFileSystemId` | `AGENTA_ECS_SANDBOX_EFS_ID` |
    | `SandboxSecurityGroupId` | `AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS` (comma-list if you want multiple) |
    | (the subnets you passed) | `AGENTA_ECS_SANDBOX_SUBNET_IDS` |
    | `TaskFamily` | `AGENTA_ECS_SANDBOX_TASK_FAMILY` (optional, defaults to `agenta-sandbox`) |
+
+   The `EfsFileSystemId` output is no longer wired into a bot env var (#218 — the task definition hard-codes the filesystem in its `volumes:` block). It's still exported for operator visibility.
 
 2. **Push the sandbox image.**
 
@@ -207,9 +208,11 @@ Fargate has no native auto-stop on idle: each per-thread sandbox runs continuous
 ### What gets created per thread
 
 - One `aws ecs run-task` in the sandbox cluster (one Fargate task per thread, tagged with `agenta_bot_instance=<ClusterName>` for safe scoping).
-- One EFS access point pinned under `/sandboxes/<thread-slug>` with POSIX uid/gid 1000.
+- One subdirectory on the shared EFS filesystem at `/efs/<thread-slug>`, mkdir+chowned by the sandbox entrypoint when it sees `SANDBOX_WORKSPACE_DIR` in its environment.
 
-Tear-down via `/delete` in Slack does `aws ecs stop-task` + `aws efs delete-access-point`. The boot-time orphan reap (`src/sandbox/index.ts:reapOrphanSandboxes`) walks tasks + access points by tag and prunes anything not referenced by a `session.json` record.
+The task definition mounts the EFS root at `/efs`; per-thread isolation is the subdirectory the bot picks at RunTask time and passes via `SANDBOX_WORKSPACE_DIR` in `containerOverrides`. There are no per-thread EFS access points (the #213 design tried that and ran into `--volume-configurations` being EBS-only — see #218 for the full story).
+
+Tear-down via `/delete` in Slack does `aws ecs stop-task`. The workspace directory on EFS is left in place — orphan dirs accumulate until a future explicit sweep (deferred from #218; expected to be either a periodic cleaner or an `rm -rf /efs/<slug>` step in the `/delete` path). The boot-time orphan reap (`src/sandbox/index.ts:reapOrphanSandboxes`) walks tasks by tag and stops anything not referenced by a `session.json` record; it does NOT touch workspace dirs.
 
 ### Operator must add (deferred from the sandbox stack)
 
