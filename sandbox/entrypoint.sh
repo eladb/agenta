@@ -44,6 +44,17 @@ fi
 # without CAP_CHOWN — ignored).
 chown sandbox:sandbox /home/sandbox 2>/dev/null || true
 
+# ECS provider (#218): the bot injects SANDBOX_WORKSPACE_DIR=/efs/<slug>
+# pointing at a per-thread subdirectory on the shared EFS root mounted at
+# /efs. Create the dir and chown it to sandbox so the server (running as
+# uid 1000) can read/write inside it. Idempotent across restarts — `mkdir
+# -p` is a no-op if the previous task already populated the workspace,
+# and `chown` re-asserting sandbox ownership is harmless.
+if [ -n "${SANDBOX_WORKSPACE_DIR:-}" ]; then
+  mkdir -p "$SANDBOX_WORKSPACE_DIR"
+  chown sandbox:sandbox "$SANDBOX_WORKSPACE_DIR"
+fi
+
 export HOME=/home/sandbox
 export USER=sandbox
 exec setpriv \
