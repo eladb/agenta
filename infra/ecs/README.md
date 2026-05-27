@@ -151,7 +151,72 @@ The `Dockerfile`, `src/`, and `config/` build the same image artifact for both t
 - **Secrets migration.** If you're moving from a Fly deployment, dump Fly secrets and replay them into SSM — there's no automatic sync.
 - **`debug-thread` skill.** The skill in `.claude/skills/debug-thread/` currently uses `flyctl ssh console` to read JSONL off the bot's volume. It'll need an `aws ecs execute-command` variant before the customer's ECS deployment is operationally debuggable from a Slack permalink. Phase 1 explicitly defers this.
 
-## Open phase-2 items (see issue #208)
+## Sandboxes (phase 2, agenta #213)
+
+The bot stack above runs the bot itself; per-thread sandboxes are a separate plane. Phase 1 had the ECS-resident bot still provision sandboxes against Fly. Phase 2 (`SANDBOX_PROVIDER=ecs`) finishes the AWS-native deployment: per-thread sandboxes run as Fargate tasks in the same VPC as the bot, reached over private IP on port 9000.
+
+**Bot ⇄ sandbox pairing is locked**: an ECS bot uses ECS sandboxes, a Fly bot uses Fly sandboxes. No cross-cloud configurations. The bot's `SANDBOX_PROVIDER` env var is the only knob.
+
+Routing direction: the bot is the WebSocket client; the sandbox is the WebSocket server. The bot dials `http://<sandbox-task-private-ip>:9000` for the HTTP API and `ws://<sandbox-task-private-ip>:9000/tunnel` for the git tunnel. No public DNS, no ALB, no Cloud Map — just in-VPC private IP. The sandbox SG opens port 9000 from the bot SG only.
+
+### Cost note
+
+Fargate has no native auto-stop on idle: each per-thread sandbox runs continuously at ~$8.50/mo (1 vCPU, 2 GB) until `/delete`. Fly machines auto-stop after a few minutes of idle and bill ~$2–5/mo per active thread. ECS sandboxes trade higher idle cost for in-VPC routing simplicity and the absence of Fly as a dependency.
+
+### One-time bootstrap (sandbox plane)
+
+1. **Deploy the sandbox CloudFormation stack.** Pair it with the bot stack — both must live in the same VPC. The `BotSecurityGroupId` parameter is the `TaskSecurityGroup` from the bot stack (visible as `aws cloudformation describe-stack-resources --stack-name agenta-bot --logical-resource-id TaskSecurityGroup`).
+
+   ```sh
+   aws cloudformation deploy \
+     --stack-name agenta-sandbox \
+     --template-file infra/ecs/sandbox-cloudformation.yaml \
+     --capabilities CAPABILITY_IAM \
+     --parameter-overrides \
+       VpcId=vpc-xxxxxxxx \
+       SubnetIds=subnet-aaaaaaaa,subnet-bbbbbbbb \
+       BotSecurityGroupId=sg-xxxxxxxx
+   ```
+
+   Stack outputs include `ClusterName`, `EcrRepositoryUri`, `EfsFileSystemId`, `SandboxSecurityGroupId`, `TaskFamily`, `LogGroupName`. Each maps to one of the env vars the bot reads at boot:
+
+   | Stack output | Bot env var |
+   |---|---|
+   | `ClusterName` | `AGENTA_ECS_SANDBOX_CLUSTER` |
+   | `EfsFileSystemId` | `AGENTA_ECS_SANDBOX_EFS_ID` |
+   | `SandboxSecurityGroupId` | `AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS` (comma-list if you want multiple) |
+   | (the subnets you passed) | `AGENTA_ECS_SANDBOX_SUBNET_IDS` |
+   | `TaskFamily` | `AGENTA_ECS_SANDBOX_TASK_FAMILY` (optional, defaults to `agenta-sandbox`) |
+
+2. **Push the sandbox image.**
+
+   ```sh
+   bun scripts/deploy-sandbox-ecs.ts
+   ```
+
+   Builds the `sandbox/` Dockerfile (note: build context is `sandbox/`, not the repo root) and pushes both `<sha>` and `:latest` tags. Idempotent — same script for first deploy and per-deploy refreshes. Required env: AWS credentials. Optional env: `AGENTA_ECS_SANDBOX_REPOSITORY`, `AGENTA_ECS_SANDBOX_CLUSTER`, `AGENTA_ECS_SANDBOX_IMAGE_TAG`, `AWS_REGION`.
+
+   There is no service to roll: the bot creates per-thread tasks on demand via `ecs run-task`. The image change takes effect on the next per-thread sandbox provision.
+
+3. **Switch the bot to ECS sandboxes.** Update the bot's SSM parameters to set `SANDBOX_PROVIDER=ecs` plus the five env vars from the table above. The bot stack template (`infra/ecs/cloudformation.yaml`) doesn't currently include these env entries — the operator either:
+   - extends the bot CFN template's `Environment:` block with the five `AGENTA_ECS_SANDBOX_*` vars + flips `SANDBOX_PROVIDER` to `ecs`, OR
+   - uses `aws ecs register-task-definition` out-of-band with the additional env entries and redeploys.
+
+   Restart the bot service to pick up the change: `aws ecs update-service --cluster agenta-bot --service agenta-bot --force-new-deployment`.
+
+### What gets created per thread
+
+- One `aws ecs run-task` in the sandbox cluster (one Fargate task per thread, tagged with `agenta_bot_instance=<ClusterName>` for safe scoping).
+- One EFS access point pinned under `/sandboxes/<thread-slug>` with POSIX uid/gid 1000.
+
+Tear-down via `/delete` in Slack does `aws ecs stop-task` + `aws efs delete-access-point`. The boot-time orphan reap (`src/sandbox/index.ts:reapOrphanSandboxes`) walks tasks + access points by tag and prunes anything not referenced by a `session.json` record.
+
+### Operator must add (deferred from the sandbox stack)
+
+- The **bot stack's task SG** already has wide egress, so no ingress change is required on the bot side — the WS direction is bot → sandbox, not the other way around.
+- If you want sandbox tasks to egress for `pip install` / `git clone` / model gateway calls, the subnets you pass need either a NAT Gateway or VPC endpoints. The sandbox stack doesn't manage either — that's a VPC-shape concern.
+
+## Open items (see issue #213 and beyond)
 
 - A second CD path in this repo (separate workflow, separate Slack app for canary).
-- An `ECS sandbox provider` (`src/sandbox/ecs.ts`) so customers who can't reach `api.machines.dev` from inside their VPC can run sandboxes locally on ECS as well.
+- Auto-stop / idle scale-to-zero for sandbox tasks (Fargate has no native equivalent of Fly machine auto-stop).
