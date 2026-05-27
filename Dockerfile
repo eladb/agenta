@@ -20,7 +20,7 @@ RUN bun install --production --frozen-lockfile
 FROM oven/bun:1-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      git ca-certificates jq python3 openssh-client curl \
+      git ca-certificates jq python3 openssh-client curl awscli \
  && rm -rf /var/lib/apt/lists/*
 
 # Salto CLI on the bot host (not the sandbox). The salto_* tools shell
