@@ -4,6 +4,7 @@ import { log } from '../log';
 import { attachmentsDir } from '../persistence/store';
 import { listSessions } from '../runtime/session-store';
 import { containerName, dockerProvider, volumeName } from './docker';
+import { ecsProvider } from './ecs';
 import { flyProvider } from './fly';
 import type { SandboxEndpoint, SandboxProvider } from './provider';
 
@@ -21,7 +22,8 @@ function selectProvider(): SandboxProvider {
   const name = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
   if (name === 'docker') return dockerProvider;
   if (name === 'fly') return flyProvider;
-  throw new Error(`unknown SANDBOX_PROVIDER: ${name} (expected docker | fly)`);
+  if (name === 'ecs') return ecsProvider;
+  throw new Error(`unknown SANDBOX_PROVIDER: ${name} (expected docker | fly | ecs)`);
 }
 
 // Resolved once at module load. Tests that want to swap providers can do
@@ -110,6 +112,9 @@ export async function reapOrphanSandboxes(): Promise<void> {
     } else if (sb.provider === 'fly') {
       live.add(sb.machine_id);
       if (sb.volume_id) live.add(sb.volume_id);
+    } else if (sb.provider === 'ecs') {
+      live.add(sb.task_arn);
+      live.add(sb.access_point_id);
     }
   }
   const orphans = owned.filter((o) => !live.has(o.id));
