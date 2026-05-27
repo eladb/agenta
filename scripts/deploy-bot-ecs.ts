@@ -156,7 +156,26 @@ console.log(`→ docker push ${IMAGE}`);
 const push = run('docker', ['push', IMAGE]);
 if (!push.ok) die('docker push failed (see output above)');
 
+// Also push the same image as `:latest`. CFN's template-managed
+// task-def pins `${EcrRepositoryName}:latest` by default; without this
+// step, the next `aws cloudformation deploy` would re-render the
+// task-def and point the service at a non-existent `:latest` tag,
+// triggering CannotPullContainerError (see agenta #211). Keeping
+// :latest == "the most recently deployed SHA" means CFN updates and
+// SHA-pinned deploys stay consistent.
+const LATEST_IMAGE = `${REGISTRY}/${REPO}:latest`;
+if (TAG !== 'latest') {
+  console.log(`→ docker tag ${IMAGE} ${LATEST_IMAGE}`);
+  const tagLatest = run('docker', ['tag', IMAGE, LATEST_IMAGE]);
+  if (!tagLatest.ok) die('docker tag :latest failed (see output above)');
+  console.log(`→ docker push ${LATEST_IMAGE}`);
+  const pushLatest = run('docker', ['push', LATEST_IMAGE]);
+  if (!pushLatest.ok) die('docker push :latest failed (see output above)');
+}
+
 // 5. Register a new task-def revision: same as current, image tag swapped.
+// Note: the registered revision pins the SHA tag (IMAGE) -- :latest is
+// only here so CFN-managed re-renders don't break the service.
 const newContainers = td.containerDefinitions.map((c) => {
   if (c.name === 'bot') return { ...c, image: IMAGE };
   return c;
