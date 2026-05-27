@@ -43,4 +43,17 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh git-hooks/pre-receive git-hooks/post-receive
 
 ENV NODE_ENV=production
+
+# Container-level health check. The bot serves /health on $HEALTH_PORT
+# (default 8080), returning 200 when Socket Mode is connected, 503
+# otherwise (see src/index.ts).
+#
+# On Fly, fly.toml's [[checks]] takes precedence — Fly runs its own HTTP
+# health checks against the same endpoint and uses those for routing /
+# rollout decisions. This HEALTHCHECK is just container metadata to Fly.
+# On ECS, this is the actual container-level health signal the service
+# uses (set in the task definition's containerDefinitions.healthCheck).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -fsS "http://localhost:${HEALTH_PORT:-8080}/health" || exit 1
+
 ENTRYPOINT ["/entrypoint.sh"]

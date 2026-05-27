@@ -35,7 +35,17 @@ set -euo pipefail
 # /apps/agenta-sandbox/* instead of /apps/agenta-bot/*. Use
 # AGENTA_SANDBOX_APP to make the intent explicit; default to
 # "agenta-sandbox".
-export FLY_APP_NAME="${AGENTA_SANDBOX_APP:-agenta-sandbox}"
+#
+# Gate the override on FLY_APP_NAME actually being set in the environment.
+# On Fly, Fly's machine runtime injects it (to "agenta-bot") and we MUST
+# replace it. On ECS (or any non-Fly host), nothing injects FLY_APP_NAME,
+# so there's nothing to override — flyProvider reads AGENTA_SANDBOX_APP
+# directly (or FLY_APP_NAME if the operator chose to set it). Blindly
+# exporting AGENTA_SANDBOX_APP into FLY_APP_NAME outside Fly is harmless
+# but obscures intent; keep it Fly-only.
+if [ -n "${FLY_APP_NAME:-}" ]; then
+  export FLY_APP_NAME="${AGENTA_SANDBOX_APP:-agenta-sandbox}"
+fi
 
 DATA_DIR="${AGENTA_DATA_DIR:-/data/agenta}"
 HOMES_ROOT="${AGENT_HOMES_ROOT:-/data/homes}"
