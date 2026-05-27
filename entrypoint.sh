@@ -28,24 +28,23 @@
 
 set -euo pipefail
 
-# Fly auto-injects FLY_APP_NAME=<current-app-name> (here: agenta-bot) and
-# this overrides the fly.toml [env] value silently. The bot uses
-# FLY_APP_NAME to address the SANDBOX Fly app — that's where per-thread
-# sandboxes live, not this machine. Override here so flyProvider hits
-# /apps/agenta-sandbox/* instead of /apps/agenta-bot/*. Use
-# AGENTA_SANDBOX_APP to make the intent explicit; default to
-# "agenta-sandbox".
+# The bot's flyProvider (src/sandbox/fly.ts:appName) calls
+# requireEnv('FLY_APP_NAME') with no fallback — it does NOT read
+# AGENTA_SANDBOX_APP. We have to export FLY_APP_NAME ourselves so
+# per-thread sandboxes land in the SANDBOX Fly app (default
+# "agenta-sandbox"), not whatever the surrounding host calls itself.
 #
-# Gate the override on FLY_APP_NAME actually being set in the environment.
-# On Fly, Fly's machine runtime injects it (to "agenta-bot") and we MUST
-# replace it. On ECS (or any non-Fly host), nothing injects FLY_APP_NAME,
-# so there's nothing to override — flyProvider reads AGENTA_SANDBOX_APP
-# directly (or FLY_APP_NAME if the operator chose to set it). Blindly
-# exporting AGENTA_SANDBOX_APP into FLY_APP_NAME outside Fly is harmless
-# but obscures intent; keep it Fly-only.
-if [ -n "${FLY_APP_NAME:-}" ]; then
-  export FLY_APP_NAME="${AGENTA_SANDBOX_APP:-agenta-sandbox}"
-fi
+# Unconditional on purpose:
+#   - On Fly, Fly's machine runtime auto-injects FLY_APP_NAME=agenta-bot
+#     (the bot's own app, NOT the sandbox app). This export overrides
+#     that injection so the bot hits /apps/agenta-sandbox/* instead of
+#     /apps/agenta-bot/*.
+#   - On ECS (or any non-Fly host), nothing injects FLY_APP_NAME, so
+#     this export sets it from scratch — flyProvider would otherwise
+#     crash on requireEnv.
+# Operators can set AGENTA_SANDBOX_APP to point at a different sandbox
+# Fly app; default is "agenta-sandbox".
+export FLY_APP_NAME="${AGENTA_SANDBOX_APP:-agenta-sandbox}"
 
 DATA_DIR="${AGENTA_DATA_DIR:-/data/agenta}"
 HOMES_ROOT="${AGENT_HOMES_ROOT:-/data/homes}"
