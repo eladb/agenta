@@ -1,17 +1,24 @@
-// ECS Fargate sandbox provider (#213).
+// ECS Fargate sandbox provider (#213, refactored #218).
 //
 // Per-thread `aws ecs run-task` against a dedicated sandbox cluster
-// (e.g. `agenta-sandbox`) + per-thread EFS access point pinned under
-// /sandboxes/<thread-slug>. The bot dials the task's private IP on
-// port 9000 over plain HTTP — in-VPC routing only, sandbox SG accepts
-// ingress from the bot SG only. No ALB, no Cloud Map, no public surface.
+// (e.g. `agenta-sandbox`). The task mounts a single shared EFS
+// filesystem at /efs (no per-thread access points — see #218 for why
+// that didn't work: `--volume-configurations` is EBS-only, EFS access
+// points can't be overridden per task). Per-thread isolation is the
+// workspace directory: SANDBOX_WORKSPACE_DIR=/efs/<thread-slug> is
+// injected via run-task containerOverrides so the same task definition
+// serves every thread.
+//
+// The bot dials the task's private IP on port 9000 over plain HTTP —
+// in-VPC routing only, sandbox SG accepts ingress from the bot SG only.
+// No ALB, no Cloud Map, no public surface.
 //
 // Mirrors the shape of fly.ts: same three re-hydration branches
-// (live task → adopt / dead task + live access point → re-run /
-// nothing → fresh), same listAll/destroyById for orphan reap, same
-// SANDBOX_TOKEN bearer model. Tagged with `agenta_bot_instance=<cluster>`
-// so multiple bot deployments in the same AWS account don't fight each
-// other.
+// (live task → adopt / dead task + persisted workspace → re-run with
+// the same workspace path / nothing → fresh), same listAll/destroyById
+// for orphan reap, same SANDBOX_TOKEN bearer model. Tagged with
+// `agenta_bot_instance=<cluster>` so multiple bot deployments in the
+// same AWS account don't fight each other.
 //
 // We shell out to the `aws` CLI rather than pull in @aws-sdk to stay
 // consistent with the rest of the repo (canary.ts, deploy-bot-ecs.ts,
@@ -24,10 +31,9 @@ import type { SandboxEndpoint, SandboxProvider } from './provider';
 
 const SANDBOX_PORT = 9000;
 const TASK_TAG_KEY = 'agenta_bot_instance';
-// Tag value on access points uses the same convention. EFS access points
-// don't accept arbitrary tags on create via the CLI's --tags shape that
-// the runtime uses — see access-point creation below. We keep the
-// convention for the task tag side.
+// Mount point inside the sandbox container for the shared EFS root.
+// Matches the task-def MountPoint in sandbox-cloudformation.yaml.
+const EFS_MOUNT = '/efs';
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -40,9 +46,6 @@ function cluster(): string {
 }
 function taskFamily(): string {
   return process.env.AGENTA_ECS_SANDBOX_TASK_FAMILY ?? 'agenta-sandbox';
-}
-function efsId(): string {
-  return requireEnv('AGENTA_ECS_SANDBOX_EFS_ID');
 }
 function subnets(): string[] {
   return requireEnv('AGENTA_ECS_SANDBOX_SUBNET_IDS')
@@ -62,21 +65,24 @@ function awsRegion(): string | undefined {
 
 // Same threadKey-normalization shape as fly.ts machineName: thread keys
 // contain uppercase Slack channel IDs and underscores, which aren't legal
-// in the slug we use for the EFS RootDirectory path. Lowercase a-z, 0-9
-// and dashes only; trim length to be conservative.
+// in the workspace dir slug. Lowercase a-z, 0-9 and dashes only; trim
+// length to be conservative. Kept in sync with fly.ts intentionally so
+// debugging across providers is easier.
 export function _slugFor(threadKey: string): string {
   const slug = threadKey
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  // EFS RootDirectory path has no hard length limit but keep it short so
-  // logs stay readable. 40 chars is plenty for a Slack channel + ts pair.
+  // 40 chars is plenty for a Slack channel + ts pair, and keeps `ls /efs`
+  // output readable.
   return slug.slice(0, 40);
 }
 
-// EFS access-point sub-path on the shared filesystem. One per thread.
-export function _rootDirectoryFor(threadKey: string): string {
-  return `/sandboxes/${_slugFor(threadKey)}`;
+// Per-thread workspace subdirectory on the shared EFS root. Passed to
+// the sandbox server as SANDBOX_WORKSPACE_DIR; the entrypoint
+// mkdir+chowns it before exec'ing the server.
+export function _workspacePathFor(threadKey: string): string {
+  return `${EFS_MOUNT}/${_slugFor(threadKey)}`;
 }
 
 function randomToken(): string {
@@ -206,61 +212,6 @@ async function verifyAlive(taskArn: string): Promise<string | undefined> {
   return await resolvePrivateIp(t);
 }
 
-type EfsAccessPoint = {
-  AccessPointId: string;
-  AccessPointArn?: string;
-  FileSystemId?: string;
-  RootDirectory?: { Path?: string };
-  LifeCycleState?: string;
-  Tags?: Array<{ Key: string; Value: string }>;
-};
-
-type DescribeAccessPointsResp = { AccessPoints?: EfsAccessPoint[] };
-
-async function describeAccessPoint(id: string): Promise<EfsAccessPoint | undefined> {
-  const resp = await awsJsonTry<DescribeAccessPointsResp>([
-    'efs',
-    'describe-access-points',
-    '--access-point-id',
-    id,
-  ]);
-  return resp?.AccessPoints?.[0];
-}
-
-async function createAccessPoint(threadKey: string): Promise<EfsAccessPoint> {
-  // EFS access points pin a POSIX uid/gid and a RootDirectory. We mirror
-  // the sandbox image's `sandbox` user (uid 1000) so workspace files
-  // land with the right ownership without the entrypoint having to
-  // chown anything (the sandbox container drops CAP_CHOWN; see CLAUDE.md).
-  const path = _rootDirectoryFor(threadKey);
-  const resp = await awsJson<{ AccessPointId: string; AccessPointArn?: string }>([
-    'efs',
-    'create-access-point',
-    '--file-system-id',
-    efsId(),
-    '--posix-user',
-    JSON.stringify({ Uid: 1000, Gid: 1000 }),
-    '--root-directory',
-    JSON.stringify({
-      Path: path,
-      CreationInfo: { OwnerUid: 1000, OwnerGid: 1000, Permissions: '0755' },
-    }),
-    '--tags',
-    JSON.stringify([
-      { Key: TASK_TAG_KEY, Value: cluster() },
-      { Key: 'agenta_thread_key', Value: threadKey },
-    ]),
-  ]);
-  return { AccessPointId: resp.AccessPointId, AccessPointArn: resp.AccessPointArn };
-}
-
-async function deleteAccessPoint(id: string): Promise<void> {
-  const r = await awsSpawn(['efs', 'delete-access-point', '--access-point-id', id]);
-  if (r.exitCode !== 0) {
-    log.warn('sandbox', `ecs delete-access-point ${id}: ${r.stderr.trim()}`);
-  }
-}
-
 type RunTaskResp = {
   tasks?: EcsTask[];
   failures?: Array<{ arn?: string; reason?: string }>;
@@ -269,25 +220,22 @@ type RunTaskResp = {
 async function runTask(
   threadKey: string,
   sandboxToken: string,
-  accessPointId: string,
+  workspacePath: string,
 ): Promise<EcsTask> {
-  // Per-thread RunTask. Container env (SANDBOX_TOKEN + optional
-  // SANDBOX_EGRESS) goes through `overrides.containerOverrides[*].environment`
-  // so we don't have to register a new task-def revision per thread.
-  // The task-def's `volumes:` already wires up the EFS volume with a
-  // placeholder access point id; we override it via `overrides.volumes`
-  // (a feature ECS added in 2024 — `--volume-configurations`).
-  //
-  // Fallback for older CLI / control planes: if --volume-configurations
-  // isn't supported, the operator needs to pre-create access points
-  // per thread out-of-band, which defeats the whole point. We bail
-  // explicitly with a helpful message in that case.
+  // Per-thread RunTask. Container env (SANDBOX_TOKEN +
+  // SANDBOX_WORKSPACE_DIR + optional SANDBOX_EGRESS) goes through
+  // `overrides.containerOverrides[*].environment` so we don't have to
+  // register a new task-def revision per thread. The task-def's
+  // `volumes:` already mounts the shared EFS root at /efs (no access
+  // point, no per-task override needed — that was the broken design in
+  // #213 fixed by #218).
   const overrides = {
     containerOverrides: [
       {
         name: 'sandbox',
         environment: [
           { name: 'SANDBOX_TOKEN', value: sandboxToken },
+          { name: 'SANDBOX_WORKSPACE_DIR', value: workspacePath },
           ...(process.env.SANDBOX_EGRESS
             ? [{ name: 'SANDBOX_EGRESS', value: process.env.SANDBOX_EGRESS }]
             : []),
@@ -295,21 +243,6 @@ async function runTask(
       },
     ],
   };
-  const volumeConfigurations = [
-    {
-      name: 'workspace',
-      managedEBSVolume: undefined,
-      // Bind the task-def-side volume `workspace` to the per-thread
-      // EFS access point. Mount-target SG accepts NFS from the sandbox
-      // task SG only.
-      efsVolumeConfiguration: {
-        fileSystemId: efsId(),
-        rootDirectory: '/',
-        transitEncryption: 'ENABLED',
-        authorizationConfig: { accessPointId, iam: 'ENABLED' },
-      },
-    },
-  ];
 
   const args = [
     'ecs',
@@ -333,8 +266,6 @@ async function runTask(
     }),
     '--overrides',
     JSON.stringify(overrides),
-    '--volume-configurations',
-    JSON.stringify(volumeConfigurations),
     '--tags',
     JSON.stringify([
       { key: TASK_TAG_KEY, value: cluster() },
@@ -405,7 +336,12 @@ async function stopTask(taskArn: string): Promise<void> {
   }
 }
 
-type SandboxState = { taskArn: string; token: string; accessPointId: string; privateIp?: string };
+type SandboxState = {
+  taskArn: string;
+  token: string;
+  workspacePath: string;
+  privateIp?: string;
+};
 const state = new Map<string, SandboxState>();
 
 async function ensure(threadKey: string): Promise<void> {
@@ -413,8 +349,9 @@ async function ensure(threadKey: string): Promise<void> {
 
   // Re-hydration: three branches matching fly.ts.
   //   - same-provider live task → adopt.
-  //   - same-provider dead task + live access point → re-run task with
-  //     the same access point (workspace state survives via EFS).
+  //   - same-provider dead task → re-run task with the same
+  //     workspace_path (the directory on EFS survives across tasks,
+  //     so the previous turn's files are still there).
   //   - cross-provider or fully missing → provision from scratch.
   const persisted = await loadSandbox(threadKey);
   if (persisted) {
@@ -430,14 +367,14 @@ async function ensure(threadKey: string): Promise<void> {
         state.set(threadKey, {
           taskArn: persisted.task_arn,
           token: persisted.sandbox_token,
-          accessPointId: persisted.access_point_id,
+          workspacePath: persisted.workspace_path,
           ...(liveIp ? { privateIp: liveIp } : {}),
         });
         if (liveIp && liveIp !== persisted.private_ip) {
           await saveSandbox(threadKey, {
             provider: 'ecs',
             task_arn: persisted.task_arn,
-            access_point_id: persisted.access_point_id,
+            workspace_path: persisted.workspace_path,
             sandbox_token: persisted.sandbox_token,
             private_ip: liveIp,
           });
@@ -445,77 +382,67 @@ async function ensure(threadKey: string): Promise<void> {
         log.info('sandbox', `re-hydrated ecs task ${persisted.task_arn} from session.json`);
         return;
       }
-      // Dead task. If the access point survived, re-run the task with
-      // the same access point so the workspace volume is preserved.
-      const ap = await describeAccessPoint(persisted.access_point_id);
-      if (ap && ap.LifeCycleState !== 'deleted' && ap.LifeCycleState !== 'deleting') {
-        log.info(
-          'sandbox',
-          `[${threadKey}] persisted task ${persisted.task_arn} dead; reattaching access point ${persisted.access_point_id}`,
-        );
-        const task = await runTask(threadKey, persisted.sandbox_token, persisted.access_point_id);
-        const ready = await waitForTaskRunning(task.taskArn);
-        const ip = await resolvePrivateIp(ready);
-        if (!ip) throw new Error(`ecs reattach: no private IP for task ${task.taskArn}`);
-        state.set(threadKey, {
-          taskArn: task.taskArn,
-          token: persisted.sandbox_token,
-          accessPointId: persisted.access_point_id,
-          privateIp: ip,
-        });
-        await saveSandbox(threadKey, {
-          provider: 'ecs',
-          task_arn: task.taskArn,
-          access_point_id: persisted.access_point_id,
-          sandbox_token: persisted.sandbox_token,
-          private_ip: ip,
-        });
-        await waitForHealth(ip);
-        log.info(
-          'sandbox',
-          `ecs task ${task.taskArn} ready — reattached access point ${persisted.access_point_id}`,
-        );
-        return;
-      }
+      // Dead task. The workspace dir on EFS is durable — re-run a new
+      // task pointing at the same SANDBOX_WORKSPACE_DIR so the previous
+      // turn's files are still there.
       log.info(
         'sandbox',
-        `[${threadKey}] persisted task ${persisted.task_arn} dead and access point gone; re-provisioning`,
+        `[${threadKey}] persisted task ${persisted.task_arn} dead; re-running task with workspace ${persisted.workspace_path}`,
       );
-      await clearSandbox(threadKey);
+      const task = await runTask(
+        threadKey,
+        persisted.sandbox_token,
+        persisted.workspace_path,
+      );
+      const ready = await waitForTaskRunning(task.taskArn);
+      const ip = await resolvePrivateIp(ready);
+      if (!ip) throw new Error(`ecs reattach: no private IP for task ${task.taskArn}`);
+      state.set(threadKey, {
+        taskArn: task.taskArn,
+        token: persisted.sandbox_token,
+        workspacePath: persisted.workspace_path,
+        privateIp: ip,
+      });
+      await saveSandbox(threadKey, {
+        provider: 'ecs',
+        task_arn: task.taskArn,
+        workspace_path: persisted.workspace_path,
+        sandbox_token: persisted.sandbox_token,
+        private_ip: ip,
+      });
+      await waitForHealth(ip);
+      log.info(
+        'sandbox',
+        `ecs task ${task.taskArn} ready — reattached workspace ${persisted.workspace_path}`,
+      );
+      return;
     }
   }
 
-  // Fresh provision: new access point + new task.
-  const ap = await createAccessPoint(threadKey);
+  // Fresh provision: derive workspace path + run a new task.
+  const workspacePath = _workspacePathFor(threadKey);
   const sandboxToken = randomToken();
-  let task: EcsTask;
-  try {
-    task = await runTask(threadKey, sandboxToken, ap.AccessPointId);
-  } catch (err) {
-    // Best-effort: a newly-created access point with no task is useless.
-    await deleteAccessPoint(ap.AccessPointId).catch(() => {});
-    throw err;
-  }
+  const task = await runTask(threadKey, sandboxToken, workspacePath);
   const ready = await waitForTaskRunning(task.taskArn);
   const ip = await resolvePrivateIp(ready);
   if (!ip) throw new Error(`ecs ensure: no private IP for task ${task.taskArn}`);
   state.set(threadKey, {
     taskArn: task.taskArn,
     token: sandboxToken,
-    accessPointId: ap.AccessPointId,
+    workspacePath,
     privateIp: ip,
   });
   await saveSandbox(threadKey, {
     provider: 'ecs',
     task_arn: task.taskArn,
-    access_point_id: ap.AccessPointId,
+    workspace_path: workspacePath,
     sandbox_token: sandboxToken,
     private_ip: ip,
   });
   await waitForHealth(ip);
   log.info(
     'sandbox',
-    `ecs task ${task.taskArn} ready (access point ${ap.AccessPointId}, ip ${ip})`,
+    `ecs task ${task.taskArn} ready (workspace ${workspacePath}, ip ${ip})`,
   );
 }
 
@@ -530,7 +457,7 @@ async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
         s = {
           taskArn: persisted.task_arn,
           token: persisted.sandbox_token,
-          accessPointId: persisted.access_point_id,
+          workspacePath: persisted.workspace_path,
           ...(liveIp ? { privateIp: liveIp } : {}),
         };
         state.set(threadKey, s);
@@ -561,11 +488,12 @@ async function getEndpoint(threadKey: string): Promise<SandboxEndpoint> {
 }
 
 async function remove(threadKey: string): Promise<void> {
-  // Persisted record carries the access point id even if the in-memory
-  // cache is empty (e.g. bot restart between ensure and remove).
+  // Persisted record carries the task ARN even if the in-memory cache
+  // is empty (e.g. bot restart between ensure and remove). The
+  // workspace directory on EFS is NOT cleaned up here — orphan dirs
+  // accumulate until a future explicit sweep (see #218 spec, "Out of
+  // scope").
   const persisted = await loadSandbox(threadKey);
-  const persistedAccessPoint =
-    persisted?.provider === 'ecs' ? persisted.access_point_id : undefined;
   const persistedTaskArn = persisted?.provider === 'ecs' ? persisted.task_arn : undefined;
   const s = state.get(threadKey);
   state.delete(threadKey);
@@ -578,19 +506,9 @@ async function remove(threadKey: string): Promise<void> {
     await stopTask(taskArn);
     log.info('sandbox', `ecs task ${taskArn} stopped`);
   }
-  const apId = s?.accessPointId ?? persistedAccessPoint;
-  if (apId) {
-    await deleteAccessPoint(apId);
-  }
 }
 
 type ListTasksResp = { taskArns?: string[] };
-type ListAccessPointsResp = {
-  AccessPoints?: Array<{
-    AccessPointId: string;
-    Tags?: Array<{ Key: string; Value: string }>;
-  }>;
-};
 
 async function listAll(): Promise<Array<{ id: string }>> {
   const out: Array<{ id: string }> = [];
@@ -605,28 +523,16 @@ async function listAll(): Promise<Array<{ id: string }>> {
     'RUNNING',
   ]);
   for (const arn of tasksResp?.taskArns ?? []) out.push({ id: arn });
-
-  // Access points on the shared EFS, scoped by tag.
-  const apResp = await awsJsonTry<ListAccessPointsResp>([
-    'efs',
-    'describe-access-points',
-    '--file-system-id',
-    efsId(),
-  ]);
-  for (const ap of apResp?.AccessPoints ?? []) {
-    const tag = ap.Tags?.find((t) => t.Key === TASK_TAG_KEY);
-    if (tag?.Value === cluster()) out.push({ id: ap.AccessPointId });
-  }
+  // No access-point listing — workspace dirs on the shared EFS root
+  // aren't AWS resources, just files. Orphan reap leaves them in
+  // place (deferred cleanup).
   return out;
 }
 
 async function destroyById(id: string): Promise<void> {
-  // ECS task ARNs start with `arn:aws:ecs:`; EFS access point ids start
-  // with `fsap-`. Dispatch on prefix the way fly.ts does for `vol_`.
-  if (id.startsWith('fsap-')) {
-    await deleteAccessPoint(id);
-    return;
-  }
+  // ECS task ARNs are the only resource kind we manage. Anything that
+  // looks like an ECS ARN gets StopTask'd; anything else is logged
+  // and ignored.
   if (id.startsWith('arn:aws:ecs:') || id.includes(':task/')) {
     await stopTask(id);
     return;
@@ -646,20 +552,6 @@ async function killAll(): Promise<void> {
     await stopTask(arn);
   }
   if (arns.length > 0) log.info('sandbox', `ecs: stopped ${arns.length} task(s)`);
-
-  const apResp = await awsJsonTry<ListAccessPointsResp>([
-    'efs',
-    'describe-access-points',
-    '--file-system-id',
-    efsId(),
-  ]);
-  const aps = (apResp?.AccessPoints ?? []).filter((ap) =>
-    ap.Tags?.some((t) => t.Key === TASK_TAG_KEY && t.Value === cluster()),
-  );
-  for (const ap of aps) {
-    await deleteAccessPoint(ap.AccessPointId);
-  }
-  if (aps.length > 0) log.info('sandbox', `ecs: deleted ${aps.length} access point(s)`);
 
   state.clear();
   await sweepAllSandboxes();

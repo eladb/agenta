@@ -255,6 +255,35 @@ Resources:
                 Condition:
                   StringEquals:
                     elasticfilesystem:AccessPointArn: !GetAtt EfsAccessPoint.Arn
+        # ECS sandbox provider (phase 2, #213 / #218). The bot shells out
+        # to `aws ecs run-task` etc. against a SEPARATE sandbox cluster.
+        # No EFS access-point perms here — the post-#218 design mounts a
+        # shared EFS root + per-thread subdir, no per-thread access points.
+        # TODO: tighten Resource to sandbox stack ARNs once cross-stack
+        # outputs are wired through.
+        - PolicyName: EcsSandboxProvider
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                  - ecs:ListTasks
+                  - ecs:DescribeServices
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
 
   # -- Cluster + task + service -----------------------------------------
   Cluster:

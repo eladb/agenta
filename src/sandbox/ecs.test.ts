@@ -1,16 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readSession, writeSession } from '../runtime/session-store';
-import { _resetEcsState, _rootDirectoryFor, _slugFor, ecsProvider } from './ecs';
+import { _resetEcsState, _slugFor, _workspacePathFor, ecsProvider } from './ecs';
 
 // Test harness:
 //   - A throwaway dir is prepended to PATH containing a shim `aws`
-//     bash script. The shim reads the script's args + a "scenario"
-//     id from $AGENTA_TEST_SCENARIO, dispatches to a JSON file in
-//     $AGENTA_TEST_SCRIPT_DIR/<scenario>/<call-counter>.json (or a
-//     default fallback) and prints it on stdout.
+//     bash script. The shim reads the script's args, dispatches to a
+//     JSON file written via setRoutes(), and prints it on stdout.
 //   - Each call also appends a recorded-call line to <scenario>/calls.log
 //     so tests can assert which `aws` subcommands were run + with what
 //     args, in order.
@@ -37,19 +35,6 @@ function stubFetchHealthy(): StubFetch {
 let shimDir: string;
 let dataDir: string;
 let scenarioDir: string;
-let routerPath: string;
-
-// Per-scenario router: a JS function bundled into the shim script via env.
-// To keep tests readable, each test registers a `route(args) => json`
-// callback BEFORE running ensure(); the shim consults a per-scenario
-// router file that the test writes out.
-//
-// Concretely: the bash shim writes JSON-stringified args to a request
-// file, asks bun to run a tiny ts dispatcher (routerPath) which reads
-// the per-scenario routes file (a JS module) and prints the response
-// JSON to stdout. Lower-magic alternative: use a *.json table keyed by
-// "service subcommand". We'll go with the table — easier to grok in
-// tests, no per-test bun subprocess.
 
 type Route = {
   // Matched as: `${service} ${subcommand}` plus optional substring match.
@@ -59,18 +44,15 @@ type Route = {
   // subcommand depending on which task is being described.
   contains?: string;
   // Response body (printed verbatim to stdout). If undefined, the shim
-  // exits 0 with empty body — used for stop-task / delete-access-point.
+  // exits 0 with empty body — used for stop-task.
   stdout?: string;
   exit?: number;
 };
 
-let routes: Route[] = [];
 const callLog: string[] = [];
 
 function setRoutes(rs: Route[]): void {
-  routes = rs;
   writeFileSync(join(scenarioDir, 'routes.json'), JSON.stringify(rs));
-  // Also clear the log.
   callLog.length = 0;
   writeFileSync(join(scenarioDir, 'calls.log'), '');
 }
@@ -85,18 +67,20 @@ function readCallLog(): string[] {
 
 beforeEach(() => {
   process.env.AGENTA_ECS_SANDBOX_CLUSTER = 'agenta-sandbox';
-  process.env.AGENTA_ECS_SANDBOX_EFS_ID = 'fs-test';
   process.env.AGENTA_ECS_SANDBOX_SUBNET_IDS = 'subnet-a,subnet-b';
   process.env.AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS = 'sg-1';
   // Don't set AWS_REGION — the shim doesn't care.
   delete process.env.AWS_REGION;
+  // EFS id was required by the #213 provider for access-point creation.
+  // After #218 we don't need it (the task def hard-codes the fs). Leave
+  // it unset to confirm the provider doesn't reach for it.
+  delete process.env.AGENTA_ECS_SANDBOX_EFS_ID;
 
   dataDir = mkdtempSync(join(tmpdir(), 'agenta-ecs-data-'));
   process.env.AGENTA_DATA_DIR = dataDir;
 
   shimDir = mkdtempSync(join(tmpdir(), 'agenta-ecs-shim-'));
   scenarioDir = mkdtempSync(join(tmpdir(), 'agenta-ecs-scn-'));
-  routerPath = join(scenarioDir, 'routes.json');
 
   // Write the shim. The shim:
   //   - logs every invocation (JSON-array of args) to $SCN/calls.log
@@ -153,7 +137,6 @@ PYEOF
   writeFileSync(awsShim, shim);
   chmodSync(awsShim, 0o755);
   process.env.PATH = `${shimDir}:${ORIG_PATH ?? ''}`;
-  routes = [];
 });
 
 afterEach(() => {
@@ -164,7 +147,6 @@ afterEach(() => {
   rmSync(scenarioDir, { recursive: true, force: true });
   delete process.env.AGENTA_DATA_DIR;
   delete process.env.AGENTA_ECS_SANDBOX_CLUSTER;
-  delete process.env.AGENTA_ECS_SANDBOX_EFS_ID;
   delete process.env.AGENTA_ECS_SANDBOX_SUBNET_IDS;
   delete process.env.AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS;
   _resetEcsState();
@@ -179,24 +161,18 @@ describe('ecsProvider', () => {
     expect(slug.endsWith('-')).toBe(false);
   });
 
-  test('_rootDirectoryFor: pins under /sandboxes/<slug>', () => {
-    const path = _rootDirectoryFor('C0X__1');
-    expect(path.startsWith('/sandboxes/')).toBe(true);
+  test('_workspacePathFor: pins under /efs/<slug>', () => {
+    const path = _workspacePathFor('C0X__1');
+    expect(path.startsWith('/efs/')).toBe(true);
+    // Slug comes from _slugFor — verify the format matches end-to-end.
+    expect(path).toBe(`/efs/${_slugFor('C0X__1')}`);
   });
 
-  test('ensure: creates access point + runs task, persists session.json', async () => {
+  test('ensure: runs task with SANDBOX_WORKSPACE_DIR=/efs/<slug> override + persists session.json', async () => {
     stubFetchHealthy();
-    const taskArn =
-      'arn:aws:ecs:us-east-1:123:task/agenta-sandbox/abcdef';
+    const TK = 'tk-fresh';
+    const taskArn = 'arn:aws:ecs:us-east-1:123:task/agenta-sandbox/abcdef';
     setRoutes([
-      // EFS create-access-point
-      {
-        match: 'efs create-access-point',
-        stdout: JSON.stringify({
-          AccessPointId: 'fsap-new',
-          AccessPointArn: 'arn:aws:elasticfilesystem:us-east-1:123:access-point/fsap-new',
-        }),
-      },
       // ECS run-task — returns the new task in PROVISIONING with an ENI
       // attachment carrying the private IP directly.
       {
@@ -237,46 +213,39 @@ describe('ecsProvider', () => {
       },
     ]);
 
-    await ecsProvider.ensure('tk-fresh');
+    await ecsProvider.ensure(TK);
 
-    const calls = readCallLog();
-    const services = calls.map((c) => {
-      const arr = JSON.parse(c) as string[];
-      // First two non-flag tokens after the --output json prefix:
-      const filtered: string[] = [];
-      let skip = false;
-      for (const a of arr) {
-        if (skip) {
-          skip = false;
-          continue;
-        }
-        if (a === '--output' || a === '--region') {
-          skip = true;
-          continue;
-        }
-        if (a.startsWith('--')) continue;
-        filtered.push(a);
-        if (filtered.length === 2) break;
-      }
-      return filtered.join(' ');
-    });
-    // Must include the three calls we expect, in order.
-    expect(services).toContain('efs create-access-point');
-    expect(services).toContain('ecs run-task');
-    expect(services).toContain('ecs describe-tasks');
-    expect(services.indexOf('efs create-access-point')).toBeLessThan(
-      services.indexOf('ecs run-task'),
+    const calls = readCallLog().map((c) => JSON.parse(c) as string[]);
+
+    // No access-point lifecycle anywhere — every trace of #213's
+    // per-thread access points should be gone.
+    const accessPointTouches = calls.some((c) =>
+      c.some((a) => a.includes('access-point') || a.includes('volume-configurations')),
     );
+    expect(accessPointTouches).toBe(false);
 
-    const session = await readSession('tk-fresh');
+    // The run-task call must inject SANDBOX_WORKSPACE_DIR=/efs/<slug>
+    // via containerOverrides.environment.
+    const runTaskCall = calls.find((c) => c.includes('run-task'));
+    expect(runTaskCall).toBeDefined();
+    const expectedPath = _workspacePathFor(TK);
+    expect(expectedPath.startsWith('/efs/')).toBe(true);
+    const runTaskFlat = runTaskCall?.join(' ') ?? '';
+    expect(runTaskFlat).toContain('SANDBOX_WORKSPACE_DIR');
+    expect(runTaskFlat).toContain(expectedPath);
+
+    // And SANDBOX_TOKEN is still passed too.
+    expect(runTaskFlat).toContain('SANDBOX_TOKEN');
+
+    const session = await readSession(TK);
     expect(session?.sandbox?.provider).toBe('ecs');
     if (session?.sandbox?.provider !== 'ecs') throw new Error('unreachable');
     expect(session.sandbox.task_arn).toBe(taskArn);
-    expect(session.sandbox.access_point_id).toBe('fsap-new');
+    expect(session.sandbox.workspace_path).toBe(expectedPath);
     expect(session.sandbox.sandbox_token.length).toBeGreaterThan(16);
     expect(session.sandbox.private_ip).toBe('10.0.0.42');
 
-    const ep = await ecsProvider.getEndpoint('tk-fresh');
+    const ep = await ecsProvider.getEndpoint(TK);
     expect(ep.baseUrl).toBe('http://10.0.0.42:9000');
     expect(ep.headers.Authorization).toBe(`Bearer ${session.sandbox.sandbox_token}`);
   });
@@ -291,7 +260,7 @@ describe('ecsProvider', () => {
       sandbox: {
         provider: 'ecs',
         task_arn: taskArn,
-        access_point_id: 'fsap-live',
+        workspace_path: '/efs/tk-hydrate',
         sandbox_token: 'preserved-token',
         private_ip: '10.0.0.99',
       },
@@ -320,19 +289,17 @@ describe('ecsProvider', () => {
 
     await ecsProvider.ensure(TK);
 
-    // No run-task, no create-access-point — pure adoption.
+    // No run-task — pure adoption.
     const calls = readCallLog().map((c) => JSON.parse(c) as string[]);
     const ranTask = calls.some((c) => c.includes('run-task'));
-    const createdAp = calls.some((c) => c.includes('create-access-point'));
     expect(ranTask).toBe(false);
-    expect(createdAp).toBe(false);
 
     const ep = await ecsProvider.getEndpoint(TK);
     expect(ep.headers.Authorization).toBe('Bearer preserved-token');
     expect(ep.baseUrl).toBe('http://10.0.0.99:9000');
   });
 
-  test('ensure: dead task + live access point re-runs task with same access point', async () => {
+  test('ensure: dead task re-runs new task with same workspace_path', async () => {
     stubFetchHealthy();
     const TK = 'tk-revive';
     const oldArn = 'arn:aws:ecs:us-east-1:123:task/agenta-sandbox/dead';
@@ -343,7 +310,7 @@ describe('ecsProvider', () => {
       sandbox: {
         provider: 'ecs',
         task_arn: oldArn,
-        access_point_id: 'fsap-keep',
+        workspace_path: '/efs/preserved-workspace',
         sandbox_token: 'preserved-token',
       },
     });
@@ -357,25 +324,10 @@ describe('ecsProvider', () => {
           tasks: [{ taskArn: oldArn, lastStatus: 'STOPPED' }],
         }),
       },
-      // describe-access-points: access point alive.
-      {
-        match: 'efs describe-access-points',
-        contains: 'fsap-keep',
-        stdout: JSON.stringify({
-          AccessPoints: [
-            {
-              AccessPointId: 'fsap-keep',
-              FileSystemId: 'fs-test',
-              LifeCycleState: 'available',
-              RootDirectory: { Path: '/sandboxes/tk-revive' },
-            },
-          ],
-        }),
-      },
-      // run-task with the existing access point.
+      // run-task — the new task. The shim doesn't filter on contains
+      // here so we don't have to know the run-task arg ordering.
       {
         match: 'ecs run-task',
-        contains: 'fsap-keep',
         stdout: JSON.stringify({
           tasks: [
             {
@@ -411,20 +363,28 @@ describe('ecsProvider', () => {
           ],
         }),
       },
-      // create-access-point must NOT be hit on this path — leave it
-      // unmatched so the shim would explode if we tried.
     ]);
 
     await ecsProvider.ensure(TK);
 
-    // No new access point created — same workspace preserved.
     const calls = readCallLog().map((c) => JSON.parse(c) as string[]);
-    expect(calls.some((c) => c.includes('create-access-point'))).toBe(false);
+    // Workspace path threaded through — the run-task call must carry
+    // the same /efs/<slug> the previous task used, so files survive
+    // across the dead → new transition.
+    const runTaskCall = calls.find((c) => c.includes('run-task'));
+    expect(runTaskCall).toBeDefined();
+    expect(runTaskCall?.join(' ')).toContain('/efs/preserved-workspace');
+
+    // No access-point lifecycle.
+    const accessPointTouches = calls.some((c) =>
+      c.some((a) => a.includes('access-point') || a.includes('volume-configurations')),
+    );
+    expect(accessPointTouches).toBe(false);
 
     const session = await readSession(TK);
     if (session?.sandbox?.provider !== 'ecs') throw new Error('unreachable');
     expect(session.sandbox.task_arn).toBe(newArn);
-    expect(session.sandbox.access_point_id).toBe('fsap-keep');
+    expect(session.sandbox.workspace_path).toBe('/efs/preserved-workspace');
     expect(session.sandbox.sandbox_token).toBe('preserved-token');
     expect(session.sandbox.private_ip).toBe('10.0.0.7');
   });
@@ -439,7 +399,6 @@ describe('ecsProvider', () => {
     });
 
     setRoutes([
-      { match: 'efs create-access-point', stdout: JSON.stringify({ AccessPointId: 'fsap-fresh' }) },
       {
         match: 'ecs run-task',
         stdout: JSON.stringify({
@@ -480,9 +439,11 @@ describe('ecsProvider', () => {
     await ecsProvider.ensure(TK);
     const session = await readSession(TK);
     expect(session?.sandbox?.provider).toBe('ecs');
+    if (session?.sandbox?.provider !== 'ecs') throw new Error('unreachable');
+    expect(session.sandbox.workspace_path).toBe(_workspacePathFor(TK));
   });
 
-  test('remove: stops task + deletes access point', async () => {
+  test('remove: stops task (does NOT delete any access point — there are none)', async () => {
     stubFetchHealthy();
     const TK = 'tk-rm';
     const taskArn = 'arn:aws:ecs:us-east-1:123:task/agenta-sandbox/rm';
@@ -492,31 +453,27 @@ describe('ecsProvider', () => {
       sandbox: {
         provider: 'ecs',
         task_arn: taskArn,
-        access_point_id: 'fsap-rm',
+        workspace_path: '/efs/tk-rm',
         sandbox_token: 't',
         private_ip: '10.0.0.5',
       },
     });
 
-    setRoutes([
-      { match: 'ecs stop-task', stdout: JSON.stringify({}) },
-      { match: 'efs delete-access-point', stdout: JSON.stringify({}) },
-    ]);
+    setRoutes([{ match: 'ecs stop-task', stdout: JSON.stringify({}) }]);
 
     await ecsProvider.remove(TK);
 
     const calls = readCallLog().map((c) => JSON.parse(c) as string[]);
-    const stopIdx = calls.findIndex((c) => c.includes('stop-task'));
-    const delIdx = calls.findIndex((c) => c.includes('delete-access-point'));
-    expect(stopIdx).toBeGreaterThanOrEqual(0);
-    expect(delIdx).toBeGreaterThan(stopIdx);
+    expect(calls.some((c) => c.includes('stop-task'))).toBe(true);
+    // No EFS calls at all in the remove path now.
+    expect(calls.some((c) => c[0] === 'efs' || c.some((a) => a === 'efs'))).toBe(false);
 
     const after = await readSession(TK);
     expect(after?.sandbox).toBeUndefined();
     expect(after?.status).toBe('idle');
   });
 
-  test('listAll: returns RUNNING task ARNs + tagged access point ids', async () => {
+  test('listAll: returns RUNNING task ARNs (no access points)', async () => {
     setRoutes([
       {
         match: 'ecs list-tasks',
@@ -527,45 +484,30 @@ describe('ecsProvider', () => {
           ],
         }),
       },
-      {
-        match: 'efs describe-access-points',
-        stdout: JSON.stringify({
-          AccessPoints: [
-            {
-              AccessPointId: 'fsap-ours',
-              Tags: [{ Key: 'agenta_bot_instance', Value: 'agenta-sandbox' }],
-            },
-            {
-              AccessPointId: 'fsap-theirs',
-              Tags: [{ Key: 'agenta_bot_instance', Value: 'someone-else' }],
-            },
-            { AccessPointId: 'fsap-untagged' },
-          ],
-        }),
-      },
     ]);
 
     const list = await ecsProvider.listAll();
     const ids = list.map((e) => e.id).sort();
     expect(ids).toContain('arn:aws:ecs:us-east-1:123:task/agenta-sandbox/t1');
     expect(ids).toContain('arn:aws:ecs:us-east-1:123:task/agenta-sandbox/t2');
-    expect(ids).toContain('fsap-ours');
-    expect(ids).not.toContain('fsap-theirs');
-    expect(ids).not.toContain('fsap-untagged');
+    // No access-point ids in the output.
+    expect(ids.some((id) => id.startsWith('fsap-'))).toBe(false);
+
+    // And the shim shouldn't have been asked to list access points at all.
+    const calls = readCallLog().map((c) => JSON.parse(c) as string[]);
+    expect(calls.some((c) => c.includes('describe-access-points'))).toBe(false);
   });
 
-  test('destroyById: dispatches by id prefix', async () => {
-    setRoutes([
-      { match: 'ecs stop-task', stdout: JSON.stringify({}) },
-      { match: 'efs delete-access-point', stdout: JSON.stringify({}) },
-    ]);
+  test('destroyById: dispatches task ARNs, ignores other id shapes', async () => {
+    setRoutes([{ match: 'ecs stop-task', stdout: JSON.stringify({}) }]);
 
     await ecsProvider.destroyById('arn:aws:ecs:us-east-1:123:task/agenta-sandbox/x');
+    // Unknown id format is a no-op (just logs a warning).
     await ecsProvider.destroyById('fsap-abc');
 
     const calls = readCallLog().map((c) => JSON.parse(c) as string[]);
-    expect(calls.some((c) => c.includes('stop-task'))).toBe(true);
-    expect(calls.some((c) => c.includes('delete-access-point'))).toBe(true);
+    expect(calls.filter((c) => c.includes('stop-task')).length).toBe(1);
+    expect(calls.some((c) => c.includes('delete-access-point'))).toBe(false);
   });
 
   test('ensure: throws when required env vars missing', async () => {
@@ -573,7 +515,7 @@ describe('ecsProvider', () => {
     await expect(ecsProvider.ensure('k')).rejects.toThrow(/AGENTA_ECS_SANDBOX_CLUSTER/);
   });
 
-  test('SandboxRecord(ecs) round-trips through session-store', async () => {
+  test('SandboxRecord(ecs) round-trips through session-store with workspace_path', async () => {
     const TK = 'tk-roundtrip';
     await writeSession(TK, {
       status: 'idle',
@@ -581,7 +523,7 @@ describe('ecsProvider', () => {
       sandbox: {
         provider: 'ecs',
         task_arn: 'arn:aws:ecs:us-east-1:1:task/c/abc',
-        access_point_id: 'fsap-rt',
+        workspace_path: '/efs/tk-roundtrip',
         sandbox_token: 'rt-token',
         private_ip: '10.1.2.3',
       },
@@ -590,7 +532,7 @@ describe('ecsProvider', () => {
     expect(back?.sandbox?.provider).toBe('ecs');
     if (back?.sandbox?.provider !== 'ecs') throw new Error('unreachable');
     expect(back.sandbox.task_arn).toBe('arn:aws:ecs:us-east-1:1:task/c/abc');
-    expect(back.sandbox.access_point_id).toBe('fsap-rt');
+    expect(back.sandbox.workspace_path).toBe('/efs/tk-roundtrip');
     expect(back.sandbox.sandbox_token).toBe('rt-token');
     expect(back.sandbox.private_ip).toBe('10.1.2.3');
   });

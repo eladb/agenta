@@ -39,17 +39,24 @@ export type SandboxRecord =
       private_ip?: string;
     }
   | {
-      // ECS Fargate sandbox (#213). Per-thread `ecs run-task` against a
-      // sandbox cluster + per-thread EFS access point pinned under
-      // /sandboxes/<thread-slug> on a shared EFS filesystem. The bot dials
-      // the task's private IP on port 9000 (in-VPC routing only — no ALB,
-      // no public surface). `task_arn` survives across bot restarts; the
-      // task itself stays running but task ENIs get a fresh `private_ip`
-      // on each RunTask, so we re-resolve via DescribeTasks before every
-      // getEndpoint call when the in-memory cache is empty.
+      // ECS Fargate sandbox (#213, refactored #218). Per-thread
+      // `ecs run-task` against a sandbox cluster + per-thread subdirectory
+      // on a shared EFS filesystem mounted at /efs in the sandbox
+      // container. Per-thread isolation is the directory path —
+      // SANDBOX_WORKSPACE_DIR=/efs/<thread-slug> is injected via
+      // run-task container overrides so the same task definition can
+      // serve every thread without registering a new revision. The bot
+      // dials the task's private IP on port 9000 (in-VPC routing only —
+      // no ALB, no public surface). `task_arn` survives across bot
+      // restarts; the task itself stays running but task ENIs get a
+      // fresh `private_ip` on each RunTask, so we re-resolve via
+      // DescribeTasks before every getEndpoint call when the in-memory
+      // cache is empty. `workspace_path` is durable metadata — the
+      // directory on EFS survives across task restarts so a new task
+      // with the same path picks up the previous turn's files.
       provider: 'ecs';
       task_arn: string;
-      access_point_id: string;
+      workspace_path: string;
       sandbox_token: string;
       // Cached private IP from the most recent DescribeTasks. Optional
       // because (a) the field can be missing immediately after RunTask
