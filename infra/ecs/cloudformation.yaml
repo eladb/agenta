@@ -1,24 +1,23 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  agenta bot — ECS Fargate deployment (phase 1, per agenta issue #208).
-
-  Single Fargate task, public subnet + public IP, no NAT Gateway, no ALB —
-  the bot is Socket-Mode + outbound HTTPS only (Slack WS, model gateway,
-  Fly Machines API for sandbox provisioning). EFS for /data so atomic
-  rename works for session.json + sandbox state. Singleton enforced via
-  deployment config (minHealthyPercent=0, maxPercent=100) so the bot's
-  own lockfile (src/lockfile.ts) never sees two processes racing.
-
-  Secrets come from SSM Parameter Store (SecureString) under
-  /<SsmParameterPrefix>/<NAME>, injected into the container via the task
-  definition's `secrets:` block (no env-file shipping, no AWS Secrets
-  Manager surcharge). Operator populates them once after stack-create
-  using `aws ssm put-parameter` — see infra/ecs/README.md.
-
-  ECR repo + CloudWatch log group are created here so the same stack
-  bootstraps everything an empty AWS account needs. scripts/deploy-bot-ecs.ts
-  builds the image, pushes to this repo, registers a new task definition
-  revision, and force-rolls the service.
+# CloudFormation caps Description at 1024 chars (rendered, not YAML source).
+# Keep edits below that ceiling -- run `python3 -c "import yaml; ..."` on
+# the rendered string after major rewrites to verify.
+Description: >-
+  agenta bot ECS Fargate deployment (phase 1, agenta #208). Single Fargate
+  task, public subnet + public IP, no NAT, no ALB; bot is Socket-Mode +
+  outbound HTTPS only (Slack WS, model gateway, Fly Machines API for
+  sandbox provisioning). EFS for /data so atomic rename works for
+  session.json + sandbox state. Singleton enforced via deployment config
+  (minHealthyPercent=0, maxPercent=100) so the bot's own lockfile
+  (src/lockfile.ts) never sees two processes racing. Secrets come from
+  SSM Parameter Store (SecureString) under /<SsmParameterPrefix>/<NAME>,
+  injected via the task definition's `secrets:` block (no env-file
+  shipping, no AWS Secrets Manager surcharge). Operator populates them
+  once with `aws ssm put-parameter` -- see infra/ecs/README.md. ECR repo
+  and CloudWatch log group are created here so the stack bootstraps
+  everything an empty AWS account needs. scripts/deploy-bot-ecs.ts
+  builds, pushes both <sha> and :latest tags, registers a new task-def
+  revision pinned to the SHA, and force-rolls the service.
 
 Parameters:
   ClusterName:
@@ -84,7 +83,7 @@ Parameters:
     Default: agenta-sandbox
     Description: >
       Fly app name that hosts per-thread sandbox machines. The bot stays
-      on SANDBOX_PROVIDER=fly even when deployed on ECS — sandboxes still
+      on SANDBOX_PROVIDER=fly even when deployed on ECS - sandboxes still
       live on Fly. Injected as AGENTA_SANDBOX_APP.
 
   FlyRegion:
@@ -92,8 +91,20 @@ Parameters:
     Default: iad
     Description: Fly region for per-thread sandbox machines/volumes (injected as FLY_REGION).
 
+  DesiredCount:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 1
+    Description: >-
+      ECS service desired task count. The bot's src/lockfile.ts is a hard
+      singleton: >1 simply will not boot. Default 0 so the first stack
+      apply against an empty ECR + empty SSM does not crashloop pulling
+      a missing image; bump to 1 (re-deploy or `aws ecs update-service
+      --desired-count 1`) after the image is pushed and SSM is populated.
+
 Resources:
-  # ── ECR ──────────────────────────────────────────────────────────────
+  # -- ECR --------------------------------------------------------------
   EcrRepository:
     Type: AWS::ECR::Repository
     Properties:
@@ -102,18 +113,18 @@ Resources:
       ImageScanningConfiguration:
         ScanOnPush: true
 
-  # ── Logs ─────────────────────────────────────────────────────────────
+  # -- Logs -------------------------------------------------------------
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Ref LogGroupName
       RetentionInDays: 30
 
-  # ── EFS for /data (persistent across task replacements) ──────────────
+  # -- EFS for /data (persistent across task replacements) --------------
   # Mounted at /data inside the container. The access point pins the
   # POSIX uid/gid to root (0/0) for parity with Fly's volume behavior;
   # the bot's threat model is "trusted code with secrets" so container
-  # uid isn't the security boundary — see issue #208.
+  # uid isn't the security boundary - see issue #208.
   EfsFileSystem:
     Type: AWS::EFS::FileSystem
     Properties:
@@ -148,14 +159,14 @@ Resources:
       SecurityGroups:
         - !Ref EfsSecurityGroup
 
-  # ── Security groups ──────────────────────────────────────────────────
+  # -- Security groups --------------------------------------------------
   # The bot task: no ingress at all (no ALB, no public service). All
-  # egress allowed — bot talks to Slack WS, model gateway, Fly Machines
+  # egress allowed - bot talks to Slack WS, model gateway, Fly Machines
   # API, EFS, ECR, CloudWatch Logs, SSM, all over HTTPS / NFS.
   TaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: agenta bot Fargate task — egress only
+      GroupDescription: agenta bot Fargate task - egress only
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: '-1'
@@ -166,7 +177,7 @@ Resources:
   EfsSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: agenta bot EFS — NFS from task SG only
+      GroupDescription: agenta bot EFS - NFS from task SG only
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: '-1'
@@ -183,7 +194,7 @@ Resources:
       SourceSecurityGroupId: !Ref TaskSecurityGroup
       Description: NFS from bot task SG
 
-  # ── IAM ──────────────────────────────────────────────────────────────
+  # -- IAM --------------------------------------------------------------
   # Execution role: ECS agent uses this to pull the image, write logs,
   # and read SSM parameters BEFORE the container starts (for secrets
   # injection).
@@ -211,14 +222,14 @@ Resources:
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/*'
               # SSM SecureString parameters are encrypted with the AWS-managed
-              # KMS key by default — Decrypt against that key is required for
+              # KMS key by default - Decrypt against that key is required for
               # the execution role to actually read them.
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/aws/ssm'
 
   # Task role: what the bot process itself can do at runtime. Only EFS
-  # access — the bot talks to Fly / Slack / model gateway with the tokens
+  # access - the bot talks to Fly / Slack / model gateway with the tokens
   # it gets from SSM, not via AWS APIs.
   TaskRole:
     Type: AWS::IAM::Role
@@ -245,7 +256,7 @@ Resources:
                   StringEquals:
                     elasticfilesystem:AccessPointArn: !GetAtt EfsAccessPoint.Arn
 
-  # ── Cluster + task + service ─────────────────────────────────────────
+  # -- Cluster + task + service -----------------------------------------
   Cluster:
     Type: AWS::ECS::Cluster
     Properties:
@@ -279,9 +290,20 @@ Resources:
         - Name: bot
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}'
           Essential: true
-          # Container-level health uses the Dockerfile HEALTHCHECK (curl
-          # /health). ECS reads that and surfaces it as health-status on
-          # the task. No PortMappings — nothing inbound.
+          # Mirrors the Dockerfile HEALTHCHECK so ECS actually surfaces
+          # `healthStatus` on the task (without this block the task stays
+          # UNKNOWN forever and the deployment circuit breaker has no
+          # signal). CMD-SHELL is required for the ${HEALTH_PORT:-8080}
+          # shell expansion -- the CMD form skips the shell.
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -fsS "http://localhost:${HEALTH_PORT:-8080}/health" || exit 1
+            Interval: 30
+            Timeout: 5
+            StartPeriod: 30
+            Retries: 3
+          # No PortMappings -- nothing inbound.
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -292,7 +314,7 @@ Resources:
             - SourceVolume: data
               ContainerPath: /data
               ReadOnly: false
-          # Plain env — matches the Fly [env] block in fly.toml so the
+          # Plain env - matches the Fly [env] block in fly.toml so the
           # only delta between deployments is the secret source.
           Environment:
             - Name: AGENTA_DATA_DIR
@@ -314,22 +336,39 @@ Resources:
           # sandboxes against the Fly Machines API even when running on
           # ECS (SANDBOX_PROVIDER=fly).
           Secrets:
+            # Slack credentials (Socket Mode + Web API).
             - Name: SLACK_APP_TOKEN
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SLACK_APP_TOKEN'
             - Name: SLACK_BOT_TOKEN
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SLACK_BOT_TOKEN'
+            # Model gateway: OpenAI-compat endpoint + key + per-channel
+            # Bedrock override credential (referenced from config/homes.json).
             - Name: MODEL_API_KEY
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/MODEL_API_KEY'
             - Name: MODEL_BASE_URL
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/MODEL_BASE_URL'
             - Name: MODEL_NAME
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/MODEL_NAME'
+            - Name: AWS_BEARER_TOKEN_BEDROCK
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/AWS_BEARER_TOKEN_BEDROCK'
+            # Home-repo auth (referenced from config/homes.json's
+            # auth_env entries). GITHUB_TOKEN = HTTPS PAT for the default
+            # home; the *_DEPLOY_KEY entries are PEM-formatted SSH keys
+            # for direct-mode home repos.
             - Name: GITHUB_TOKEN
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/GITHUB_TOKEN'
-            - Name: SALTO_API_TOKEN
-              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SALTO_API_TOKEN'
             - Name: AGENTA_TEST_HOME_ALONE_DEPLOY_KEY
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/AGENTA_TEST_HOME_ALONE_DEPLOY_KEY'
+            - Name: SALTO_SALESFORCE_PLAYGROUND_DEPLOY_KEY
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SALTO_SALESFORCE_PLAYGROUND_DEPLOY_KEY'
+            # Tool credentials: salto_* tools shell out to salto-cloud,
+            # web_search hits the Tavily API.
+            - Name: SALTO_API_TOKEN
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SALTO_API_TOKEN'
+            - Name: TAVILY_API_KEY
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/TAVILY_API_KEY'
+            # Sandbox provider: bot stays on Fly for per-thread sandboxes
+            # even when itself on ECS.
             - Name: FLY_API_TOKEN
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/FLY_API_TOKEN'
 
@@ -342,8 +381,8 @@ Resources:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
       TaskDefinition: !Ref TaskDefinition
-      DesiredCount: 1
-      # Singleton — stop the old task BEFORE starting the new one so the
+      DesiredCount: !Ref DesiredCount
+      # Singleton - stop the old task BEFORE starting the new one so the
       # bot's lockfile (src/lockfile.ts) never sees two processes against
       # the same EFS volume.
       DeploymentConfiguration:
@@ -356,7 +395,7 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           # Public IP only for egress (no ALB, no inbound). Avoids the
-          # ~$32/mo NAT Gateway tax — see issue #208 cost table.
+          # ~$32/mo NAT Gateway tax - see issue #208 cost table.
           AssignPublicIp: ENABLED
           Subnets: !Ref PublicSubnetIds
           SecurityGroups:
