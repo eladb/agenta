@@ -19,16 +19,27 @@
 //   TEST_BOT_TOKEN        - tester bot token
 //   TEST_CHANNEL_ID       - channel both bots are invited to
 //
+// Optional env:
+//   AGENTA_DEPLOY_TARGET  - `fly` (default) or `ecs`. Picks how the pre-canary
+//                           health wait queries the control plane:
+//                             fly:  Fly Machines API (FLY_API_TOKEN + FLY_APP_NAME).
+//                             ecs:  `aws ecs describe-services` against
+//                                   AGENTA_ECS_CLUSTER + AGENTA_ECS_SERVICE.
+//                           Bot behavior is identical — only ops tooling branches.
+//
 // Reuses helpers from tests/e2e to keep the wire-level logic in one place.
 
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { WebClient } from '@slack/web-api';
+import { resolveDeployTarget } from '../src/runtime/deploy-target';
 import { threadKey as makeThreadKey } from '../src/runtime/thread';
 import { mention, requireEnv, startTester, waitForReply } from '../tests/e2e/helpers';
 
 const STEP_TIMEOUT_MS = 60_000;
 const FLY_HEALTH_TIMEOUT_MS = 120_000;
+const ECS_HEALTH_TIMEOUT_MS = 300_000; // ECS rolling deploys are slower than Fly's immediate strategy.
 
 function dataDir(): string {
   return process.env.AGENTA_DATA_DIR ?? join(process.cwd(), 'data');
@@ -86,6 +97,113 @@ async function waitForFlyHealth(): Promise<void> {
   );
 }
 
+// Polls ECS via `aws ecs describe-services` until the primary deployment
+// is COMPLETED with runningCount == 1 (and no PENDING/FAILED). Equivalent
+// of waitForFlyHealth for the ECS deploy target.
+//
+// Required env: AGENTA_ECS_CLUSTER, AGENTA_ECS_SERVICE. AWS_REGION (or the
+// default profile/region) routes the request. Bails loudly if the aws CLI
+// isn't on PATH — we don't pull in @aws-sdk just for canary.
+async function waitForEcsHealth(): Promise<void> {
+  const cluster = process.env.AGENTA_ECS_CLUSTER;
+  const service = process.env.AGENTA_ECS_SERVICE;
+  if (!cluster || !service) {
+    process.stderr.write(
+      'canary: skipping ECS health wait (AGENTA_ECS_CLUSTER/AGENTA_ECS_SERVICE unset)\n',
+    );
+    return;
+  }
+  const probe = spawnSync('aws', ['--version'], { stdio: 'ignore' });
+  if (probe.status !== 0) {
+    throw new Error(
+      'canary: AGENTA_DEPLOY_TARGET=ecs but the `aws` CLI is not installed or not on PATH. ' +
+        'Install AWS CLI v2: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html',
+    );
+  }
+
+  const deadline = Date.now() + ECS_HEALTH_TIMEOUT_MS;
+  let lastSummary = '';
+  while (Date.now() < deadline) {
+    const r = spawnSync(
+      'aws',
+      [
+        'ecs',
+        'describe-services',
+        '--cluster',
+        cluster,
+        '--services',
+        service,
+        '--output',
+        'json',
+      ],
+      { encoding: 'utf8' },
+    );
+    if (r.status !== 0) {
+      lastSummary = `aws describe-services failed: ${(r.stderr ?? '').trim()}`;
+    } else {
+      try {
+        const parsed = JSON.parse(r.stdout ?? '{}') as {
+          services?: Array<{
+            desiredCount?: number;
+            runningCount?: number;
+            pendingCount?: number;
+            deployments?: Array<{
+              status?: string;
+              rolloutState?: string;
+              desiredCount?: number;
+              runningCount?: number;
+              pendingCount?: number;
+              failedTasks?: number;
+            }>;
+          }>;
+        };
+        const svc = parsed.services?.[0];
+        if (!svc) {
+          lastSummary = `service ${service} not found in cluster ${cluster}`;
+        } else {
+          const primary = (svc.deployments ?? []).find((d) => d.status === 'PRIMARY');
+          const summary =
+            `desired=${svc.desiredCount ?? '?'} running=${svc.runningCount ?? '?'} ` +
+            `pending=${svc.pendingCount ?? '?'} ` +
+            `primary=${primary?.rolloutState ?? 'none'}/${primary?.runningCount ?? '?'}/${
+              primary?.failedTasks ?? 0
+            }f`;
+          lastSummary = summary;
+          const ok =
+            svc.runningCount === 1 &&
+            (svc.pendingCount ?? 0) === 0 &&
+            primary?.rolloutState === 'COMPLETED' &&
+            (primary?.failedTasks ?? 0) === 0;
+          if (ok) {
+            process.stderr.write(`canary: ECS health OK (${summary})\n`);
+            return;
+          }
+        }
+      } catch (err) {
+        lastSummary = `parse error: ${(err as Error).message}`;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  throw new Error(
+    `ECS health did not converge within ${ECS_HEALTH_TIMEOUT_MS}ms; last=${lastSummary}`,
+  );
+}
+
+async function waitForDeployHealth(): Promise<void> {
+  const target = resolveDeployTarget();
+  if (target === 'fly') {
+    await waitForFlyHealth();
+    return;
+  }
+  if (target === 'ecs') {
+    await waitForEcsHealth();
+    return;
+  }
+  // resolveDeployTarget throws on unknown values, so this is unreachable.
+  throw new Error(`canary: unknown deploy target ${target}`);
+}
+
 async function agentBotUserId(): Promise<string> {
   // Prefer an explicit env var so canary can run from a host whose `.env`
   // doesn't carry the prod agent's xoxb-/xapp- credentials (e.g. dev hosts
@@ -122,7 +240,7 @@ async function step(
 async function main(): Promise<void> {
   process.stderr.write('canary: resolving env + agent user...\n');
   const channel = requireEnv('TEST_CHANNEL_ID');
-  await waitForFlyHealth();
+  await waitForDeployHealth();
   const agentUser = await agentBotUserId();
   process.stderr.write(`canary: agent user = ${agentUser}; channel = ${channel}\n`);
   const tester = await startTester();
