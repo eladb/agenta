@@ -237,7 +237,57 @@ async function step(
   }
 }
 
+// Parse --message / --thread flags. Returns { message, thread } when --message
+// is present, undefined otherwise (standard 3-step canary mode).
+function parseMessageArgs(): { message: string; thread?: string } | undefined {
+  const argv = process.argv.slice(2);
+  const i = argv.indexOf('--message');
+  if (i < 0) return undefined;
+  const message = argv[i + 1];
+  if (!message) throw new Error('--message requires a value');
+  const ti = argv.indexOf('--thread');
+  const thread = ti >= 0 ? argv[ti + 1] : undefined;
+  if (ti >= 0 && !thread) throw new Error('--thread requires a value');
+  return { message, thread };
+}
+
+// Ad-hoc single-message mode: fire one mention, print the reply, exit.
+// Skips deploy-health wait and /delete cleanup so it's safe to run against
+// any live bot for interactive debugging. Leaves the thread intact.
+async function messageMode(message: string, thread?: string): Promise<void> {
+  const channel = requireEnv('TEST_CHANNEL_ID');
+  const agentUser = await agentBotUserId();
+  process.stderr.write(`canary: --message mode (agent=${agentUser} channel=${channel})\n`);
+  const tester = await startTester();
+  try {
+    const t0 = Date.now();
+    const threadTs = await mention(tester, agentUser, channel, thread, message);
+    process.stderr.write(`canary: posted (thread=${threadTs}); waiting for reply...\n`);
+    const reply = await waitForReply(
+      tester,
+      channel,
+      threadTs,
+      agentUser,
+      (text) =>
+        text.length > 0 && !text.includes('thinking…') && !text.includes('•'),
+      { timeoutMs: STEP_TIMEOUT_MS },
+    );
+    process.stderr.write(`canary: reply in ${Date.now() - t0}ms\n`);
+    process.stderr.write(`canary: thread=${threadTs}\n`);
+    // The reply itself goes to stdout — pipeable, scriptable.
+    process.stdout.write(reply);
+    process.stdout.write('\n');
+  } finally {
+    await tester.socket.disconnect();
+  }
+}
+
 async function main(): Promise<void> {
+  const adhoc = parseMessageArgs();
+  if (adhoc) {
+    await messageMode(adhoc.message, adhoc.thread);
+    return;
+  }
   process.stderr.write('canary: resolving env + agent user...\n');
   const channel = requireEnv('TEST_CHANNEL_ID');
   await waitForDeployHealth();
