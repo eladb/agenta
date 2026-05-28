@@ -71,7 +71,9 @@ It needs the `session-manager-plugin` locally — install once:
 curl -fsSL https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb -o /tmp/smp.deb && sudo dpkg -i /tmp/smp.deb
 ```
 
-**Caveat (as of 2026-05-28): ECS Exec does NOT work on the salto bot yet** — the bot task role lacks the `ssmmessages:*` perms the exec data channel needs, so the command fails with `TargetNotConnected`. Until that's wired up (a `gotcha` follow-up), use these read-only fallbacks — they cover most "what happened?" questions:
+ECS Exec works on the salto bot as of 2026-05-28 (#226 added the `ssmmessages:*` data-channel perms to the bot task role). One gotcha: a task assumes its role **at launch**, so if a role change is newer than the running task you'll still get `TargetNotConnected` — relaunch with `aws ecs update-service --cluster agenta-bot --service agenta-bot --force-new-deployment` (brief bot restart) so a fresh task picks up the perms. `enableExecuteCommand` on the service is also required (already set).
+
+These read-only fallbacks remain handy when exec isn't an option (no `session-manager-plugin` to hand, a task that predates a role change, or just a quick peek) — they cover most "what happened?" questions:
 
 - **Conversation transcript via the Slack API** (user-visible messages — not the full JSONL, but enough to see the symptom and exact error text the bot posted):
   ```sh
