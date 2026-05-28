@@ -17,3 +17,5 @@ data/
 .claude/projects/-home-*/*
 !.claude/projects/-home-*/memory/
 !.claude/projects/-home-*/memory/**
+!.claude/icon.svg
+!.claude/icon.png
