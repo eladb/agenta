@@ -29,3 +29,6 @@
 ^LICENSE$
 ^\.gitignore$
 ^\.env\.example$
+
+# Operator-only box-provisioning script; never runs in the prod image.
+^install\.sh$
