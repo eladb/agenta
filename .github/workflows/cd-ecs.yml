@@ -24,12 +24,12 @@ name: CD (ECS)
 # ECS sandbox path end-to-end because the *deployed* salto bot (in-VPC) is
 # what spawns the Fargate sandbox.
 #
-# The canary uses a DEDICATED tester app (ECS_TEST_*) — NOT the shared
-# tester (TEST_*) that cd.yml's canary connects. Slack Socket Mode
-# load-balances events across every client on the same app token, so
-# reusing the shared tester would split events 50/50 when both lanes'
-# canaries overlap on a merge. A dedicated app lets this lane run truly in
-# parallel with cd.yml.
+# This lane SHARES cd.yml's `cd` concurrency group, so the Fly and ECS
+# lanes never run at once. Both canaries drive the shared tester app's
+# (TEST_*) Socket Mode, which Slack load-balances across every client on
+# the same app token — overlapping runs would split events 50/50.
+# Serializing avoids that with no extra Slack apps, trading wall-clock
+# parallelism for simplicity.
 #
 # Doc-only commits skip every deploy step (same .ci-ignore allowlist as
 # cd.yml) but the workflow still completes green. Manual rollback is via
@@ -40,10 +40,11 @@ on:
     branches: [main]
 
 concurrency:
-  # Own group, separate from cd.yml's `cd` — the two lanes run in parallel.
-  # Queue runs instead of cancelling: a follow-on doc-only push no-ops, but
-  # cancelling an in-flight real deploy could leave ECS on the old image.
-  group: cd-ecs
+  # SHARE cd.yml's `cd` group so the Fly and ECS lanes never run at once —
+  # both canaries drive the shared tester app's Socket Mode, which Slack
+  # would split 50/50 if they overlapped. Queue (don't cancel): cancelling
+  # an in-flight real deploy could leave ECS on the old image.
+  group: cd
   cancel-in-progress: false
 
 jobs:
@@ -122,9 +123,9 @@ jobs:
         run: bun scripts/deploy-sandbox-ecs.ts
 
       # Canary uses the salto bot token only to resolve the salto bot's user
-      # id (no Socket Mode client connects to it). The DEDICATED ECS tester
-      # (ECS_TEST_*) drives the conversation, so this runs in parallel with
-      # cd.yml's canary without splitting the shared tester's Socket Mode.
+      # id (no Socket Mode client connects to it). The shared tester (TEST_*)
+      # drives the conversation — safe because this lane shares cd.yml's `cd`
+      # concurrency group, so the two lanes' canaries never run at once.
       - name: Canary (salto / ECS)
         if: steps.changed.outputs.code == 'true'
         env:
@@ -132,8 +133,8 @@ jobs:
           AGENTA_ECS_CLUSTER: agenta-bot
           AGENTA_ECS_SERVICE: agenta-bot
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          TEST_APP_TOKEN: ${{ secrets.ECS_TEST_APP_TOKEN }}
-          TEST_BOT_TOKEN: ${{ secrets.ECS_TEST_BOT_TOKEN }}
+          TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
+          TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
           TEST_CHANNEL_ID: ${{ secrets.SALTO_CANARY_CHANNEL_ID }}
         run: bun run canary
 
