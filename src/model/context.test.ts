@@ -413,6 +413,70 @@ describe('buildMessages', () => {
     expect(parts[0]?.text).toContain('[attached: attachments/F12-my_weird_name_1_.txt]');
   });
 
+  it('skips a no-file message with empty text (bare @mention) — no empty content block (#223)', async () => {
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: '' },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toEqual([{ role: 'system', content: 'sys' }]);
+  });
+
+  it('skips a no-file message with whitespace-only text (#223)', async () => {
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: '   ' },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toEqual([{ role: 'system', content: 'sys' }]);
+  });
+
+  it('drops only the empty message in a poisoned-style history (#223)', async () => {
+    // Self-heal path: a non-empty turn followed by an empty bare-mention turn
+    // yields exactly the non-empty user message.
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '1', text: 'real question' },
+    });
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: { slack_ts: '2', text: '' },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toEqual([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'real question' },
+    ]);
+  });
+
+  it('still emits a message for empty text WITH a file (unchanged) (#223)', async () => {
+    writeAttachment('t', 'F6-notes.txt', 'file body');
+    await appendEvent('t', {
+      source: 'slack',
+      type: 'message',
+      payload: {
+        slack_ts: '1',
+        text: '',
+        files: [
+          {
+            file_id: 'F6',
+            name: 'notes.txt',
+            mimetype: 'text/plain',
+            local_path: 'attachments/F6-notes.txt',
+          },
+        ],
+      },
+    });
+    const m = await buildMessages('t', 'sys');
+    expect(m).toHaveLength(2);
+    const parts = m[1]?.content as Array<{ type: string; text?: string }>;
+    expect(parts[0]).toEqual({ type: 'text', text: '[attached: attachments/F6-notes.txt]' });
+  });
+
   it('keeps string content (not array) for messages with no files', async () => {
     await appendEvent('t', {
       source: 'slack',

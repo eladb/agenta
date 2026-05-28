@@ -99,6 +99,13 @@ export async function buildMessages(threadKey: string, systemPrompt: string): Pr
       // re-uploading.
       const attachedSuffix = buildAttachedSuffix(files);
       if (files.length === 0) {
+        // Bare @mention etc. normalizes to text:'' (slack/events.ts strips the
+        // mention then trims). Emitting it as content:'' produces an empty text
+        // content block that Bedrock rejects with HTTP 400 ("text content
+        // blocks must be non-empty"), poisoning the whole thread (#223). Skip
+        // it entirely — and since context rebuilds from JSONL every turn, this
+        // also self-heals threads already poisoned with an empty message.
+        if (text.trim().length === 0) continue;
         messages.push({ role: 'user', content: text });
       } else {
         const parts: ContentPart[] = [];
