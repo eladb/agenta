@@ -258,10 +258,12 @@ async function runTask(
       awsvpcConfiguration: {
         subnets: subnets(),
         securityGroups: securityGroups(),
-        // Private IP only — sandbox sits in-VPC and is reached by the
-        // bot over the VPC private network. No public IP means no
-        // accidental public exposure even if SGs misbehave.
-        assignPublicIp: 'DISABLED',
+        // ENABLED matches the bot's own design: a public subnet + public
+        // IP for egress to ECR / CloudWatch Logs / Slack, with no NAT
+        // Gateway in the path. Security groups keep inbound locked down
+        // (port 9000 reachable only from the bot SG). Override via env if a
+        // deployment instead uses private subnets fronted by a NAT Gateway.
+        assignPublicIp: process.env.AGENTA_ECS_SANDBOX_ASSIGN_PUBLIC_IP ?? 'ENABLED',
       },
     }),
     '--overrides',

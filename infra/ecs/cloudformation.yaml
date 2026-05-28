@@ -91,6 +91,43 @@ Parameters:
     Default: iad
     Description: Fly region for per-thread sandbox machines/volumes (injected as FLY_REGION).
 
+  SandboxProvider:
+    Type: String
+    Default: fly
+    AllowedValues: ['fly', 'ecs']
+    Description: >
+      Picks where per-thread sandboxes live. 'fly' provisions Fly machines,
+      'ecs' provisions Fargate tasks in the ECS cluster below. Injected as
+      SANDBOX_PROVIDER.
+
+  EcsSandboxCluster:
+    Type: String
+    Default: ''
+    Description: >
+      ECS cluster for per-thread sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_CLUSTER.
+
+  EcsSandboxSubnetIds:
+    Type: String
+    Default: ''
+    Description: >
+      Comma-separated subnet IDs for sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_SUBNET_IDS.
+
+  EcsSandboxSecurityGroupIds:
+    Type: String
+    Default: ''
+    Description: >
+      Comma-separated security group IDs for sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS.
+
+  EcsSandboxTaskFamily:
+    Type: String
+    Default: ''
+    Description: >
+      ECS task family for sandbox tasks. Only read when SandboxProvider=ecs.
+      Injected as AGENTA_ECS_SANDBOX_TASK_FAMILY.
+
   DesiredCount:
     Type: Number
     Default: 0
@@ -272,6 +309,7 @@ Resources:
                   - ecs:DescribeTasks
                   - ecs:ListTasks
                   - ecs:DescribeServices
+                  - ecs:TagResource
                 Resource: '*'
               - Effect: Allow
                 Action:
@@ -353,7 +391,15 @@ Resources:
             - Name: AGENTA_SANDBOX_APP
               Value: !Ref AgentaSandboxApp
             - Name: SANDBOX_PROVIDER
-              Value: fly
+              Value: !Ref SandboxProvider
+            - Name: AGENTA_ECS_SANDBOX_CLUSTER
+              Value: !Ref EcsSandboxCluster
+            - Name: AGENTA_ECS_SANDBOX_SUBNET_IDS
+              Value: !Ref EcsSandboxSubnetIds
+            - Name: AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS
+              Value: !Ref EcsSandboxSecurityGroupIds
+            - Name: AGENTA_ECS_SANDBOX_TASK_FAMILY
+              Value: !Ref EcsSandboxTaskFamily
             - Name: FLY_REGION
               Value: !Ref FlyRegion
             - Name: HEALTH_PORT
