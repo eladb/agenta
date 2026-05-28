@@ -322,6 +322,23 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: ecs-tasks.amazonaws.com
+        # ECS Exec (SSM Session Manager data channel) so operators can
+        # `aws ecs execute-command` into the running bot task to read a
+        # thread's on-disk state (#226 — the debug-thread skill's ECS path).
+        # enableExecuteCommand on the service is necessary but not sufficient;
+        # the task role must also allow these or the in-task SSM agent never
+        # connects (TargetNotConnected).
+        - PolicyName: ExecuteCommand
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
 
   # -- Cluster + task + service -----------------------------------------
   Cluster:
