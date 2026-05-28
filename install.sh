@@ -5,6 +5,8 @@
 # Installs the binaries an agenta agent needs that aren't part of a base
 # Ubuntu image: bun (runtime), flyctl (deploy/ssh/canary), the aws CLI
 # (ECS), and docker (local sandbox provider). gh is assumed pre-installed.
+# Also ensures the apt prereqs the canary + canary-monitor toolchain needs
+# (jq, unzip, curl).
 #
 # Binaries only — no auth, no secrets. Authenticate separately:
 #   gh auth login          flyctl auth login          aws creds via .env
@@ -47,6 +49,26 @@ PY
   else
     warn "need unzip or python3 to extract $zip"; return 1
   fi
+}
+
+# Apt packages the toolchain needs but a minimal image may lack:
+#   jq    — canary-monitor.sh builds the Slack alert JSON with it (no fallback)
+#   unzip — bun/aws extraction (extract_zip falls back to python3 without it)
+#   curl  — every installer below fetches over curl
+# Needs root; skipped with a notice if unavailable.
+install_apt_prereqs() {
+  local missing=() p
+  for p in jq unzip curl; do command -v "$p" >/dev/null 2>&1 || missing+=("$p"); done
+  if [ "${#missing[@]}" -eq 0 ]; then log "apt prereqs present (jq, unzip, curl)"; return; fi
+  command -v apt-get >/dev/null 2>&1 || { warn "missing ${missing[*]} and no apt-get — install manually"; return; }
+  local sudo=""
+  if [ "$(id -u)" -eq 0 ]; then sudo=""
+  elif sudo -n true 2>/dev/null; then sudo="sudo"
+  elif command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then sudo="sudo"
+  else warn "missing ${missing[*]} and no usable sudo — install as root: apt-get install -y ${missing[*]}"; return; fi
+  log "installing apt prereqs: ${missing[*]}"
+  $sudo apt-get update -qq
+  $sudo apt-get install -y "${missing[@]}"
 }
 
 install_bun() {
@@ -114,6 +136,7 @@ ensure_path() {
 
 main() {
   log "agenta toolchain install (arch=$(uname -m), uid=$(id -u))"
+  install_apt_prereqs || warn "apt prereqs step failed; jq/unzip/curl may be missing"
   install_bun
   install_flyctl
   install_aws
