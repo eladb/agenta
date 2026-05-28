@@ -204,11 +204,20 @@ export function translateToBedrock(messages: Message[]): {
               }
               return { type: 'image', source: { type: 'base64', media_type: mediaType, data } };
             });
+      // Drop empty text blocks — Bedrock rejects { type:'text', text:'' } with
+      // HTTP 400 (#223). Layer 1 (context.ts) already skips empty no-file
+      // user messages, but guard here too so no source can sneak an empty
+      // block through.
+      const nonEmpty = blocks.filter((b) => !(b.type === 'text' && b.text === ''));
+      // A user turn with nothing left after filtering must not be pushed (and
+      // must not be merged into a prior user turn) — an empty content array is
+      // also invalid.
+      if (nonEmpty.length === 0) continue;
       // Merge consecutive same-role messages — Anthropic requires
       // strictly alternating user/assistant turns.
       const last = out[out.length - 1];
-      if (last && last.role === 'user') last.content.push(...blocks);
-      else out.push({ role: 'user', content: blocks });
+      if (last && last.role === 'user') last.content.push(...nonEmpty);
+      else out.push({ role: 'user', content: nonEmpty });
       continue;
     }
     if (m.role === 'assistant') {
@@ -228,11 +237,13 @@ export function translateToBedrock(messages: Message[]): {
         }
         blocks.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
       }
-      // Anthropic forbids empty assistant content; emit a single empty
-      // text block as a no-op when the source assistant was content:null
-      // with no tool_calls (shouldn't happen in practice — guarded
-      // elsewhere — but be defensive).
-      if (blocks.length === 0) blocks.push({ type: 'text', text: '' });
+      // Anthropic forbids empty assistant content AND rejects an empty text
+      // block ({ type:'text', text:'' } → HTTP 400, #223). A zero-block
+      // assistant turn (content:null/'' with no tool_calls) shouldn't occur
+      // mid-history given Layer 1 + the orphan-tool_call guards; if it does,
+      // skip it rather than emit an empty text block. The trailing-assistant
+      // strip below handles the interrupted-turn recovery case.
+      if (blocks.length === 0) continue;
       out.push({ role: 'assistant', content: blocks });
       continue;
     }

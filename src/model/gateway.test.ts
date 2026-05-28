@@ -347,6 +347,78 @@ describe('translateToBedrock', () => {
     ]);
   });
 
+  it('drops a user message with empty string content — no empty text block (#223)', () => {
+    const { messages } = translateToBedrock([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: '' },
+    ]);
+    // The only user content was empty, so no user turn at all (and crucially
+    // no { type:'text', text:'' } block that Bedrock would 400 on).
+    expect(messages).toEqual([]);
+  });
+
+  it('drops only the empty text part from a mixed user content array (#223)', () => {
+    const { messages } = translateToBedrock([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'keep me' },
+          { type: 'text', text: '' },
+        ],
+      },
+    ]);
+    expect(messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'keep me' }] },
+    ]);
+  });
+
+  it('does not merge an empty user message into a prior user turn (#223)', () => {
+    const { messages } = translateToBedrock([
+      { role: 'user', content: 'first' },
+      { role: 'user', content: '' },
+    ]);
+    // The empty second user message is skipped, not merged as an empty block.
+    expect(messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'first' }] }]);
+  });
+
+  it('does not emit an empty text block for an assistant with empty-string content and no tool_calls (#223)', () => {
+    const { messages } = translateToBedrock([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '' },
+      { role: 'user', content: 'still here?' },
+    ]);
+    // The empty assistant turn is skipped entirely — never rendered as
+    // { type:'text', text:'' } (which Bedrock rejects). With the assistant
+    // gone the two user turns become consecutive and merge into one (existing
+    // alternating-turns behavior). No empty text block anywhere.
+    expect(messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'hi' },
+          { type: 'text', text: 'still here?' },
+        ],
+      },
+    ]);
+  });
+
+  it('does not emit an empty text block for a content:null assistant with no tool_calls (#223)', () => {
+    const { messages } = translateToBedrock([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: null },
+      { role: 'user', content: 'continue' },
+    ]);
+    expect(messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'hi' },
+          { type: 'text', text: 'continue' },
+        ],
+      },
+    ]);
+  });
+
   it('handles multiple tool results after interleaved user text', () => {
     const { messages } = translateToBedrock([
       { role: 'user', content: 'go' },
