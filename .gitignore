@@ -6,6 +6,13 @@ node_modules
 data/
 .DS_Store
 .slack-apps.json
+
+# Tool installs + runtime artifacts from install.sh / the canary watchdog
+# (this repo's root == the agent's $HOME, so these land in-tree).
+.bun/
+.fly/
+.local/
+.canary-monitor.lock
 .claude/*
 !.claude/skills/
 .nightly-cycle-summary.md
