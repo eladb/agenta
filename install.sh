@@ -6,7 +6,12 @@
 # Ubuntu image: bun (runtime), flyctl (deploy/ssh/canary), the aws CLI
 # (ECS), and docker (local sandbox provider). gh is assumed pre-installed.
 # Also ensures the apt prereqs the canary + canary-monitor toolchain needs
-# (jq, unzip, curl).
+# (jq, unzip, curl), and installs the 30-min double-canary watchdog
+# (scripts/canary-monitor.sh → ~/.local/bin + a cron entry).
+#
+# NOTE: the watchdog canaries and (via the oncall agent) remediates PROD, so
+# it must run on ONE host. install.sh installs it unconditionally — don't run
+# install.sh on a box you don't want canarying prod.
 #
 # Binaries only — no auth, no secrets. Authenticate separately:
 #   gh auth login          flyctl auth login          aws creds via .env
@@ -22,6 +27,10 @@ warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 # A tool counts as present if it's on PATH or already at its install path
 # (so re-runs are idempotent before the PATH block takes effect in a shell).
 have() { command -v "$1" >/dev/null 2>&1 || { [ -n "${2:-}" ] && [ -x "$2" ]; }; }
+
+# Repo root = the dir this script lives in (canary-monitor.sh needs it to find
+# scripts/canary.ts + .env at runtime).
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 case "$(uname -m)" in
   x86_64)  BUN_ARCH="x64";      AWS_ARCH="x86_64" ;;
@@ -134,6 +143,21 @@ ensure_path() {
   done
 }
 
+# Deploy the 30-min canary watchdog: copy canary-monitor.sh to ~/.local/bin
+# (stable path, so cron survives repo branch switches) + install the cron.
+# Idempotent: replaces any prior watchdog cron line. Always runs.
+setup_monitor() {
+  local src="$REPO_DIR/scripts/canary-monitor.sh" dst="$HOME/.local/bin/canary-monitor.sh"
+  [ -f "$src" ] || { warn "monitor: $src not found — skipping"; return; }
+  command -v crontab >/dev/null 2>&1 || { warn "monitor: no crontab — skipping cron install"; return; }
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$src" "$dst"
+  local line="*/30 * * * * AGENTA_REPO=\"$REPO_DIR\" \"$dst\" >/dev/null 2>&1"
+  local cur; cur="$(crontab -l 2>/dev/null | grep -v 'canary-monitor\.sh' | grep -v '# agenta double-canary watchdog' || true)"
+  printf '%s\n# agenta double-canary watchdog (every 30 min) — see the canary skill\n%s\n' "$cur" "$line" | crontab -
+  log "monitor installed → $dst (cron */30, repo=$REPO_DIR)"
+}
+
 main() {
   log "agenta toolchain install (arch=$(uname -m), uid=$(id -u))"
   install_apt_prereqs || warn "apt prereqs step failed; jq/unzip/curl may be missing"
@@ -142,6 +166,7 @@ main() {
   install_aws
   install_docker || warn "docker step failed; install manually as root"
   ensure_path
+  setup_monitor || warn "monitor setup failed; canary-monitor cron not installed"
   log "done. Open a new shell or: export PATH=\"\$HOME/.bun/bin:\$HOME/.fly/bin:\$HOME/.local/bin:\$PATH\""
   log "then authenticate: gh auth login · flyctl auth login · aws creds via .env"
 }
