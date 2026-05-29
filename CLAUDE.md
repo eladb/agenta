@@ -29,6 +29,8 @@ Phase history, gotchas, and backlog live as GitHub issues — query directly, th
 ## Production runtime
 
 - **Bot on Fly** as `agenta-bot` (one shared-cpu-1x in `iad`, 1 GB volume `agenta_data` at `/data`). Deploy by pushing to `main` → `.github/workflows/cd.yml` runs e2e (against the `agenta-ci` app so prod Socket Mode is untouched) → deploy → canary, fail-stopping at each step. No inbound surface (Slack = outbound WS, model + Fly API = outbound HTTPS).
+- **Also runs as `salto` on ECS** — the same image is deployed by the same CD run to AWS ECS (acct `271443695230`, `us-east-1`, cluster+service `agenta-bot`, `SANDBOX_PROVIDER=ecs`, Fargate sandboxes in cluster `agenta-sandbox`) as a *different* Slack app (`A0B5VLX7QUT`, bot `salto`/`U0B65LMHRLL`). Different app ⇒ separate event streams ⇒ **no split-brain** with the Fly `agenta` bot. ECS on-disk state + exec → the `debug-thread` skill.
+- **Canary watchdog** (host-local, not CD). `install.sh` installs a `*/30` cron on the claude-agents host running `~/.local/bin/canary-monitor.sh` → the double canary (agenta/Fly + salto/ECS); on a confirmed red it Slack-alerts `C0B307LP274` and `agents send`s the agenta agent (oncall) to investigate + bounded-remediate (restart only — redeploy/scale/destroy/secret changes escalate). Reusable recipe = the `/canary` skill.
 - **Per-channel home config** (`config/homes.json`, #87). Transport inferred from `remote` URL scheme: `file://` = tunneled no-mirror; `https://` = tunneled + mirror clone at `<AGENT_HOMES_ROOT>/<slug>` (PAT in `auth_env`); `ssh://`/`git@` = direct (#88 — sandbox clones/pushes straight to GitHub via deploy-key PEM in `auth_env`; bot keeps a read-only mirror for prompt-source). `entrypoint.sh` clones https mirrors on boot. Snapshot frozen into session.json on first mention (config edits affect new threads only). Default → `https://github.com/eladb/agenta-test-home`. First direct channel `C0B4MU6GCFQ` → `git@github.com:eladb/agenta-test-home-alone.git`, key in Fly secret `AGENTA_TEST_HOME_ALONE_DEPLOY_KEY`.
 - **Health check** `/health` on `HEALTH_PORT` (8080, `fly.toml` polls every 30s): 200 when Socket Mode connected, else 503. Process+socket only — silent-deaf (#27) undetected.
 - **Prod bot user** `U0B2WQUHK6Z` (app `A0B2WL8UYAZ`). Reinstall after a scope change: https://api.slack.com/apps/A0B2WL8UYAZ/install-on-team.
@@ -97,7 +99,8 @@ scripts/
   update-manifest.ts   push slack-manifests/<agent|tester>.json
   deploy-bot-fly.ts / deploy-sandbox-fly.sh  Fly provisioning + image push
   run-e2e.ts           fresh channel per run, one bun process per test file, archives on exit
-  canary.ts            3-step prod smoke (chat → bash → /delete)
+  canary.ts            3-step prod smoke (chat → bash → /delete); AGENTA_DEPLOY_TARGET=fly|ecs picks the health gate
+  canary-monitor.sh    */30 double-canary watchdog (deployed by install.sh → ~/.local/bin; wakes the oncall agent on red)
 tests/e2e/   helpers.ts (startAgent/startTester/mention/upload/waitForReply/shutdown) · fixtures.ts · *.test.ts
 tests/golden/  <file>/<name>.jsonl recorded (request,response) replayed positionally
 ```
@@ -135,6 +138,7 @@ tests/golden/  <file>/<name>.jsonl recorded (request,response) replayed position
 - **Tester** A0B33L7CVRA (`agenta-tester`) — drives e2e + canary.
 - **CI** A0B49GHNG22 (`agenta-ci`, #66) — e2e step in CD, keeps prod Socket Mode untouched.
 - **Dev** A0B5ZQ802F2 (bot `U0B596TUNTW`, `agenta-dev`) — local iteration on the `claude-agents` host where `.env` IS the dev bot. Prod `xapp-` deliberately absent here (two Socket Mode clients on one app token split-brain delivery). The `'agent'` lockfile = only one of `bun start`/`bun run e2e` at a time.
+- **Salto** A0B5VLX7QUT (bot `U0B65LMHRLL`, `salto`) — same codebase deployed on **ECS** (not Fly), Bedrock model, its own home config. Distinct app ⇒ no Socket Mode split-brain with `agenta`.
 - Test channel `C0B307LP274`. Canary uses `CANARY_CHANNEL_ID`; e2e creates a fresh channel per run.
 - After a scope change, `permissions_updated: true` ⇒ reinstall required (bot token usually survives).
 
@@ -163,6 +167,7 @@ bun start        # agent process; reads .env; acquires the 'agent' lock
 bun run lint / format
 bun run setup    # apps.manifest.create (--app-name agenta-dev for the dev variant)
 bun run deploy   # deploy-bot-fly.ts: agenta-bot + agenta_data in iad
+./install.sh     # provision a box: bun/flyctl/aws/docker + jq/unzip/curl + the */30 canary watchdog cron. Idempotent; installs the prod watchdog → run on ONE host only.
 # scripts/update-manifest.ts <agent|tester> · scripts/deploy-sandbox-fly.ts
 ```
 
