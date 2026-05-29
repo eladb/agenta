@@ -12,3 +12,5 @@
 - [slack-per-app-scoping](slack-per-app-scoping.md) — Slack manifest features are per-app; agenta's multi-app split (agenta/salto/dev/ci) gives natural per-channel scoping for free.
 - [canary-monitoring-setup](canary-monitoring-setup.md) — host-local 30-min cron watchdog runs the double canary; on red it Slack-alerts + wakes this agent as oncall. Not in the repo.
 - [keep-install-sh-current](keep-install-sh-current.md) — when a change adds a tool/package dep, update install.sh in the same change (Elad: install.sh is the box-provisioning source of truth).
+- [nanabot-cloudflare-access](nanabot-cloudflare-access.md) — nanabot.me (publish-web) is fully behind Cloudflare Access; published pages aren't open-internet (contradicts the skill doc).
+- [publish-web-serving-model](publish-web-serving-model.md) — publish-web reality: each agent runs its own web server on /run/nanabox/agents/<agent>.sock; Caddy proxies to it. agenta-web.service set up. Skill doc stale.
