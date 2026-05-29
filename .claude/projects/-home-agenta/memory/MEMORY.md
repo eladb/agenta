@@ -10,3 +10,5 @@
 - [prompt-unfrozen](prompt-unfrozen.md) — system prompt rebuilds every mention (not frozen). Home/model/display still freeze. Prompt caching would break this.
 - [bedrock-translation-gotcha](bedrock-translation-gotcha.md) — Bedrock has two shape rules: tool_result before user text, no trailing assistant (no prefill). Both enforced in `translateToBedrock`.
 - [slack-per-app-scoping](slack-per-app-scoping.md) — Slack manifest features are per-app; agenta's multi-app split (agenta/salto/dev/ci) gives natural per-channel scoping for free.
+- [canary-monitoring-setup](canary-monitoring-setup.md) — host-local 30-min cron watchdog runs the double canary; on red it Slack-alerts + wakes this agent as oncall. Not in the repo.
+- [keep-install-sh-current](keep-install-sh-current.md) — when a change adds a tool/package dep, update install.sh in the same change (Elad: install.sh is the box-provisioning source of truth).
