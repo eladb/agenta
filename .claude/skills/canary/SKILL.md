@@ -37,8 +37,9 @@ Skip if a health check, `git`, or CI status already answers the question — try
 
 ```sh
 export PATH="$HOME/.bun/bin:$HOME/.fly/bin:$HOME/.local/bin:$PATH"
-# Empty FLY vars → waitForFlyHealth no-ops (the gate is skipped, see gotcha).
-FLY_API_TOKEN= FLY_APP_NAME= AGENTA_DEPLOY_TARGET=fly \
+# FLY_API_TOKEN comes from .env (org-scoped); FLY_APP_NAME→agenta-bot so the
+# Fly health gate polls the bot's machines (api.machines.dev) before firing.
+FLY_APP_NAME=agenta-bot AGENTA_DEPLOY_TARGET=fly \
   CANARY_TARGET_USER_ID=U0B2WQUHK6Z \
   bun scripts/canary.ts
 ```
@@ -69,7 +70,7 @@ Report per target: ✅/❌ each, plus the failing step + stderr message if red.
 
 ## Gotchas
 
-- **The Fly health gate is skipped.** Every Fly token currently in `.env` returns HTTP 403 against `api.machines.dev` (they carry flyctl/GraphQL read but not Machines-API scope), so `waitForFlyHealth` can't run. We empty `FLY_API_TOKEN`/`FLY_APP_NAME` so it no-ops and rely on the functional round-trip. Confirm Fly health out-of-band first with `flyctl status -a agenta-bot` (the broader `.env` Fly token works for `flyctl status` even though the Machines API rejects it). To restore the gate, add a Machines-API-capable Fly token and drop the two empty-var overrides.
+- **The Fly health gate needs an org-scoped token.** `.env`'s `FLY_API_TOKEN` is org-scoped (2026-05-29) so `waitForFlyHealth` can read `agenta-bot`'s machines on `api.machines.dev`. If it ever 403s again, the token has been narrowed back to an app-scoped (`agenta-sandbox`) deploy token — mint a new org token (`fly tokens create org`) and put it in `.env`. The watchdog still overrides `FLY_APP_NAME=agenta-bot` per-run (the `.env` default is `agenta-sandbox` for the sandbox provider).
 - **Both bots must be members of `C0B307LP274`.** The tester lacks `channels:read`, so you can't list membership directly; recent posts from a bot's user id in `conversations.history` are good evidence it's a member. If a target isn't in the channel, step 1 just times out (~60s) with no reply.
 - **Step 3's host-side cleanup check is vacuous when run remotely.** `canary.ts` verifies the thread's data dir is gone on the *canary host*, but a Fly/ECS bot writes that dir on its own volume — so the dir never exists locally and the check passes trivially. A green step 3 proves the bot replied `deleted`, not that its volume was cleaned.
 - **It posts real messages and exercises the live bots.** Fine for `C0B307LP274` (the dedicated test channel) — never point `TEST_CHANNEL_ID` at a human-facing channel.

@@ -37,7 +37,9 @@ TESTER_BOT="$(grep '^TEST_BOT_TOKEN=' .env | cut -d= -f2-)"
 run_canary() {
   local target="$1" out="$2"
   if [ "$target" = fly ]; then
-    FLY_API_TOKEN= FLY_APP_NAME= AGENTA_DEPLOY_TARGET=fly \
+    # FLY_API_TOKEN comes from .env (org-scoped); FLY_APP_NAME→agenta-bot so the
+    # Fly health gate checks the bot machine, not the sandbox app.
+    FLY_APP_NAME=agenta-bot AGENTA_DEPLOY_TARGET=fly \
       CANARY_TARGET_USER_ID=U0B2WQUHK6Z \
       bun scripts/canary.ts >"$out" 2>&1
   else
