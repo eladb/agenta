@@ -13,6 +13,9 @@ data/
 .fly/
 .local/
 .canary-monitor.lock
+# Public status page runtime artifact — rewritten every 30 min by the canary
+# watchdog. Caddy serves it from the working tree; we don't churn the git tree.
+apps/status/public/status.json
 .claude/*
 !.claude/skills/
 .nightly-cycle-summary.md
