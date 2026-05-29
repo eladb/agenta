@@ -32,3 +32,6 @@
 
 # Operator-only box-provisioning script; never runs in the prod image.
 ^install\.sh$
+
+# Operator-only host watchdog (deployed by install.sh); not in the prod image.
+^scripts/canary-monitor\.sh$
