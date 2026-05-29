@@ -6,8 +6,12 @@
 # Ubuntu image: bun (runtime), flyctl (deploy/ssh/canary), the aws CLI
 # (ECS), and docker (local sandbox provider). gh is assumed pre-installed.
 # Also ensures the apt prereqs the canary + canary-monitor toolchain needs
-# (jq, unzip, curl), and installs the 30-min double-canary watchdog
-# (scripts/canary-monitor.sh → ~/.local/bin + a cron entry).
+# (jq, unzip, curl), installs the 30-min double-canary watchdog
+# (scripts/canary-monitor.sh → ~/.local/bin + a cron entry), and persists
+# the per-agent web app server (systemd/agenta-web.service → ~/.config
+# /systemd/user + systemctl --user enable --now). The web app server
+# lives in webserver/serve.py and binds /run/nanabox/agents/agenta.sock,
+# which Caddy reverse-proxies /<agent>/* to (see the publish-web skill).
 #
 # NOTE: the watchdog canaries and (via the oncall agent) remediates PROD, so
 # it must run on ONE host. install.sh installs it unconditionally — don't run
@@ -158,6 +162,28 @@ setup_monitor() {
   log "monitor installed → $dst (cron */30, repo=$REPO_DIR)"
 }
 
+# Persist the per-agent web app server: install the systemd --user unit that
+# runs webserver/serve.py against /run/nanabox/agents/<agent>.sock (Caddy
+# reverse-proxies /<agent>/* to it, serving apps/). Per the box CLAUDE.md's
+# "Box-specific setup" + the publish-web skill's "Persist it" section — a
+# live service that only lives in ~/.config/systemd/user is lost on the next
+# reprovision. Idempotent: the final `restart` picks up unit or code changes.
+setup_web_app() {
+  local src="$REPO_DIR/systemd/agenta-web.service"
+  local dst="$HOME/.config/systemd/user/agenta-web.service"
+  [ -f "$src" ] || { warn "web app: $src not found — skipping"; return; }
+  command -v systemctl >/dev/null 2>&1 || { warn "web app: no systemctl — skipping"; return; }
+  install -D -m 0644 "$src" "$dst"
+  # Non-interactive/non-login shells (cron, post-clone hook) don't have these
+  # set; systemctl --user needs them to reach the user manager.
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+  systemctl --user daemon-reload
+  systemctl --user enable --now agenta-web.service
+  systemctl --user restart agenta-web.service
+  log "web app installed → $dst (agenta-web.service)"
+}
+
 main() {
   log "agenta toolchain install (arch=$(uname -m), uid=$(id -u))"
   install_apt_prereqs || warn "apt prereqs step failed; jq/unzip/curl may be missing"
@@ -167,6 +193,7 @@ main() {
   install_docker || warn "docker step failed; install manually as root"
   ensure_path
   setup_monitor || warn "monitor setup failed; canary-monitor cron not installed"
+  setup_web_app || warn "web app setup failed; agenta-web.service not installed"
   log "done. Open a new shell or: export PATH=\"\$HOME/.bun/bin:\$HOME/.fly/bin:\$HOME/.local/bin:\$PATH\""
   log "then authenticate: gh auth login · flyctl auth login · aws creds via .env"
 }

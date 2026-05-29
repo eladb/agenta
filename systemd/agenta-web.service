@@ -1,0 +1,12 @@
+[Unit]
+Description=agenta app server (apps/ over /run/nanabox/agents/%u.sock)
+
+[Service]
+ExecStartPre=/bin/rm -f /run/nanabox/agents/%u.sock
+ExecStart=/usr/bin/python3 /home/%u/webserver/serve.py --unix /run/nanabox/agents/%u.sock
+Restart=always
+StandardOutput=append:/home/%u/.web.log
+StandardError=append:/home/%u/.web.log
+
+[Install]
+WantedBy=default.target
