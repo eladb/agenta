@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>agenta — system status</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --ok: #3fb950;
+      --down: #f85149;
+      --stale: #d29922;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px;
+    }
+    header { text-align: center; margin-bottom: 28px; }
+    h1 { margin: 0 0 6px; font-size: 24px; font-weight: 600; }
+    .sub { color: var(--muted); font-size: 13px; }
+    .cards {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      justify-content: center;
+      width: 100%;
+      max-width: 760px;
+    }
+    .card {
+      flex: 1 1 240px;
+      min-width: 240px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px 22px;
+    }
+    .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--muted); }
+    .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+    .dot.down { background: var(--down); box-shadow: 0 0 8px var(--down); }
+    .name { font-size: 18px; font-weight: 600; }
+    .cloud {
+      margin-left: auto;
+      font-size: 11px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 9px;
+    }
+    .status-line { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
+    .status-line.ok { color: var(--ok); }
+    .status-line.down { color: var(--down); }
+    .status-line.unknown { color: var(--muted); }
+    .meta { color: var(--muted); font-size: 13px; }
+    .meta div { margin-top: 3px; }
+    .stale {
+      margin-top: 12px;
+      color: var(--stale);
+      font-size: 12.5px;
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+    }
+    .notice {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px 24px;
+      max-width: 520px;
+      text-align: center;
+      color: var(--muted);
+    }
+    footer { margin-top: 30px; color: var(--muted); font-size: 12px; text-align: center; }
+    footer .err { color: var(--stale); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>agenta — system status</h1>
+    <div class="sub">double-canary watchdog · agenta (Fly) + salto (ECS)</div>
+  </header>
+
+  <main id="root" class="cards">
+    <div class="notice">Loading…</div>
+  </main>
+
+  <footer>
+    <div id="footer">&nbsp;</div>
+  </footer>
+
+  <script>
+    "use strict";
+
+    const REFRESH_MS = 30000;
+    const root = document.getElementById("root");
+    const footer = document.getElementById("footer");
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    // Relative phrase for a past instant, e.g. "4 min ago", "just now".
+    function relativePast(then, now) {
+      const s = Math.max(0, Math.round((now - then) / 1000));
+      if (s < 45) return "just now";
+      const m = Math.round(s / 60);
+      if (m < 60) return m + " min ago";
+      const h = Math.round(m / 60);
+      if (h < 24) return h + (h === 1 ? " hour ago" : " hours ago");
+      const d = Math.round(h / 24);
+      return d + (d === 1 ? " day ago" : " days ago");
+    }
+
+    // Relative phrase for a future instant, e.g. "in ~12 min", "any moment".
+    function relativeFuture(then, now) {
+      const s = Math.round((then - now) / 1000);
+      if (s <= 30) return "any moment";
+      const m = Math.round(s / 60);
+      if (m < 60) return "in ~" + m + " min";
+      const h = Math.round(m / 60);
+      return "in ~" + h + (h === 1 ? " hour" : " hours");
+    }
+
+    function parseTs(s) {
+      const t = s ? Date.parse(s) : NaN;
+      return Number.isNaN(t) ? null : t;
+    }
+
+    function statusLabel(status) {
+      if (status === "ok") return "Operational";
+      if (status === "down") return "Down";
+      return "Unknown";
+    }
+
+    function renderNotice(html) {
+      root.innerHTML = '<div class="notice">' + html + "</div>";
+    }
+
+    function renderCards(data, now) {
+      const interval = Number(data.interval_minutes) || 30;
+      const generatedAt = parseTs(data.generated_at);
+      const nextCheck = generatedAt != null ? generatedAt + interval * 60000 : null;
+      const staleMs = interval * 2 * 60000;
+      const targets = Array.isArray(data.targets) ? data.targets : [];
+
+      if (targets.length === 0) {
+        renderNotice("Awaiting first watchdog run — no targets reported yet.");
+        return;
+      }
+
+      root.innerHTML = targets.map((t) => {
+        const status = t.status === "ok" || t.status === "down" ? t.status : "unknown";
+        const dotClass = status === "ok" ? "ok" : status === "down" ? "down" : "";
+        const checkedAt = parseTs(t.checked_at);
+        const checkedRel = checkedAt != null ? relativePast(checkedAt, now) : "never";
+        const nextRel = nextCheck != null ? relativeFuture(nextCheck, now) : "unknown";
+        const isStale = checkedAt != null && now - checkedAt > staleMs;
+
+        return (
+          '<div class="card">' +
+            '<div class="card-head">' +
+              '<span class="dot ' + dotClass + '"></span>' +
+              '<span class="name">' + escapeHtml(t.name || "?") + "</span>" +
+              '<span class="cloud">' + escapeHtml(t.cloud || "") + "</span>" +
+            "</div>" +
+            '<div class="status-line ' + status + '">' + escapeHtml(statusLabel(status)) + "</div>" +
+            '<div class="meta">' +
+              "<div>last checked: " + escapeHtml(checkedRel) + "</div>" +
+              "<div>next check: " + escapeHtml(nextRel) + "</div>" +
+            "</div>" +
+            (isStale
+              ? '<div class="stale">⚠ stale — the watchdog may not have run (last check &gt; ' +
+                (interval * 2) + " min ago)</div>"
+              : "") +
+          "</div>"
+        );
+      }).join("");
+    }
+
+    async function refresh() {
+      const now = Date.now();
+      try {
+        const res = await fetch("status.json", { cache: "no-store" });
+        if (res.status === 404) {
+          renderNotice("Awaiting first watchdog run — <code>status.json</code> not published yet.");
+          footer.textContent = "checked " + new Date(now).toLocaleTimeString();
+          return;
+        }
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        renderCards(data, now);
+        footer.textContent = "auto-refreshes every " + Math.round(REFRESH_MS / 1000) +
+          "s · updated " + new Date(now).toLocaleTimeString();
+      } catch (err) {
+        // Keep whatever is on screen; just note the fetch problem in the footer.
+        footer.innerHTML = '<span class="err">could not load status (' +
+          escapeHtml(err.message || err) + ") — retrying…</span>";
+      }
+    }
+
+    refresh();
+    setInterval(refresh, REFRESH_MS);
+  </script>
+</body>
+</html>

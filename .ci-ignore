@@ -35,3 +35,7 @@
 
 # Operator-only host watchdog (deployed by install.sh); not in the prod image.
 ^scripts/canary-monitor\.sh$
+
+# Host-served web content (status page under ~/apps/, served by Caddy); never
+# in the prod bot image, so changes here skip e2e+deploy+canary.
+^apps/
