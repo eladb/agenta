@@ -195,7 +195,11 @@
     async function refresh() {
       const now = Date.now();
       try {
-        const res = await fetch("status.json", { cache: "no-store" });
+        // Resolve status.json against a trailing-slash base so it works whether
+        // the page was reached as /<agent>/status or /<agent>/status/ — a bare
+        // relative "status.json" resolves to a sibling of the no-slash URL.
+        const base = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
+        const res = await fetch(base + "status.json", { cache: "no-store" });
         if (res.status === 404) {
           renderNotice("Awaiting first watchdog run — <code>status.json</code> not published yet.");
           footer.textContent = "checked " + new Date(now).toLocaleTimeString();
