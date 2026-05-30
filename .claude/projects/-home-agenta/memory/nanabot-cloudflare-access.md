@@ -7,10 +7,8 @@ metadata:
   originSessionId: a68e68cc-0504-48af-b39e-c837f17ed40b
 ---
 
-**Canonical published-page host is `bensadeh.nanabot.me/<agent>/...`** (per Elad), e.g. `https://bensadeh.nanabot.me/agenta/status/`. The `publish-web` skill doc shows the bare `nanabot.me/<agent>/` apex; that apex also resolves to the same Cloudflare origin and routes the same paths, but use the `bensadeh.` family subdomain when giving Elad a link.
+Canonical published-page host on this box is `https://bensadeh.nanabot.me/<agent>/...` — the `bensadeh.` family subdomain. The `nanabot.me` apex resolves to the same Cloudflare origin and routes identically, but use the subdomain when giving Elad a link.
 
-Both hosts are gated by **Cloudflare Access** (org `bensadehfamily.cloudflareaccess.com`). Every path — including `/<agent>/*` app paths like `/agenta/status/` — 302-redirects to the CF Access login *at the Cloudflare edge*, before reaching the Caddy origin, on both `nanabot.me` and `bensadeh.nanabot.me`. Domain-wide.
+**Cloudflare Access** (org `bensadehfamily.cloudflareaccess.com`) gates every path on both hostnames — `/<agent>/*` 302s to the Access login at the CF edge, before reaching the Caddy origin. So `publish-web` pages are **not** open-internet; they're viewable only after authenticating through the `bensadehfamily` org.
 
-This **contradicts the `publish-web` skill doc** (`/usr/lib/nanabox/skills/publish-web/SKILL.md`), which claims Cloudflare Access covers only `/console` and that `/<agent>/*` apps are "reachable from the open internet."
-
-**How to apply:** Anything published via `publish-web` is viewable only after authenticating through the `bensadehfamily` Cloudflare Access org — treat it as private-to-the-household, not public. Don't promise a "public URL" for published pages without first arranging a CF Access *bypass* policy for that path (a host-infra change, not editable from this agent). Discovered 2026-05-29 building the agenta/salto status page (eladb/agenta #245 → #246). Related: [[host-shared-config-rules]].
+**How to apply:** when posting a published-page link to Elad, use the `bensadeh.` host; don't promise a "public URL" without an explicit CF Access *bypass* policy for that path (operator-only host change). Discovered 2026-05-29 building the agenta/salto status page (eladb/agenta #245). Related: [[host-shared-config-rules]].
