@@ -12,7 +12,7 @@ import {
   STUB_REPLY_PREFIX,
   setupTempDataDir,
   shutdown,
-  startAgent,
+  startBotAndTenant,
   startTester,
   stubCallModel,
   type Tester,
@@ -43,7 +43,7 @@ afterAll(async () => {
 // crashed turn is cleared to 'idle' without auto-retry and without posting
 // any Slack notice. The user's next mention re-triggers work fresh.
 test('boot recovery silently clears interrupted sessions to idle', async () => {
-  agent = await startAgent(stubCallModel);
+  agent = await startBotAndTenant(stubCallModel);
 
   // Run one real mention so a session.json exists with all the fields a
   // prior turn would populate (sandbox/git/home/model/display — see

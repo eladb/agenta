@@ -8,7 +8,7 @@ import {
   STUB_REPLY_PREFIX,
   safeShutdown,
   setupTempDataDir,
-  startAgent,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitForReply,
@@ -22,7 +22,7 @@ const createdThreads: string[] = [];
 beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startAgent(), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(), startTester()]);
 }, 120_000);
 
 afterAll(async () => {

@@ -13,7 +13,7 @@ import {
   requireEnv,
   safeShutdown,
   setupTempDataDir,
-  startAgent,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitFor,
@@ -44,7 +44,7 @@ beforeAll(async () => {
   channel = requireEnv('TEST_CHANNEL_ID');
   // Pre-build the sandbox image so the first turn doesn't time out building it.
   await ensureImage();
-  [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
 }, 120_000);
 
 afterAll(async () => {

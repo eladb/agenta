@@ -27,20 +27,6 @@ export type SocketHandle = {
   socket: SocketModeClient;
 };
 
-// Slack's @slack/socket-mode passes a single arg object to event listeners
-// with `body` (full envelope), `event` (inner event for `event_callback`),
-// and an `ack` callback that resolves Slack's WS-level ack frame. We treat
-// `body` as untyped JSON and let the caller pluck fields it cares about.
-type SocketModeArgs = {
-  body?: {
-    envelope_id?: string;
-    type?: string;
-    payload?: unknown;
-    [k: string]: unknown;
-  };
-  ack: () => Promise<void>;
-};
-
 export async function openSocketMode(
   appToken: string,
   onEvent: (env: SocketEnvelope) => void,
@@ -51,36 +37,56 @@ export async function openSocketMode(
   socket.on('disconnected', () => log.warn('bot/socket', 'disconnected'));
   socket.on('error', (err) => log.error('bot/socket', 'error', err));
 
-  // We register a handler for each Slack envelope type we care about. Each
-  // handler acks the envelope FIRST, then dispatches. If dispatching throws
-  // synchronously we still swallow it (fire-and-forget); the next event
-  // must still route.
-  const handle = (type: 'event_callback' | 'interactive') => async (args: SocketModeArgs) => {
+  // Listen on the catch-all `slack_event` channel. `@slack/socket-mode`'s
+  // per-type emitters fire on the INNER event type for events_api
+  // messages (e.g. `'message'`, `'app_mention'`) — not on the wrapper
+  // type `'event_callback'` — so the previous per-type listeners never
+  // fired and every Slack mention was silently dropped. `slack_event`
+  // fires once per envelope with `{ type, body, envelope_id, ack }`,
+  // where `type` is the SOCKET-mode envelope type (`'events_api'` for
+  // Events API events, `'interactive'` for block_actions / shortcuts).
+  // We re-map to the spec's `'event_callback' | 'interactive'` for
+  // downstream routing.
+  //
+  // Ack FIRST, then dispatch. Slack's 3s ack budget must not depend on
+  // tenant latency; if dispatching throws we swallow + log (the next
+  // envelope must still route).
+  type SlackEventArgs = {
+    type: string;
+    envelope_id?: string;
+    body?: Record<string, unknown>;
+    ack: () => Promise<void>;
+  };
+  socket.on('slack_event', async (args: SlackEventArgs) => {
     try {
       await args.ack();
     } catch (err) {
-      log.error('bot/socket', `ack failed for ${type}`, err);
+      log.error('bot/socket', `ack failed for ${args.type}`, err);
       return;
     }
+    // Map socket-mode envelope `type` → spec envelope `type`. Drop
+    // anything else (slash_commands, etc.) — the bot doesn't route
+    // those yet.
+    let envType: 'event_callback' | 'interactive';
+    if (args.type === 'events_api') envType = 'event_callback';
+    else if (args.type === 'interactive') envType = 'interactive';
+    else return;
     const body = args.body;
     if (!body || typeof body !== 'object') {
-      log.warn('bot/socket', `${type} envelope missing body`);
+      log.warn('bot/socket', `${envType} envelope missing body`);
       return;
     }
-    const envelopeId = body.envelope_id;
+    const envelopeId = args.envelope_id ?? (body.envelope_id as string | undefined);
     if (typeof envelopeId !== 'string' || envelopeId.length === 0) {
-      log.warn('bot/socket', `${type} envelope missing envelope_id`);
+      log.warn('bot/socket', `${envType} envelope missing envelope_id`);
       return;
     }
     try {
-      onEvent({ envelope_id: envelopeId, type, payload: body as Record<string, unknown> });
+      onEvent({ envelope_id: envelopeId, type: envType, payload: body });
     } catch (err) {
-      log.error('bot/socket', `onEvent threw for ${type}`, err);
+      log.error('bot/socket', `onEvent threw for ${envType}`, err);
     }
-  };
-
-  socket.on('event_callback', handle('event_callback'));
-  socket.on('interactive', handle('interactive'));
+  });
 
   await socket.start();
   return { socket };

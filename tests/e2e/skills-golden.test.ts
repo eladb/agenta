@@ -14,7 +14,7 @@ import {
   requireEnv,
   safeShutdown,
   setupTempDataDirFromFixture,
-  startAgent,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitForReply,
@@ -48,7 +48,7 @@ beforeAll(async () => {
   setupTempDataDirFromFixture(join(import.meta.dir, 'fixtures', 'python-charts-home'));
   channel = requireEnv('TEST_CHANNEL_ID');
   await ensureImage();
-  // Note: each test calls `startAgent(callModel)` itself so the golden CallModel
+  // Note: each test calls `startBotAndTenant(callModel)` itself so the golden CallModel
   // is per-test (positional replay is scoped to one test's call sequence).
   tester = await startTester();
 }, 120_000);
@@ -69,7 +69,7 @@ test.skipIf(!ENABLED)(
       basename(import.meta.path),
       'loads and uses python-charts',
     );
-    agent = await startAgent(callModel);
+    agent = await startBotAndTenant(callModel);
 
     const threadTs = await mention(
       tester,

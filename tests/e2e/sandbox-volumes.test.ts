@@ -13,7 +13,7 @@ import {
   requireEnv,
   safeShutdown,
   setupTempDataDir,
-  startAgent,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitFor,
@@ -62,7 +62,7 @@ beforeAll(async () => {
   channel = requireEnv('TEST_CHANNEL_ID');
   process.env.SANDBOX_EXEC_TIMEOUT_MS = '8000';
   await ensureImage();
-  [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
 }, 120_000);
 
 afterAll(async () => {
