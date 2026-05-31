@@ -1,6 +1,5 @@
 import type { WebClient } from '@slack/web-api';
 import { log } from '../../shared/log';
-import type { HomeSpec } from '../../shared/types';
 import { refFor, teardownSession } from '../git/bootstrap';
 import { type CallModel, createCallModel } from '../model/gateway';
 import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attachments';
@@ -26,11 +25,12 @@ import { signalStop, startOrQueue } from './session';
 import { readSession, setDisplay, setGit, setHome, setModel } from './session-store';
 import { threadKey } from './thread';
 
-// The bot dispatches each event with the resolved home (#253). The tenant
-// no longer reads `config/homes.json`; `home` arrives in the envelope and is
-// frozen per-thread on first mention, same as before.
+// The bot dispatches each event with a resolved home spec (#253). The tenant
+// validates it against its own env at the HTTP boundary (`http.ts` calls
+// `resolveHomeFromEnvelope`) and forwards the resulting `HomeConfig` here.
+// It is frozen per-thread on first mention, same as before.
 export type EnvelopeContext = {
-  home: HomeSpec;
+  home: HomeConfig;
   // Env-derived triplet (MODEL_NAME / MODEL_BASE_URL / MODEL_API_KEY).
   // Required for production; tests pass a stub that's never invoked because
   // they also pass `callModelOverride`. Frozen per-thread on first mention.
@@ -167,8 +167,10 @@ export async function kickoffTurn(
 ): Promise<void> {
   // Per-thread frozen system prompt + home (from the envelope): composed on
   // the first mention and persisted into session.json so every subsequent
-  // turn in this thread sees the same prompt + home even if README.md /
-  // skills / the bot's tenants.json change in the meantime. `clearSession`
+  // turn in this thread sees the same prompt + home even if the bot's
+  // tenants.json swaps the channel's home in the meantime. README.md /
+  // skills / UNIVERSAL_PROMPT_SUFFIX edits DO propagate (the prompt is
+  // rebuilt every turn from disk — see `buildSystemPrompt`). `clearSession`
   // writes idle (preserving these) so the file is there across turns; only
   // `/delete` removes it.
   const { prompt, model, display } = await resolveSystemPromptAndModel(web, tk, userId, ctx);

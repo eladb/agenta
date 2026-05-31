@@ -87,9 +87,9 @@ export type GitRecord = {
 // so per-thread routing (sandbox / git / home / model / display) survives
 // across turns. Recovery filters on status !== 'idle'.
 //
-// `home` is a snapshot of the per-channel home config (#87) frozen on first
+// `home` is a snapshot of the envelope's home spec (#253) frozen on first
 // mention. Stored as the raw HomeConfig (remote + auth_env); slug, transport,
-// and paths derive on read via `resolveTransport` so future config edits
+// and paths derive on read via `resolveTransport` so future bot config edits
 // only affect new threads.
 //
 // The system prompt is intentionally NOT persisted here — it's rebuilt
@@ -102,15 +102,15 @@ export type SessionState = {
   sandbox?: SandboxRecord;
   git?: GitRecord;
   home?: HomeConfig;
-  // Frozen per-thread model triplet (#128). Snapshotted from
-  // `resolveModel(channelId, envFallback)` on first mention so README/skills
-  // edits and homes.json mid-thread swaps don't change the active model
+  // Frozen per-thread model triplet (#128). Snapshotted on first mention
+  // from the tenant's env-derived fallback so README/skills edits and
+  // bot-side tenants.json mid-thread swaps don't change the active model
   // mid-conversation. Only the env-var NAME is stored; the secret value is
   // read at every call via `process.env[api_key_env]`.
   model?: ModelTriplet;
-  // Frozen per-thread display style (#141). Snapshotted from
-  // `resolveDisplay(channelId)` on first mention so mid-thread homes.json
-  // swaps don't change the UX mid-conversation. Missing = `verbose` (default).
+  // Frozen per-thread display style (#141). Snapshotted on first mention
+  // so mid-thread config swaps don't change the UX mid-conversation.
+  // Missing = `verbose` (default).
   display?: DisplayConfig;
 };
 

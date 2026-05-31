@@ -1,18 +1,16 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { appendFile, writeFile } from 'node:fs/promises';
+import { appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { newEventId, nowIso } from '../persistence/events';
 import { ensureThreadDir, messagesPath } from '../persistence/store';
-import { _resetCacheForTests } from './home-config';
 import { recoverInterruptedSessions } from './recovery';
 import { readSession, writeSession } from './session-store';
 import { threadKey } from './thread';
 
 let dataDir: string;
 let homeDir: string;
-let homesConfigPath: string;
 
 const BOT_USER = 'U0BOT';
 
@@ -20,24 +18,18 @@ beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), 'agenta-recovery-'));
   homeDir = mkdtempSync(join(tmpdir(), 'agenta-recovery-home-'));
   writeFileSync(join(homeDir, 'README.md'), '# test home');
-  homesConfigPath = join(homeDir, 'homes.json');
-  writeFileSync(
-    homesConfigPath,
-    JSON.stringify({ default: { remote: `file://${homeDir}` }, channels: {} }),
-  );
   process.env.AGENTA_DATA_DIR = dataDir;
-  process.env.AGENT_HOMES_CONFIG = homesConfigPath;
+  // Per-thread home arrives in the envelope under #253; tests seed it via
+  // FROZEN_HOME directly into session.json. `AGENT_HOME_DIR` is the prompt
+  // builder's test override (untouched by #253).
   process.env.AGENT_HOME_DIR = homeDir;
-  _resetCacheForTests();
 });
 
 afterEach(() => {
   rmSync(dataDir, { recursive: true, force: true });
   rmSync(homeDir, { recursive: true, force: true });
   delete process.env.AGENTA_DATA_DIR;
-  delete process.env.AGENT_HOMES_CONFIG;
   delete process.env.AGENT_HOME_DIR;
-  _resetCacheForTests();
 });
 
 function makeWebStub(): {

@@ -39,10 +39,10 @@ if (!tenantSecret || tenantSecret.length === 0) {
 // OpenAI-compat host via MODEL_BASE_URL.
 const modelApiKey = process.env.MODEL_API_KEY ?? process.env.ANTHROPIC_API_KEY;
 
-// Env-derived model fallback. With homes.json gone (#253) this IS the model
-// triplet for every turn — the bot's envelope no longer carries a model
-// block. The api_key_env name we pin here (`MODEL_API_KEY` or
-// `ANTHROPIC_API_KEY`) is what gets frozen into session.json on first
+// Env-derived model fallback. With per-tenant homes.json gone (#253) this
+// IS the model triplet for every turn — the bot's envelope no longer
+// carries a model block. The api_key_env name we pin here (`MODEL_API_KEY`
+// or `ANTHROPIC_API_KEY`) is what gets frozen into session.json on first
 // mention; the secret value is read at every call.
 let fallbackModel: ModelTriplet | undefined;
 if (modelApiKey) {

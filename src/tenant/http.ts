@@ -24,7 +24,7 @@ import { WebClient } from '@slack/web-api';
 import { log } from '../shared/log';
 import type { EventEnvelope, HomeSpec } from '../shared/types';
 import { makeEventHandler } from './runtime/handler';
-import type { ModelTriplet } from './runtime/home-config';
+import { type ModelTriplet, resolveHomeFromEnvelope } from './runtime/home-config';
 import { normalize, type RawEvent } from './slack/events';
 import { handleInteractivePayload } from './slack/interactive';
 
@@ -175,8 +175,14 @@ async function dispatch(
   const normalized = normalize(inner, envelope.envelope_id, botUserId);
   if (!normalized) return;
 
+  // Validate the envelope's home spec against the tenant's process env —
+  // surfaces missing/empty auth_env values here with a clear error rather
+  // than later inside a git clone. The returned HomeConfig is what gets
+  // forwarded to the handler + frozen into session.json on first mention.
+  const home = resolveHomeFromEnvelope(envelope.home, process.env);
+
   const handler = makeEventHandler(web, envelope.xoxb, botUserId, {
-    home: envelope.home,
+    home,
     fallbackModel,
   });
   await handler(normalized);

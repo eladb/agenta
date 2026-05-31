@@ -4,12 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
-import { teardownSession } from '../../src/tenant/git/bootstrap';
 import { acquire, type Lock } from '../../src/shared/lockfile';
+import { teardownSession } from '../../src/tenant/git/bootstrap';
 import { type CallModel, createCallModel, type Message } from '../../src/tenant/model/gateway';
 import { withGolden } from '../../src/tenant/model/golden';
 import { makeEventHandler } from '../../src/tenant/runtime/handler';
-import { _resetCacheForTests as _resetHomesCache } from '../../src/tenant/runtime/home-config';
 import { threadKey as makeThreadKey } from '../../src/tenant/runtime/thread';
 import { removeContainer } from '../../src/tenant/sandbox';
 import { connect } from '../../src/tenant/slack/connect';
@@ -109,16 +108,7 @@ export function setupTempDataDir(): string {
   };
   gitRun('init', '--initial-branch=main', '--quiet');
   gitRun('add', '.');
-  gitRun(
-    '-c',
-    'user.email=e2e@agenta',
-    '-c',
-    'user.name=e2e',
-    'commit',
-    '-q',
-    '-m',
-    'initial',
-  );
+  gitRun('-c', 'user.email=e2e@agenta', '-c', 'user.name=e2e', 'commit', '-q', '-m', 'initial');
   defaultHomeOverride = withTempHomeConfig(`file://${defaultHomeDir}`);
   return dataDir;
 }
@@ -143,16 +133,7 @@ export function setupTempDataDirFromFixture(fixtureDir: string): string {
   };
   gitRun('init', '--initial-branch=main', '--quiet');
   gitRun('add', '.');
-  gitRun(
-    '-c',
-    'user.email=e2e@agenta',
-    '-c',
-    'user.name=e2e',
-    'commit',
-    '-q',
-    '-m',
-    'initial',
-  );
+  gitRun('-c', 'user.email=e2e@agenta', '-c', 'user.name=e2e', 'commit', '-q', '-m', 'initial');
   defaultHomeOverride = withTempHomeConfig(`file://${defaultHomeDir}`);
   return dataDir;
 }
@@ -176,36 +157,23 @@ export function getDataDir(): string {
   return dataDir;
 }
 
-// Per-test homes-config override (#87). Writes `{ default: { remote,
-// auth_env? }, channels: {} }` into a tmpdir, points
-// `AGENT_HOMES_CONFIG` at it, and clears the home-config cache so the
-// loader picks up the new file. Returns a `restore` thunk for afterAll.
-//
-// The agent's `resolveHome()` reads via `AGENT_HOMES_CONFIG`; the prompt
-// builder is invoked through handler.ts which still honors
-// `AGENT_HOME_DIR` as a one-shot override (so tests that just want to
-// pin the prompt dir without exercising the home-config path keep
-// working).
+// Per-test home override (#87, refactored under #253). The legacy variant
+// wrote a `homes.json` and pointed `AGENT_HOMES_CONFIG` at it; under the
+// bot↔tenant split the home arrives in each `/events` envelope and there
+// is no on-disk file to pre-seed. Tests that want a specific home now
+// pass `home: { remote, auth_env? }` into `EnvelopeContext` directly.
+// This helper survives only to pin `AGENT_HOME_DIR` for the prompt builder.
 export type HomeConfigOverride = {
   configPath: string;
   restore: () => void;
 };
 
-export function withTempHomeConfig(remote: string, authEnvName?: string): HomeConfigOverride {
+export function withTempHomeConfig(_remote: string, _authEnvName?: string): HomeConfigOverride {
   const dir = mkdtempSync(join(tmpdir(), 'agenta-homes-cfg-'));
   const configPath = join(dir, 'homes.json');
-  const entry: { remote: string; auth_env?: string } = { remote };
-  if (authEnvName) entry.auth_env = authEnvName;
-  writeFileSync(configPath, JSON.stringify({ default: entry, channels: {} }));
-  const priorCfg = process.env.AGENT_HOMES_CONFIG;
-  process.env.AGENT_HOMES_CONFIG = configPath;
-  _resetHomesCache();
   return {
     configPath,
     restore: () => {
-      if (priorCfg === undefined) delete process.env.AGENT_HOMES_CONFIG;
-      else process.env.AGENT_HOMES_CONFIG = priorCfg;
-      _resetHomesCache();
       rmSync(dir, { recursive: true, force: true });
     },
   };
@@ -217,14 +185,20 @@ export function withTempHomeConfig(remote: string, authEnvName?: string): HomeCo
 // run-e2e test-runner timeout at 60s, this gives us two ~20s attempts
 // and a clear error message if both fail, instead of an opaque
 // beforeAll timeout that leaves `agent` undefined and crashes afterAll.
-async function connectWithRetry(appToken: string, botToken: string): Promise<Awaited<ReturnType<typeof connect>>> {
+async function connectWithRetry(
+  appToken: string,
+  botToken: string,
+): Promise<Awaited<ReturnType<typeof connect>>> {
   const attemptMs = 20_000;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       return await Promise.race([
         connect(appToken, botToken),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`connect timed out after ${attemptMs}ms (attempt ${attempt})`)), attemptMs),
+          setTimeout(
+            () => reject(new Error(`connect timed out after ${attemptMs}ms (attempt ${attempt})`)),
+            attemptMs,
+          ),
         ),
       ]);
     } catch (err) {

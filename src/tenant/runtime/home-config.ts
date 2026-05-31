@@ -1,36 +1,34 @@
-// Per-channel agent-home configuration.
+// Per-thread home resolution (#87, refactored under #253).
 //
-// Each Slack channel can point at its own home repo; transport is inferred
-// from the URL scheme of the configured `remote`. The default entry applies
-// to any channel not explicitly listed. See `config/homes.json` for the
-// canonical schema and `gh issue view 87` for the design.
+// Under the bot↔tenant split, the tenant no longer reads `config/homes.json`
+// — that file moved to the bot's deployment config (`config/tenants.json`).
+// Each `/events` POST carries a resolved `home` spec in its envelope; the
+// tenant's job is to take that spec, look up its secret (by env-var NAME),
+// and derive the transport descriptor used by `git/bootstrap` +
+// `home-refresh`.
 //
-// The config file lives at `config/homes.json` relative to the repo root.
-// `AGENT_HOMES_CONFIG` overrides the path (used by tests via
-// `withTempHomeConfig`).
-//
-// Three transports — `tunneled-file`, `tunneled-mirror`, `direct` — are
+// Two transports — `tunneled-file`, `tunneled-mirror`, `direct` — are
 // derived from `URL.protocol`:
 //   - `file:`  → tunneled, no mirror (the file:// path IS the working tree).
 //   - `https:` → tunneled, with a mirror clone at `<root>/<slug>` that
 //     `entrypoint.sh` refreshes on boot.
 //   - `git@` / `ssh:` → direct (#88). Sandbox clones + pushes straight to
-//     the SSH remote; the bot still keeps a host-side mirror at
+//     the SSH remote; the tenant still keeps a host-side mirror at
 //     `<root>/<slug>` for prompt-source (README.md + skills/).
 //
 // Slugs are derived deterministically from the URL so two channels pointing
 // at the same remote share a mirror (and so the mirror path is stable across
 // restarts).
 
-import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { HomeSpec } from '../../shared/types';
 
 // Per-channel model/provider triplet (#128). All three fields are required
-// when the `model` block is present in homes.json — partial overrides aren't
-// supported (silently inheriting just `base_url` from env would be a footgun).
-// Only the env var NAME is persisted; the secret VALUE is read at use time
-// via `process.env[api_key_env]`, mirroring how `auth_env` works for git PATs.
+// when a model triplet is in play — partial overrides aren't supported
+// (silently inheriting just `base_url` from env would be a footgun). Only
+// the env var NAME is persisted; the secret VALUE is read at use time via
+// `process.env[api_key_env]`, mirroring how `auth_env` works for git PATs.
 export type ModelTriplet = {
   name: string;
   base_url: string;
@@ -41,19 +39,16 @@ export type ModelTriplet = {
 // debug surface (tool labels, provisioning lines, checklist). `pretty` is a
 // polished progress surface for end-user channels — model `content` as the
 // progress line, humanized fallback labels when content is null, footer
-// `_ran N tools_` on the final reply. Default is `verbose`. Frozen into
-// session.json on first mention, same shape as `model`.
+// `_ran N tools_` on the final reply. Default is `verbose`.
 export type DisplayStyle = 'verbose' | 'pretty';
 export type DisplayConfig = {
   style: DisplayStyle;
 };
 
-export type HomeConfig = {
-  remote: string;
-  auth_env?: string;
-  model?: ModelTriplet;
-  display?: DisplayConfig;
-};
+// The per-thread home snapshot frozen into `session.json` on first mention.
+// Same shape as `HomeSpec` from the bot↔tenant wire format (`{remote,
+// auth_env?}`) — the tenant doesn't enrich the spec before persisting.
+export type HomeConfig = HomeSpec;
 
 export type Transport = 'tunneled-file' | 'tunneled-mirror' | 'direct';
 
@@ -69,19 +64,6 @@ export type ResolvedHome = HomeConfig & {
   // the pathname; for https:// it's the mirror dir.
   localPath: string;
 };
-
-export type HomesFile = {
-  default: HomeConfig;
-  channels: Record<string, HomeConfig>;
-};
-
-const REPO_ROOT = join(import.meta.dir, '..', '..');
-
-export function defaultConfigPath(): string {
-  const override = process.env.AGENT_HOMES_CONFIG;
-  if (override && override.length > 0) return override;
-  return join(REPO_ROOT, 'config', 'homes.json');
-}
 
 // Resolve the mirror root: production sets `AGENT_HOMES_ROOT=/data/homes`
 // in fly.toml; local dev / tests get an OS tmpdir under
@@ -147,7 +129,7 @@ function deriveSshSlug(remote: string): string {
 
 function parseRemote(remote: string): URL {
   // node:url throws on unparseable input. We catch + rethrow with a clearer
-  // message so config validation errors point at the offending entry.
+  // message so envelope validation errors point at the offending entry.
   try {
     return new URL(remote);
   } catch (err) {
@@ -168,9 +150,9 @@ function isSshStyle(remote: string): boolean {
 }
 
 // Pure: derive transport + paths from a HomeConfig snapshot. Called at
-// every use site (handler, bootstrap) so the config file can be edited
-// without re-resolving live threads — sessions store the HomeConfig, not
-// the ResolvedHome.
+// every use site (handler, bootstrap, refresh) so the envelope's home can
+// be re-derived without re-resolving live threads — sessions store the
+// HomeConfig, not the ResolvedHome.
 export function resolveTransport(home: HomeConfig): ResolvedHome {
   if (isSshStyle(home.remote)) {
     const slug = deriveSshSlug(home.remote);
@@ -182,8 +164,8 @@ export function resolveTransport(home: HomeConfig): ResolvedHome {
       ...home,
       slug,
       transport: 'direct',
-      // The bot still keeps a host-side clone for prompt-source (README.md
-      // + skills/). The sandbox uses the original SSH URL directly.
+      // The tenant still keeps a host-side clone for prompt-source
+      // (README.md + skills/). The sandbox uses the original SSH URL.
       mirrorPath: mirror,
       localPath: mirror,
     };
@@ -219,176 +201,50 @@ export function resolveTransport(home: HomeConfig): ResolvedHome {
   throw new Error(`unsupported URL scheme ${url.protocol} (remote: ${home.remote})`);
 }
 
-// Validate a single HomeConfig entry. Throws with a clear message keyed
-// off the entry's name (`default` or a channel id). Auth rules:
-//   - file:// → auth_env MUST be absent.
-//   - https:// → auth_env REQUIRED, and process.env[auth_env] must be set.
-//   - ssh / git@ → auth_env REQUIRED (PEM-formatted private key), and
-//     process.env[auth_env] must be set. The PEM itself is read at use
-//     time, not here, so config-reload survives a transient unset.
-// Validate the optional `model` block (#128). All three keys required when
-// present; the referenced env var must be set at boot. Same shape as the
-// `auth_env` check above.
-function validateModel(name: string, model: unknown): void {
-  if (model === undefined) return;
-  if (typeof model !== 'object' || model === null || Array.isArray(model)) {
-    throw new Error(`[${name}] "model" must be an object if present`);
-  }
-  const m = model as Record<string, unknown>;
-  for (const key of ['name', 'base_url', 'api_key_env'] as const) {
-    if (typeof m[key] !== 'string' || (m[key] as string).length === 0) {
-      throw new Error(
-        `[${name}] model.${key} required (all three of name/base_url/api_key_env must be set together)`,
-      );
-    }
-  }
-  const envName = m.api_key_env as string;
-  const v = process.env[envName];
-  if (!v || v.length === 0) {
-    throw new Error(`[${name}] model.api_key_env ${envName} is not set (or empty) in process env`);
-  }
-}
-
-function validateDisplay(name: string, display: unknown): void {
-  if (display === undefined) return;
-  if (typeof display !== 'object' || display === null || Array.isArray(display)) {
-    throw new Error(`[${name}] "display" must be an object if present`);
-  }
-  const d = display as Record<string, unknown>;
-  if (typeof d.style !== 'string') {
-    throw new Error(`[${name}] display.style required (string)`);
-  }
-  if (d.style !== 'verbose' && d.style !== 'pretty') {
-    throw new Error(
-      `[${name}] unknown display.style ${JSON.stringify(d.style)} (allowed: "verbose" | "pretty")`,
-    );
-  }
-}
-
-function validateEntry(name: string, home: HomeConfig): void {
+// Resolve an envelope's `home` field into the same snapshot the legacy
+// per-tenant `homes.json` path used to produce. Validates the auth_env
+// reference against the tenant's process env so secret misconfiguration
+// surfaces here (clear error) rather than later inside a git clone.
+//
+// Returned shape is intentionally the raw `HomeConfig` (remote + auth_env);
+// slug / transport / paths derive on read via `resolveTransport`. That's
+// what gets frozen into `session.json` on first mention.
+//
+// Auth rules mirror the legacy validator:
+//   - file://       → auth_env MUST be absent.
+//   - https://      → auth_env REQUIRED; env[auth_env] must be set.
+//   - ssh:// / git@ → auth_env REQUIRED; env[auth_env] must be set.
+export function resolveHomeFromEnvelope(home: HomeSpec, env: NodeJS.ProcessEnv): HomeConfig {
   if (typeof home.remote !== 'string' || home.remote.length === 0) {
-    throw new Error(`[${name}] missing required string "remote"`);
+    throw new Error('envelope home.remote required (non-empty string)');
   }
-  validateModel(name, home.model);
-  validateDisplay(name, home.display);
   if (isSshStyle(home.remote)) {
     if (typeof home.auth_env !== 'string' || home.auth_env.length === 0) {
-      throw new Error(`[${name}] auth_env required for ssh:// / git@ URLs`);
+      throw new Error(`envelope home.auth_env required for ssh:// / git@ remote ${home.remote}`);
     }
-    const v = process.env[home.auth_env];
-    if (!v || v.length === 0) {
-      throw new Error(`[${name}] auth_env ${home.auth_env} is not set (or empty) in process env`);
-    }
-    return;
+    requireEnvValue(env, home.auth_env);
+    return { remote: home.remote, auth_env: home.auth_env };
   }
   const url = parseRemote(home.remote);
   if (url.protocol === 'file:') {
     if (home.auth_env !== undefined) {
-      throw new Error(`[${name}] auth_env must be absent for file:// URLs`);
+      throw new Error(`envelope home.auth_env must be absent for file:// remote ${home.remote}`);
     }
-    return;
+    return { remote: home.remote };
   }
   if (url.protocol === 'https:') {
     if (typeof home.auth_env !== 'string' || home.auth_env.length === 0) {
-      throw new Error(`[${name}] auth_env required for https:// URLs`);
+      throw new Error(`envelope home.auth_env required for https:// remote ${home.remote}`);
     }
-    const v = process.env[home.auth_env];
-    if (!v || v.length === 0) {
-      throw new Error(`[${name}] auth_env ${home.auth_env} is not set (or empty) in process env`);
-    }
-    return;
+    requireEnvValue(env, home.auth_env);
+    return { remote: home.remote, auth_env: home.auth_env };
   }
-  throw new Error(`[${name}] unsupported URL scheme ${url.protocol}`);
+  throw new Error(`unsupported URL scheme ${url.protocol} (remote: ${home.remote})`);
 }
 
-// Read + validate the homes config. Throws on any validation failure so
-// the bot refuses to start with a bad config — same shape as the other
-// boot-time env checks. Cached after first call.
-let cached: HomesFile | undefined;
-
-export function loadHomesConfig(path: string = defaultConfigPath()): HomesFile {
-  if (cached !== undefined) return cached;
-  if (!existsSync(path)) {
-    throw new Error(`homes config not found at ${path} (set AGENT_HOMES_CONFIG to override)`);
+function requireEnvValue(env: NodeJS.ProcessEnv, name: string): void {
+  const v = env[name];
+  if (v === undefined || v.length === 0) {
+    throw new Error(`envelope home.auth_env ${name} is not set (or empty) in tenant env`);
   }
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch (err) {
-    throw new Error(`failed to read homes config at ${path}: ${(err as Error).message}`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`failed to parse homes config at ${path}: ${(err as Error).message}`);
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`homes config at ${path} must be a JSON object`);
-  }
-  const obj = parsed as Record<string, unknown>;
-  if (!obj.default || typeof obj.default !== 'object' || Array.isArray(obj.default)) {
-    throw new Error(`homes config at ${path} is missing required "default" entry`);
-  }
-  if (
-    obj.channels !== undefined &&
-    (typeof obj.channels !== 'object' || obj.channels === null || Array.isArray(obj.channels))
-  ) {
-    throw new Error(`homes config at ${path}: "channels" must be an object if present`);
-  }
-  const file: HomesFile = {
-    default: obj.default as HomeConfig,
-    channels: (obj.channels as Record<string, HomeConfig>) ?? {},
-  };
-  validateEntry('default', file.default);
-  for (const [chan, home] of Object.entries(file.channels)) {
-    validateEntry(chan, home);
-  }
-  cached = file;
-  return file;
-}
-
-// Channel-specific entry if present, else the default. Returns a snapshot
-// (HomeConfig) suitable for freezing into session.json — slug + transport +
-// paths recompute on read via `resolveTransport`.
-export function resolveHome(channelId: string, path?: string): HomeConfig {
-  const file = loadHomesConfig(path);
-  const specific = file.channels[channelId];
-  if (specific) return { ...specific };
-  return { ...file.default };
-}
-
-// Resolve the per-thread model triplet (#128). Channel-specific `model`
-// block wins, else the default's, else the caller-supplied fallback
-// (typically env-derived in production, undefined in tests with a fully-
-// configured homes.json). Returns undefined if no source provides a triplet
-// — callers must surface that as a boot/config error since the agent can't
-// run without one.
-export function resolveModel(
-  channelId: string,
-  fallback: ModelTriplet | undefined,
-  path?: string,
-): ModelTriplet | undefined {
-  const file = loadHomesConfig(path);
-  const specific = file.channels[channelId];
-  if (specific?.model) return { ...specific.model };
-  if (file.default.model) return { ...file.default.model };
-  return fallback ? { ...fallback } : undefined;
-}
-
-// Resolve the per-thread display style (#141). Channel-specific `display`
-// block wins, else the default's, else `"verbose"`. Pure lookup — no env
-// fallback because display is a UX choice, not a deploy-wide knob.
-export function resolveDisplay(channelId: string, path?: string): DisplayConfig {
-  const file = loadHomesConfig(path);
-  const specific = file.channels[channelId];
-  if (specific?.display) return { ...specific.display };
-  if (file.default.display) return { ...file.default.display };
-  return { style: 'verbose' };
-}
-
-// For tests — drop the module-level cache so a new AGENT_HOMES_CONFIG
-// takes effect.
-export function _resetCacheForTests(): void {
-  cached = undefined;
 }
