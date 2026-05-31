@@ -10,7 +10,7 @@ const SANDBOX_PORT = 9000;
 const CONTAINER_PREFIX = 'agenta-';
 const VOLUME_PREFIX = 'agenta-vol-';
 
-const DOCKERFILE_DIR = join(import.meta.dir, '..', '..', 'sandbox');
+const DOCKERFILE_DIR = join(import.meta.dir, '..', '..', '..', 'sandbox');
 
 export function containerName(threadKey: string): string {
   return `${CONTAINER_PREFIX}${threadKey}`;
