@@ -40,7 +40,9 @@ describe('downloadFiles', () => {
     expect(refs).toHaveLength(1);
     expect(refs[0]?.mimetype).toBe('image/png');
     expect(refs[0]?.local_path).toBe('attachments/F1-shot.png');
-    const onDisk = readFileSync(join(threadDir('tk'), refs[0]!.local_path));
+    const first = refs[0];
+    if (!first) throw new Error('expected at least one ref');
+    const onDisk = readFileSync(join(threadDir('tk'), first.local_path));
     expect(onDisk.byteLength).toBe(PNG.byteLength);
   });
 

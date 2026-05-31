@@ -1,8 +1,8 @@
 // Per-thread home resolution (#87, refactored under #253).
 //
-// Under the bot↔tenant split, the tenant no longer reads `config/homes.json`
-// — that file moved to the bot's deployment config (`config/tenants.json`).
-// Each `/events` POST carries a resolved `home` spec in its envelope; the
+// Under the bot↔tenant split, home config lives on the bot side
+// (`config/tenants.json`, per-deployment). Each `/events` POST carries a
+// resolved `home` spec in its envelope; the
 // tenant's job is to take that spec, look up its secret (by env-var NAME),
 // and derive the transport descriptor used by `git/bootstrap` +
 // `home-refresh`.
@@ -201,10 +201,10 @@ export function resolveTransport(home: HomeConfig): ResolvedHome {
   throw new Error(`unsupported URL scheme ${url.protocol} (remote: ${home.remote})`);
 }
 
-// Resolve an envelope's `home` field into the same snapshot the legacy
-// per-tenant `homes.json` path used to produce. Validates the auth_env
-// reference against the tenant's process env so secret misconfiguration
-// surfaces here (clear error) rather than later inside a git clone.
+// Resolve an envelope's `home` field into a per-thread snapshot. Validates
+// the auth_env reference against the tenant's process env so secret
+// misconfiguration surfaces here (clear error) rather than later inside a
+// git clone.
 //
 // Returned shape is intentionally the raw `HomeConfig` (remote + auth_env);
 // slug / transport / paths derive on read via `resolveTransport`. That's

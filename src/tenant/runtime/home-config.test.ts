@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { resolveHomeFromEnvelope, resolveTransport } from './home-config';
 
-// Per-tenant `config/homes.json` is gone under #253 — `home` arrives in
-// each `/events` envelope and is validated by `resolveHomeFromEnvelope`
-// against the tenant's process env. These tests pin that contract plus
-// the unchanged transport derivation.
+// Under #253 the home spec arrives in each `/events` envelope and is
+// validated by `resolveHomeFromEnvelope` against the tenant's process
+// env. These tests pin that contract plus the unchanged transport
+// derivation.
 
 const PRIOR_ENV: Record<string, string | undefined> = {};
 

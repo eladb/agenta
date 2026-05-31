@@ -4,8 +4,7 @@
 // envelope: just `{ remote, auth_env? }` — no slug/transport/paths (those
 // are derived per-call inside the tenant). `auth_env` is the NAME of an
 // env var the tenant resolves against its own process env; the bot never
-// touches the secret value. Same indirection rule as the legacy per-tenant
-// homes.json `auth_env`.
+// touches the secret value.
 //
 // `EventEnvelope` is the body of `POST /events`. The bot mints it after
 // resolving the route and dispatches it to the chosen tenant's URL. `xoxb`

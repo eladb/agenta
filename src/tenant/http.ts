@@ -57,7 +57,6 @@ export type HttpOptions = {
 export function startHttp(opts: HttpOptions): ReturnType<typeof Bun.serve> {
   const expectedSecret = Buffer.from(opts.tenantSecret);
 
-  // biome-ignore lint/suspicious/noExplicitAny: Bun.serve fetch handler
   const fetch = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     if (req.method === 'GET' && url.pathname === '/health') {

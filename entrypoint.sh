@@ -68,9 +68,9 @@ case "$ROLE" in
     HOMES_ROOT="${AGENT_HOMES_ROOT:-/data/homes}"
     mkdir -p "$DATA_DIR" "$HOMES_ROOT"
 
-    # No home prefetch here — under #253 the per-tenant `config/homes.json`
-    # is gone. The home spec arrives in each `/events` envelope; the
-    # tenant's bootstrap / home-refresh code clones lazily on first use.
+    # No home prefetch here — under #253 the home spec arrives in each
+    # `/events` envelope; the tenant's bootstrap / home-refresh code
+    # clones lazily on first use.
     exec bun src/tenant/index.ts
     ;;
   *)

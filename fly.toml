@@ -58,9 +58,9 @@ primary_region = "iad"
   method = "GET"
   path = "/health"
 
-# Single machine — the bot uses src/lockfile.ts to enforce one instance, so
-# a second machine would refuse to start anyway. The deploy strategy is
-# "immediate" because we have no second machine to roll over into.
+# Single machine — the tenant uses src/shared/lockfile.ts to enforce one
+# instance, so a second machine would refuse to start anyway. The deploy
+# strategy is "immediate" because we have no second machine to roll over into.
 [deploy]
   strategy = "immediate"
 

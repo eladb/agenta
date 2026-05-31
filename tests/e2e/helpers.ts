@@ -182,17 +182,14 @@ export function getDataDir(): string {
   return dataDir;
 }
 
-// Per-test home override (#87, refactored under #253). The legacy variant
-// wrote a `homes.json` and pointed `AGENT_HOMES_CONFIG` at it; under the
-// bot↔tenant split the home arrives in each `/events` envelope from the
-// bot's `tenants.json` route, so the override now feeds the inline route
-// `startBotAndTenant` mints. We stash the active spec in a module-level
-// `currentHomeOverride` ref; `startBotAndTenant` reads it when assembling
-// the inline tenants config (so re-installing AFTER `startBotAndTenant`
-// won't retroactively swap the route — install the override in
-// `beforeAll` BEFORE `startBotAndTenant`, like the legacy helper).
+// Per-test home override (#87, refactored under #253). Under the bot↔tenant
+// split the home arrives in each `/events` envelope from the bot's
+// `tenants.json` route, so the override feeds the inline route
+// `startBotAndTenant` mints. We stash the active spec in a module-level ref;
+// `startBotAndTenant` reads it when assembling the inline tenants config (so
+// re-installing AFTER `startBotAndTenant` won't retroactively swap the
+// route — install the override in `beforeAll` BEFORE `startBotAndTenant`).
 export type HomeConfigOverride = {
-  configPath: string;
   restore: () => void;
 };
 
@@ -200,22 +197,14 @@ let currentHomeRemote: string | undefined;
 let currentHomeAuthEnv: string | undefined;
 
 export function withTempHomeConfig(remote: string, authEnvName?: string): HomeConfigOverride {
-  const dir = mkdtempSync(join(tmpdir(), 'agenta-homes-cfg-'));
-  const configPath = join(dir, 'homes.json');
-  // Capture the spec so `startBotAndTenant` can mint a `tenants.json`
-  // pointing at it. The configPath is purely cosmetic now (no file on
-  // disk is consulted) but kept so test code that stashes the path for
-  // logging doesn't break.
   const prevRemote = currentHomeRemote;
   const prevAuthEnv = currentHomeAuthEnv;
   currentHomeRemote = remote;
   currentHomeAuthEnv = authEnvName;
   return {
-    configPath,
     restore: () => {
       currentHomeRemote = prevRemote;
       currentHomeAuthEnv = prevAuthEnv;
-      rmSync(dir, { recursive: true, force: true });
     },
   };
 }
