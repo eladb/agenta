@@ -13,3 +13,4 @@
 - [canary-monitoring-setup](canary-monitoring-setup.md) — host-local 30-min cron watchdog runs the double canary; on red it Slack-alerts + wakes this agent as oncall. Not in the repo.
 - [keep-install-sh-current](keep-install-sh-current.md) — when a change adds a tool/package dep, update install.sh in the same change (Elad: install.sh is the box-provisioning source of truth).
 - [nanabot-cloudflare-access](nanabot-cloudflare-access.md) — Published pages on this box live at bensadeh.nanabot.me/<agent>/ and the whole nanabot.me domain is behind Cloudflare Access — not open-internet.
+- [nanabox-runtime-conventions](nanabox-runtime-conventions.md) — Mobile-composer attachments arrive as `[attached]`-marked paths under `~/.attachments/`; `~/.nana/config.json` holds per-agent knobs (rtl, tool_display, gh_dispatch_conclusions, icons).
