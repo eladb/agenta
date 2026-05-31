@@ -41,9 +41,9 @@ name: CD
 # green so the timeline stays clean. The skip allowlist lives in
 # `.ci-ignore` at the repo root.
 #
-# Prod-only changes (config/homes.json, fly.toml, slack-manifests, etc.)
+# Prod-only changes (config/tenants.json, fly.toml, slack-manifests, etc.)
 # skip the e2e step but still run deploy + canary — e2e wouldn't
-# exercise those paths anyway (helpers.ts overrides AGENT_HOMES_CONFIG
+# exercise those paths anyway (helpers.ts mints an inline tenants config
 # per run; the test Slack apps are separate from prod). That allowlist
 # lives in `.ci-e2e-ignore`.
 #

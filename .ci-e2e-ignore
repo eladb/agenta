@@ -9,14 +9,13 @@
 #
 # Be CONSERVATIVE — only add paths that the e2e suite genuinely cannot
 # exercise. Examples of paths that LOOK skip-safe but aren't:
-#   src/runtime/home-config.ts — covered by unit tests, but a behavior
-#     change should still run e2e to catch downstream effects.
+#   src/tenant/runtime/home-config.ts — covered by unit tests, but a
+#     behavior change should still run e2e to catch downstream effects.
 #   Dockerfile / sandbox/Dockerfile — sandbox image is exercised by e2e.
 
-# Per-channel home routing. tests/e2e/helpers.ts:setupTempDataDir
-# overrides AGENT_HOMES_CONFIG with a per-run file:// config, so the
-# committed file is bypassed during e2e.
-^config/homes\.json$
+# Per-deployment tenants config (channels → tenant + home). e2e mints an
+# inline tenants config per run, so the committed file is bypassed.
+^config/tenants\.json$
 
 # Prod-only Fly app config.
 ^fly\.toml$

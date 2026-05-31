@@ -1,219 +1,80 @@
 #!/usr/bin/env bash
-# Bot entrypoint on Fly.
+# Container entrypoint for the agenta single image (#253).
 #
-# Run as the container's PID 1. Responsibilities:
+# Two roles share one image:
 #
-#   1. Ensure $AGENTA_DATA_DIR exists (thread JSONL / sessions / attachments
-#      all land under here; lives on the Fly volume).
-#   2. Walk every entry in config/homes.json (default + each channel). For
-#      every entry whose URL scheme is `https://` OR `ssh://` / `git@`,
-#      clone (or fetch + reset --hard) the remote into the derived mirror
-#      path `${AGENT_HOMES_ROOT}/<slug>` using the referenced auth env var.
-#      `file://` entries are skipped (the path IS the source). For ssh
-#      entries the deploy key is staged into a tmp file and passed via
-#      `GIT_SSH_COMMAND` with the pinned `git-hooks/known_hosts` bundle.
-#   3. Set committer identity on each mirror so the post-receive hook can
-#      push back to origin without surprises.
-#   4. exec the bot — `bun src/index.ts`.
+#   bot     — Slack ingress router. Loads config/tenants.json, opens one
+#             Socket Mode connection, forwards events to per-tenant /events
+#             URLs over HTTP. No disk writes, no model calls, no Slack ops.
 #
-# Required env (set as Fly secrets):
-#   GITHUB_TOKEN          — fine-grained PAT with read+write to whichever
-#                           remotes the config references (entry-by-entry).
-# Optional:
-#   BOT_GIT_USER_NAME     — committer name (default: "agenta").
-#   BOT_GIT_USER_EMAIL    — committer email (default: "agenta@users.noreply.github.com").
-#   AGENTA_DATA_DIR       — defaults to /data/agenta (matches fly.toml).
-#   AGENT_HOMES_ROOT      — mirror root (default /data/homes, fly.toml).
-#   AGENT_HOMES_CONFIG    — config path (default ./config/homes.json).
+#   tenant  — Agent harness. Owns /data, sessions, sandboxes, model gateway,
+#             home repos. Listens on HEALTH_PORT for /events (bot dispatches)
+#             + /health. Home for each thread arrives in the envelope; mirror
+#             clones happen lazily inside the tenant.
+#
+# Selector: first arg, defaulting to `tenant` so an unset CMD keeps backward
+# compat with operators who pulled the image before the split.
+#
+# Required env (set as Fly secrets / ECS task env):
+#
+#   bot:
+#     SLACK_APP_TOKEN       — xapp- (one per deployment).
+#     SLACK_BOT_TOKEN       — xoxb- (request-scoped via envelope; v1 single-tenant
+#                              just uses this for every envelope).
+#     <per-tenant>           — every TenantEndpoint.auth_env referenced by
+#                              config/tenants.json must be set; the bot reads
+#                              them at dispatch time.
+#
+#   tenant:
+#     TENANT_SECRET         — shared bearer the bot uses to call /events.
+#     MODEL_API_KEY         — (or ANTHROPIC_API_KEY) for the model gateway.
+#     <per-home auth_env>   — every home.auth_env that ever lands in an
+#                              envelope must be set; tenant resolves at use.
+#
+# Optional env (both roles):
+#
+#   AGENTA_DATA_DIR         — tenant only; defaults to /data/agenta (fly.toml).
+#   AGENT_HOMES_ROOT        — tenant only; mirror root, default /data/homes.
+#   AGENTA_SANDBOX_APP      — tenant only; sandbox Fly app, default agenta-sandbox.
 
 set -euo pipefail
 
-# The bot's flyProvider (src/sandbox/fly.ts:appName) calls
-# requireEnv('FLY_APP_NAME') with no fallback — it does NOT read
-# AGENTA_SANDBOX_APP. We have to export FLY_APP_NAME ourselves so
-# per-thread sandboxes land in the SANDBOX Fly app (default
-# "agenta-sandbox"), not whatever the surrounding host calls itself.
-#
-# Unconditional on purpose:
-#   - On Fly, Fly's machine runtime auto-injects FLY_APP_NAME=agenta-bot
-#     (the bot's own app, NOT the sandbox app). This export overrides
-#     that injection so the bot hits /apps/agenta-sandbox/* instead of
-#     /apps/agenta-bot/*.
-#   - On ECS (or any non-Fly host), nothing injects FLY_APP_NAME, so
-#     this export sets it from scratch — flyProvider would otherwise
-#     crash on requireEnv.
-# Operators can set AGENTA_SANDBOX_APP to point at a different sandbox
-# Fly app; default is "agenta-sandbox".
-export FLY_APP_NAME="${AGENTA_SANDBOX_APP:-agenta-sandbox}"
+ROLE="${1:-tenant}"
 
-DATA_DIR="${AGENTA_DATA_DIR:-/data/agenta}"
-HOMES_ROOT="${AGENT_HOMES_ROOT:-/data/homes}"
-HOMES_CONFIG="${AGENT_HOMES_CONFIG:-./config/homes.json}"
+case "$ROLE" in
+  bot)
+    echo "[entrypoint] role=bot"
+    exec bun src/bot/index.ts
+    ;;
+  tenant)
+    echo "[entrypoint] role=tenant"
 
-mkdir -p "$DATA_DIR"
-mkdir -p "$HOMES_ROOT"
+    # The tenant's flyProvider (src/tenant/sandbox/fly.ts:appName) calls
+    # requireEnv('FLY_APP_NAME') with no fallback — it does NOT read
+    # AGENTA_SANDBOX_APP. We have to export FLY_APP_NAME ourselves so
+    # per-thread sandboxes land in the SANDBOX Fly app (default
+    # "agenta-sandbox"), not whatever the surrounding host calls itself.
+    #
+    # Unconditional on purpose:
+    #   - On Fly, Fly's machine runtime auto-injects FLY_APP_NAME=<host app>
+    #     (e.g. agenta-bot or salto-tenant). This export overrides that
+    #     injection so the tenant hits /apps/agenta-sandbox/* not the host.
+    #   - On ECS (or any non-Fly host), nothing injects FLY_APP_NAME, so
+    #     this export sets it from scratch — flyProvider would otherwise
+    #     crash on requireEnv.
+    export FLY_APP_NAME="${AGENTA_SANDBOX_APP:-agenta-sandbox}"
 
-if [ ! -f "$HOMES_CONFIG" ]; then
-  echo "[entrypoint] FATAL: homes config not found at $HOMES_CONFIG" >&2
-  exit 1
-fi
+    DATA_DIR="${AGENTA_DATA_DIR:-/data/agenta}"
+    HOMES_ROOT="${AGENT_HOMES_ROOT:-/data/homes}"
+    mkdir -p "$DATA_DIR" "$HOMES_ROOT"
 
-# Slug derivation must match src/runtime/home-config.ts (`deriveSlug` for
-# https://+file:// and `deriveSshSlug` for ssh://+git@). Compute from URL
-# host + sanitized pathname, lowercased, leading dashes stripped.
-derive_slug() {
-  local url="$1"
-  python3 - "$url" <<'PY'
-import sys, re
-url = sys.argv[1]
-host = ''
-path = ''
-if url.startswith('git@'):
-  # scp form: <user>@<host>:<path>
-  m = re.match(r'^[^@]+@([^:]+):(.+)$', url)
-  if m:
-    host, path = m.group(1), m.group(2)
-else:
-  from urllib.parse import urlparse
-  u = urlparse(url)
-  host = u.hostname or ''
-  path = u.path.lstrip('/')
-path = re.sub(r'[^a-zA-Z0-9-]', '-', path)
-raw = f'{host}-{path}' if host else path
-slug = raw.lower().lstrip('-')
-print(slug, end='')
-PY
-}
-
-clone_or_refresh() {
-  local name="$1"   # 'default' or 'C0XXX...'
-  local remote="$2"
-  local auth_env="$3"
-
-  # Scheme dispatch.
-  local scheme=''
-  case "$remote" in
-    file://*)
-      echo "[entrypoint] [$name] file:// — no mirror needed; sandbox uses host path directly"
-      return 0
-      ;;
-    git@*|ssh://*|git+ssh://*)
-      scheme='ssh'
-      ;;
-    https://*)
-      scheme='https'
-      ;;
-    *)
-      echo "[entrypoint] FATAL: [$name] unsupported URL scheme (remote: $remote)" >&2
-      exit 1
-      ;;
-  esac
-
-  if [ -z "$auth_env" ] || [ "$auth_env" = "null" ]; then
-    echo "[entrypoint] FATAL: [$name] auth_env required for $scheme URLs" >&2
+    # No home prefetch here — under #253 the home spec arrives in each
+    # `/events` envelope; the tenant's bootstrap / home-refresh code
+    # clones lazily on first use.
+    exec bun src/tenant/index.ts
+    ;;
+  *)
+    echo "[entrypoint] FATAL: unknown role $(printf %q "$ROLE") (want 'bot' or 'tenant')" >&2
     exit 1
-  fi
-  local secret="${!auth_env:-}"
-  if [ -z "$secret" ]; then
-    echo "[entrypoint] FATAL: [$name] auth_env $auth_env is not set in process env" >&2
-    exit 1
-  fi
-
-  local slug
-  slug="$(derive_slug "$remote")"
-  if [ -z "$slug" ]; then
-    echo "[entrypoint] FATAL: [$name] could not derive slug from $remote" >&2
-    exit 1
-  fi
-  local mirror="$HOMES_ROOT/$slug"
-
-  # Per-transport: compute either a token-spliced clone URL (https) or
-  # a GIT_SSH_COMMAND with a tmp key file (ssh). The ssh key file is
-  # cleaned up on function exit via the trap.
-  local clone_url=''
-  local git_ssh_cmd=''
-  local key_file=''
-  if [ "$scheme" = 'https' ]; then
-    clone_url="$(python3 - "$remote" "$secret" <<'PY'
-import sys
-from urllib.parse import urlparse, urlunparse
-remote = sys.argv[1]
-token = sys.argv[2]
-u = urlparse(remote)
-netloc = f'x-access-token:{token}@{u.hostname}'
-if u.port:
-  netloc += f':{u.port}'
-print(urlunparse((u.scheme, netloc, u.path, u.params, u.query, u.fragment)), end='')
-PY
-)"
-  else
-    # ssh: stage the PEM into a 0600 tmp file under /tmp and build a
-    # GIT_SSH_COMMAND pointing at it + the bundled known_hosts. The tmp
-    # key is short-lived (this function's lifetime); it never lands on
-    # the data volume.
-    key_file="$(mktemp)"
-    chmod 600 "$key_file"
-    # shellcheck disable=SC2064
-    trap "rm -f '$key_file'" RETURN
-    printf '%s\n' "$secret" > "$key_file"
-    git_ssh_cmd="ssh -i $key_file -o IdentitiesOnly=yes -o UserKnownHostsFile=git-hooks/known_hosts -o StrictHostKeyChecking=yes"
-    clone_url="$remote"
-  fi
-
-  if [ ! -d "$mirror/.git" ]; then
-    echo "[entrypoint] [$name] cloning $remote into $mirror"
-    if [ -n "$git_ssh_cmd" ]; then
-      GIT_SSH_COMMAND="$git_ssh_cmd" git clone "$clone_url" "$mirror"
-    else
-      git clone "$clone_url" "$mirror"
-    fi
-  else
-    echo "[entrypoint] [$name] mirror exists at $mirror; refreshing origin URL + main"
-    git -C "$mirror" remote set-url origin "$clone_url"
-    # Best-effort fast-forward: a transient network blip shouldn't keep
-    # the bot down. The bot can still serve the existing working tree.
-    local fetch_ok=0
-    if [ -n "$git_ssh_cmd" ]; then
-      GIT_SSH_COMMAND="$git_ssh_cmd" git -C "$mirror" fetch origin main 2>&1 && fetch_ok=1 || fetch_ok=0
-    else
-      git -C "$mirror" fetch origin main 2>&1 && fetch_ok=1 || fetch_ok=0
-    fi
-    if [ "$fetch_ok" = '1' ]; then
-      git -C "$mirror" checkout main 2>&1 || true
-      git -C "$mirror" reset --hard origin/main 2>&1
-    else
-      echo "[entrypoint] WARN: [$name] fetch origin main failed; continuing with existing working tree" >&2
-    fi
-  fi
-
-  # For ssh mirrors, persist core.sshCommand on the mirror itself so any
-  # later bot-side fetch (or prompt-refresh) uses the same key + host
-  # pin without needing to re-establish the env var. The tmp key path
-  # only lives for this function's duration, though, so callers that
-  # re-fetch later would still need to re-export it. The bot today
-  # doesn't refetch the mirror after boot, so this is just defense-
-  # in-depth.
-  if [ -n "$git_ssh_cmd" ]; then
-    git -C "$mirror" config core.sshCommand "$git_ssh_cmd"
-  fi
-
-  git -C "$mirror" config user.name "${BOT_GIT_USER_NAME:-agenta}"
-  git -C "$mirror" config user.email "${BOT_GIT_USER_EMAIL:-agenta@users.noreply.github.com}"
-}
-
-# Iterate over every entry: default + each channel's HomeConfig. We emit
-# tab-separated `<name>\t<remote>\t<auth_env>` triples from jq and feed
-# them into the clone loop.
-while IFS=$'\t' read -r name remote auth_env; do
-  [ -z "$name" ] && continue
-  clone_or_refresh "$name" "$remote" "$auth_env"
-done < <(
-  jq -r '
-    {default: .default} + (.channels // {})
-    | to_entries[]
-    | [.key, .value.remote, (.value.auth_env // "")]
-    | @tsv
-  ' "$HOMES_CONFIG"
-)
-
-exec bun src/index.ts
+    ;;
+esac

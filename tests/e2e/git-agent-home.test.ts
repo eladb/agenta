@@ -16,8 +16,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -27,9 +27,9 @@ import {
   mention,
   requireEnv,
   STUB_REPLY_PREFIX,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitForReply,
@@ -89,7 +89,7 @@ if (!DOCKER_PROVIDER_ACTIVE) {
     homeOverride = withTempHomeConfig(`file://${repoPath}`);
 
     channel = requireEnv('TEST_CHANNEL_ID');
-    [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+    [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
   }, 120_000);
 
   afterAll(async () => {

@@ -6,7 +6,7 @@ description: >
   `.ci-ignore` AND `.ci-e2e-ignore` — i.e. e2e would actually be
   exercising something that changed. Used by both `ci.yml` and
   `cd.yml`: doc-only changes skip everything; prod-only changes
-  (e.g. config/homes.json) skip e2e but still deploy + canary.
+  (e.g. config/tenants.json) skip e2e but still deploy + canary.
 
 outputs:
   code:

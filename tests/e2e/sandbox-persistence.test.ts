@@ -2,21 +2,21 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
-import { containerName } from '../../src/sandbox';
-import { ensureImage } from '../../src/sandbox/docker';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
+import { containerName } from '../../src/tenant/sandbox';
+import { ensureImage } from '../../src/tenant/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
-  deleteThread,
   DOCKER_PROVIDER_ACTIVE,
+  deleteThread,
   getDataDir,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitFor,
@@ -77,7 +77,7 @@ beforeAll(async () => {
   channel = requireEnv('TEST_CHANNEL_ID');
   process.env.SANDBOX_EXEC_TIMEOUT_MS = '8000';
   await ensureImage();
-  [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
 }, 120_000);
 
 afterAll(async () => {
@@ -141,20 +141,24 @@ test.if(HAS_DOCKER)(
     // provider's in-memory state (the new process would have done both
     // implicitly). We re-import the module fresh? Not necessary — the
     // _resetImageReadyCache test helper clears `tokens` which is what
-    // tracks the in-memory route. Release the per-bot lockfile too —
-    // `startAgent` below calls `acquire('agent')`, which would otherwise
-    // refuse because the file still names THIS pid.
+    // tracks the in-memory route. Release both lockfiles AND stop the
+    // tenant HTTP server — `startBotAndTenant` below re-acquires 'bot'
+    // + 'agent' and starts a fresh tenant on a new port; without these
+    // teardowns we'd race the locks (refuses with our own pid) and leak
+    // the loopback socket.
     await agent.socket.disconnect();
+    agent.tenant.stop();
     agent.lock.release();
-    const { _resetImageReadyCache } = await import('../../src/sandbox/docker');
+    agent.agentLock.release();
+    const { _resetImageReadyCache } = await import('../../src/tenant/sandbox/docker');
     _resetImageReadyCache();
     // _resetSyncedAttachments also resets the sandbox/index per-thread cache
     // that's keyed independently of provider state.
-    const { _resetSyncedAttachments } = await import('../../src/sandbox');
+    const { _resetSyncedAttachments } = await import('../../src/tenant/sandbox');
     _resetSyncedAttachments();
 
     // Start agent B with the same data dir.
-    agent = await startAgent(scriptedCallModel);
+    agent = await startBotAndTenant(scriptedCallModel);
 
     // Turn 2 (agent B): read the marker. If the sandbox was re-provisioned
     // and the volume was wiped, the read would fail. Per-thread persistent

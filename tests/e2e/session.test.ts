@@ -1,14 +1,14 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import type { CallModel, Message } from '../../src/model/gateway';
+import type { CallModel, Message } from '../../src/tenant/model/gateway';
 import {
   type Agent,
   cleanupTempDataDir,
   deleteThread,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitFor,
@@ -60,7 +60,7 @@ const gatedCallModel: CallModel = async (messages, opts) => {
 beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startAgent(gatedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(gatedCallModel), startTester()]);
 }, 120_000);
 
 afterAll(async () => {

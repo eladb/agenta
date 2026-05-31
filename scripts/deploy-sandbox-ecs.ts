@@ -156,6 +156,4 @@ if (TAG !== 'latest') {
 }
 
 console.log(`\n✓ sandbox image pushed to ${IMAGE}`);
-console.log(
-  `  Bot will pull this image on the next per-thread RunTask. No service to roll.`,
-);
+console.log(`  Bot will pull this image on the next per-thread RunTask. No service to roll.`);
