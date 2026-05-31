@@ -2,8 +2,8 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
+import type { CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -12,8 +12,8 @@ import {
   mention,
   requireEnv,
   STUB_REPLY_PREFIX,
-  setupTempDataDir,
   safeShutdown,
+  setupTempDataDir,
   startAgent,
   startTester,
   type Tester,

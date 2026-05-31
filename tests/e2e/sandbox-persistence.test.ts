@@ -2,20 +2,20 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
-import { containerName } from '../../src/sandbox';
-import { ensureImage } from '../../src/sandbox/docker';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
+import { containerName } from '../../src/tenant/sandbox';
+import { ensureImage } from '../../src/tenant/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
-  deleteThread,
   DOCKER_PROVIDER_ACTIVE,
+  deleteThread,
   getDataDir,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
+  setupTempDataDir,
   startAgent,
   startTester,
   type Tester,
@@ -146,11 +146,11 @@ test.if(HAS_DOCKER)(
     // refuse because the file still names THIS pid.
     await agent.socket.disconnect();
     agent.lock.release();
-    const { _resetImageReadyCache } = await import('../../src/sandbox/docker');
+    const { _resetImageReadyCache } = await import('../../src/tenant/sandbox/docker');
     _resetImageReadyCache();
     // _resetSyncedAttachments also resets the sandbox/index per-thread cache
     // that's keyed independently of provider state.
-    const { _resetSyncedAttachments } = await import('../../src/sandbox');
+    const { _resetSyncedAttachments } = await import('../../src/tenant/sandbox');
     _resetSyncedAttachments();
 
     // Start agent B with the same data dir.

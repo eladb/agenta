@@ -1,13 +1,13 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import type { CallModel, Message } from '../../src/model/gateway';
+import type { CallModel, Message } from '../../src/tenant/model/gateway';
 import {
   type Agent,
   cleanupTempDataDir,
   deleteThread,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
+  setupTempDataDir,
   startAgent,
   startTester,
   type Tester,

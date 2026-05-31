@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
-import { ensureImage } from '../../src/sandbox/docker';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
+import { ensureImage } from '../../src/tenant/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -11,8 +11,8 @@ import {
   deleteThread,
   getDataDir,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
+  setupTempDataDir,
   startAgent,
   startTester,
   type Tester,

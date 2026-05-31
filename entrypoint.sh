@@ -14,7 +14,7 @@
 #      `GIT_SSH_COMMAND` with the pinned `git-hooks/known_hosts` bundle.
 #   3. Set committer identity on each mirror so the post-receive hook can
 #      push back to origin without surprises.
-#   4. exec the bot — `bun src/index.ts`.
+#   4. exec the bot — `bun src/tenant/index.ts`.
 #
 # Required env (set as Fly secrets):
 #   GITHUB_TOKEN          — fine-grained PAT with read+write to whichever
@@ -216,4 +216,4 @@ done < <(
   ' "$HOMES_CONFIG"
 )
 
-exec bun src/index.ts
+exec bun src/tenant/index.ts

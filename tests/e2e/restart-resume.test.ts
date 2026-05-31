@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { appendFileSync } from 'node:fs';
-import { newEventId, nowIso } from '../../src/persistence/events';
-import { messagesPath } from '../../src/persistence/store';
-import { recoverInterruptedSessions } from '../../src/runtime/recovery';
-import { readSession, writeSession } from '../../src/runtime/session-store';
-import { threadKey as makeThreadKey } from '../../src/runtime/thread';
+import { newEventId, nowIso } from '../../src/tenant/persistence/events';
+import { messagesPath } from '../../src/tenant/persistence/store';
+import { recoverInterruptedSessions } from '../../src/tenant/runtime/recovery';
+import { readSession, writeSession } from '../../src/tenant/runtime/session-store';
+import { threadKey as makeThreadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,

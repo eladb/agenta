@@ -1,15 +1,15 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { _resetAsks, getPendingAskByThread } from '../../src/runtime/asks';
-import { threadKey } from '../../src/runtime/thread';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { _resetAsks, getPendingAskByThread } from '../../src/tenant/runtime/asks';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
   deleteThread,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
+  setupTempDataDir,
   startAgent,
   startTester,
   type Tester,

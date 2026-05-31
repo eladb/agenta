@@ -16,8 +16,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -27,8 +27,8 @@ import {
   mention,
   requireEnv,
   STUB_REPLY_PREFIX,
-  setupTempDataDir,
   safeShutdown,
+  setupTempDataDir,
   startAgent,
   startTester,
   type Tester,

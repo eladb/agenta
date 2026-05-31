@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -11,8 +11,8 @@ import {
   getDataDir,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
+  setupTempDataDir,
   startAgent,
   startTester,
   type Tester,

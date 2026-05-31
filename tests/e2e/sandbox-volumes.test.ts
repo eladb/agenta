@@ -1,18 +1,18 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
-import { containerName } from '../../src/sandbox';
-import { ensureImage, volumeName } from '../../src/sandbox/docker';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
+import { containerName } from '../../src/tenant/sandbox';
+import { ensureImage, volumeName } from '../../src/tenant/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
-  deleteThread,
   DOCKER_PROVIDER_ACTIVE,
+  deleteThread,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
+  setupTempDataDir,
   startAgent,
   startTester,
   type Tester,

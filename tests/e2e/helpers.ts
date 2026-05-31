@@ -4,16 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocketModeClient } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
-import { teardownSession } from '../../src/git/bootstrap';
-import { acquire, type Lock } from '../../src/lockfile';
-import { type CallModel, createCallModel, type Message } from '../../src/model/gateway';
-import { withGolden } from '../../src/model/golden';
-import { makeEventHandler } from '../../src/runtime/handler';
-import { _resetCacheForTests as _resetHomesCache } from '../../src/runtime/home-config';
-import { threadKey as makeThreadKey } from '../../src/runtime/thread';
-import { removeContainer } from '../../src/sandbox';
-import { connect } from '../../src/slack/connect';
-import { listen } from '../../src/slack/events';
+import { teardownSession } from '../../src/tenant/git/bootstrap';
+import { acquire, type Lock } from '../../src/shared/lockfile';
+import { type CallModel, createCallModel, type Message } from '../../src/tenant/model/gateway';
+import { withGolden } from '../../src/tenant/model/golden';
+import { makeEventHandler } from '../../src/tenant/runtime/handler';
+import { _resetCacheForTests as _resetHomesCache } from '../../src/tenant/runtime/home-config';
+import { threadKey as makeThreadKey } from '../../src/tenant/runtime/thread';
+import { removeContainer } from '../../src/tenant/sandbox';
+import { connect } from '../../src/tenant/slack/connect';
+import { listen } from '../../src/tenant/slack/events';
 
 // True iff `docker` is installed AND the sandbox layer is configured to
 // use it. Docker-specific assertions (egress block via iptables,

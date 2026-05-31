@@ -1,19 +1,19 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { dataRoot, messagesPath } from '../../src/persistence/store';
-import { threadKey } from '../../src/runtime/thread';
-import { ensureImage } from '../../src/sandbox/docker';
+import { dataRoot, messagesPath } from '../../src/tenant/persistence/store';
+import { threadKey } from '../../src/tenant/runtime/thread';
+import { ensureImage } from '../../src/tenant/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
   createGoldenCallModel,
-  deleteThread,
   DOCKER_PROVIDER_ACTIVE,
+  deleteThread,
   mention,
   requireEnv,
-  setupTempDataDirFromFixture,
   safeShutdown,
+  setupTempDataDirFromFixture,
   startAgent,
   startTester,
   type Tester,
