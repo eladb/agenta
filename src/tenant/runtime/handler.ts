@@ -1,6 +1,7 @@
 import type { WebClient } from '@slack/web-api';
-import { refFor, teardownSession } from '../git/bootstrap';
 import { log } from '../../shared/log';
+import type { HomeSpec } from '../../shared/types';
+import { refFor, teardownSession } from '../git/bootstrap';
 import { type CallModel, createCallModel } from '../model/gateway';
 import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attachments';
 import { backfillIfNew } from '../persistence/backfill';
@@ -18,9 +19,6 @@ import {
   type DisplayConfig,
   type HomeConfig,
   type ModelTriplet,
-  resolveDisplay,
-  resolveHome,
-  resolveModel,
   resolveTransport,
 } from './home-config';
 import { refreshHomeMirror } from './home-refresh';
@@ -28,15 +26,28 @@ import { signalStop, startOrQueue } from './session';
 import { readSession, setDisplay, setGit, setHome, setModel } from './session-store';
 import { threadKey } from './thread';
 
-// `fallbackModel` is the env-derived triplet (MODEL_NAME / MODEL_BASE_URL /
-// MODEL_API_KEY) — used when neither the channel's nor the default home's
-// `model` block is present. Existing single-model deploys carry this fallback
-// only; per-channel overrides are additive (#128).
+// The bot dispatches each event with the resolved home (#253). The tenant
+// no longer reads `config/homes.json`; `home` arrives in the envelope and is
+// frozen per-thread on first mention, same as before.
+export type EnvelopeContext = {
+  home: HomeSpec;
+  // Env-derived triplet (MODEL_NAME / MODEL_BASE_URL / MODEL_API_KEY).
+  // Required for production; tests pass a stub that's never invoked because
+  // they also pass `callModelOverride`. Frozen per-thread on first mention.
+  fallbackModel: ModelTriplet | undefined;
+  // Optional UX style override (defaults to 'verbose'). Until a per-deploy
+  // env knob exists this is left undefined; the legacy default is preserved.
+  display?: DisplayConfig;
+};
+
+// `web` + `botToken` (the request-scoped xoxb) come from the envelope. The
+// tenant builds a fresh WebClient per /events POST so a rotation in the bot's
+// installation store takes effect on the next event without a tenant restart.
 export function makeEventHandler(
   web: WebClient,
   botToken: string,
   botUserId: string,
-  fallbackModel: ModelTriplet | undefined,
+  ctx: EnvelopeContext,
   // Test seam: e2e + unit tests inject a stubbed callModel directly so the
   // triplet→fetch path is bypassed. Production never passes this; the handler
   // builds the real callModel from the per-thread frozen triplet.
@@ -44,7 +55,7 @@ export function makeEventHandler(
 ): (e: IncomingEvent) => Promise<void> {
   return async (e) => {
     if (e.kind === 'message') {
-      return handleMessage(web, botToken, botUserId, fallbackModel, callModelOverride, e);
+      return handleMessage(web, botToken, botUserId, ctx, callModelOverride, e);
     }
     if (e.kind === 'edit') return handleEdit(e);
     if (e.kind === 'delete') return handleDelete(e);
@@ -55,7 +66,7 @@ async function handleMessage(
   web: WebClient,
   botToken: string,
   botUserId: string,
-  fallbackModel: ModelTriplet | undefined,
+  ctx: EnvelopeContext,
   callModelOverride: CallModel | undefined,
   e: NormalMessage,
 ): Promise<void> {
@@ -136,7 +147,7 @@ async function handleMessage(
     return;
   }
 
-  await kickoffTurn(web, tk, e.channel, e.threadTs, e.user, fallbackModel, callModelOverride);
+  await kickoffTurn(web, tk, e.channel, e.threadTs, e.user, ctx, callModelOverride);
 }
 
 // Shared seam: handler.handleMessage uses this after recording a mention;
@@ -151,22 +162,16 @@ export async function kickoffTurn(
   channel: string,
   threadTs: string,
   userId: string,
-  fallbackModel: ModelTriplet | undefined,
+  ctx: EnvelopeContext,
   callModelOverride: CallModel | undefined,
 ): Promise<void> {
-  // Per-thread frozen system prompt + per-channel home: composed on the
-  // first mention and persisted into session.json so every subsequent turn
-  // in this thread sees the same prompt + home even if README.md / skills /
-  // config/homes.json change in the meantime. `clearSession` writes idle
-  // (preserving these) so the file is there across turns; only `/delete`
-  // removes it.
-  const { prompt, model, display } = await resolveSystemPromptAndModel(
-    web,
-    tk,
-    channel,
-    userId,
-    fallbackModel,
-  );
+  // Per-thread frozen system prompt + home (from the envelope): composed on
+  // the first mention and persisted into session.json so every subsequent
+  // turn in this thread sees the same prompt + home even if README.md /
+  // skills / the bot's tenants.json change in the meantime. `clearSession`
+  // writes idle (preserving these) so the file is there across turns; only
+  // `/delete` removes it.
+  const { prompt, model, display } = await resolveSystemPromptAndModel(web, tk, userId, ctx);
   // Build the per-thread callModel from the frozen triplet (env-name only —
   // the secret value is read at every call inside createCallModel). Tests
   // pass `callModelOverride` to bypass this and inject a stub.
@@ -207,35 +212,34 @@ export async function kickoffTurn(
 async function resolveSystemPromptAndModel(
   web: WebClient,
   tk: string,
-  channelId: string,
   userId: string,
-  fallbackModel: ModelTriplet | undefined,
+  ctx: EnvelopeContext,
 ): Promise<{ prompt: string; model: ModelTriplet; display: DisplayConfig }> {
   const existing = await readSession(tk);
 
   // Home / model / display stay frozen per thread — mid-thread swaps would
-  // be surprising. Backfill any missing field from current config (handles
-  // sessions written before each field was added; same shape as the
-  // historical migrations).
+  // be surprising. Backfill any missing field from the current envelope/env
+  // (handles sessions written before each field was added; same shape as the
+  // historical migrations). For new threads, the envelope's home wins; for
+  // existing ones, the snapshot frozen at first mention is preserved.
   let home = existing?.home;
   if (home === undefined) {
-    home = resolveHome(channelId);
+    home = { ...ctx.home };
     await setHome(tk, home);
   }
   let model = existing?.model;
   if (model === undefined) {
-    const resolved = resolveModel(channelId, fallbackModel);
-    if (!resolved) {
+    if (!ctx.fallbackModel) {
       throw new Error(
-        `[${tk}] cannot resolve model: no per-channel/default in homes.json and no env fallback (set MODEL_API_KEY + MODEL_BASE_URL + MODEL_NAME, or add a model block to homes.json)`,
+        `[${tk}] cannot resolve model: no env fallback (set MODEL_API_KEY + MODEL_BASE_URL + MODEL_NAME)`,
       );
     }
-    model = resolved;
+    model = { ...ctx.fallbackModel };
     await setModel(tk, model);
   }
   let display = existing?.display;
   if (display === undefined) {
-    display = resolveDisplay(channelId);
+    display = ctx.display ? { ...ctx.display } : { style: 'verbose' };
     await setDisplay(tk, display);
   }
 
@@ -283,12 +287,7 @@ async function resolveCreator(
     const u = info.user;
     // Prefer real_name; fall back to display_name; last resort the user id
     // so we always have *something* non-empty.
-    const name =
-      u.real_name ??
-      u.profile?.display_name ??
-      u.profile?.real_name ??
-      u.name ??
-      userId;
+    const name = u.real_name ?? u.profile?.display_name ?? u.profile?.real_name ?? u.name ?? userId;
     // Email may be hidden (guest accounts, missing scope, etc.). Synthesize
     // a stable non-routable address so each Slack user still maps to a
     // unique git author.

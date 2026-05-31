@@ -100,9 +100,14 @@ function assistantMsg(tk: string, text: string) {
 }
 
 describe('recoverInterruptedSessions', () => {
+  // Under the bot↔tenant split (#253), `home` must be frozen in session.json
+  // for recovery to retry — there's no homes.json to fall back to. The
+  // production handler writes it on first mention; tests seed it directly.
+  const FROZEN_HOME = { remote: `file://${tmpdir()}/test-home` };
+
   test('running session auto-retries (no restart notice posted)', async () => {
     const tk = threadKey('C123', '1700000000.000100');
-    await writeSession(tk, { status: 'running', updated_at: 't' });
+    await writeSession(tk, { status: 'running', updated_at: 't', home: FROZEN_HOME });
     await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> do something`));
 
     const { web, posts } = makeWebStub();
@@ -173,7 +178,7 @@ describe('recoverInterruptedSessions', () => {
 
   test('running + no JSONL still retries (buildMessages handles empty JSONL)', async () => {
     const tk = threadKey('C77', '1700000077.000102');
-    await writeSession(tk, { status: 'running', updated_at: 't' });
+    await writeSession(tk, { status: 'running', updated_at: 't', home: FROZEN_HOME });
 
     const { web } = makeWebStub();
     let kickedOff = 0;
@@ -191,11 +196,46 @@ describe('recoverInterruptedSessions', () => {
     expect(kickedOff).toBeGreaterThanOrEqual(1);
   });
 
+  test('called without deps silently clears running sessions (no retry)', async () => {
+    const tk = threadKey('C8', '1700000088.000101');
+    await writeSession(tk, { status: 'running', updated_at: 't', home: FROZEN_HOME });
+    await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> hi`));
+    // No Slack deps → silent clear path (the production tenant boot calls
+    // recovery this way under #253; the request-scoped xoxb isn't available
+    // until /events arrives).
+    await recoverInterruptedSessions();
+    expect((await readSession(tk))?.status).toBe('idle');
+  });
+
+  test('running session with no frozen home is cleared (no retry possible)', async () => {
+    const tk = threadKey('C7', '1700000077.000201');
+    // Legacy session.json shape (pre-#253) — no `home` field. Recovery has
+    // nowhere to clone from for this turn, so it just clears.
+    await writeSession(tk, { status: 'running', updated_at: 't' });
+    await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> hi`));
+    const { web, posts } = makeWebStub();
+    let kickedOff = 0;
+    const callModelOverride = mock(async () => {
+      kickedOff++;
+      return { content: 'ok', tool_calls: undefined };
+    });
+    await recoverInterruptedSessions({
+      web,
+      botUserId: BOT_USER,
+      fallbackModel: { name: 'm', base_url: 'http://x', api_key_env: 'NOPE' },
+      // biome-ignore lint/suspicious/noExplicitAny: stub
+      callModelOverride: callModelOverride as any,
+    });
+    expect(kickedOff).toBe(0);
+    expect(posts).toEqual([]);
+    expect((await readSession(tk))?.status).toBe('idle');
+  });
+
   test('kickoffTurn failure does not abort recovery of other threads', async () => {
     const tk1 = threadKey('C1', '1700000000.000100');
     const tk2 = threadKey('C2', '1700000001.000200');
-    await writeSession(tk1, { status: 'running', updated_at: 't' });
-    await writeSession(tk2, { status: 'running', updated_at: 't' });
+    await writeSession(tk1, { status: 'running', updated_at: 't', home: FROZEN_HOME });
+    await writeSession(tk2, { status: 'running', updated_at: 't', home: FROZEN_HOME });
     await appendEv(tk1, slackMsg(tk1, 'U1', `<@${BOT_USER}> hi`));
     await appendEv(tk2, slackMsg(tk2, 'U2', `<@${BOT_USER}> hi`));
 

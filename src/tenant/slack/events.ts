@@ -1,5 +1,3 @@
-import type { SocketModeClient } from '@slack/socket-mode';
-import { log } from '../../shared/log';
 import type { SlackFile } from '../persistence/attachments';
 
 export type NormalMessage = {
@@ -36,7 +34,7 @@ export type DeleteMessage = {
 
 export type IncomingEvent = NormalMessage | EditMessage | DeleteMessage;
 
-type RawEvent = {
+export type RawEvent = {
   type?: string;
   subtype?: string;
   channel: string;
@@ -51,29 +49,12 @@ type RawEvent = {
   deleted_ts?: string;
 };
 
-type SocketArgs = {
-  event: RawEvent;
-  body?: { event_id?: string };
-  ack: () => Promise<void>;
-};
-
-export function listen(
-  socket: SocketModeClient,
-  botUserId: string,
-  onEvent: (e: IncomingEvent) => Promise<void>,
-): void {
-  socket.on('message', async (args: SocketArgs) => {
-    await args.ack();
-    try {
-      const ev = normalize(args.event, args.body?.event_id, botUserId);
-      if (ev) await onEvent(ev);
-    } catch (err) {
-      log.error('events', 'handler threw', err);
-    }
-  });
-}
-
-function normalize(
+// Normalize a raw Slack message event into an IncomingEvent the handler can
+// consume. Exposed for the HTTP entrypoint (`src/tenant/http.ts`), which
+// receives raw payloads in the `EventEnvelope` body instead of via Socket
+// Mode. Returns `null` for events the bot should silently drop (own messages,
+// no-op edits, non-thread channel chatter, etc).
+export function normalize(
   event: RawEvent,
   eventId: string | undefined,
   botUserId: string,

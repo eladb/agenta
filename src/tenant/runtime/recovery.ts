@@ -3,12 +3,23 @@ import { log } from '../../shared/log';
 import type { CallModel } from '../model/gateway';
 import type { AgentaEvent } from '../persistence/events';
 import { readEvents } from '../persistence/store';
-import { postInThread } from '../slack/post';
 import { kickoffTurn } from './handler';
 import type { ModelTriplet } from './home-config';
 import { clearSession, listSessions } from './session-store';
 import { decodeThreadKey } from './thread';
 
+// Optional Slack-side dependencies for recovery (#253).
+//
+// In the legacy single-process design (Socket Mode at boot), recovery had a
+// live WebClient + botUserId and could auto-retry the interrupted turn:
+// re-run `kickoffTurn` so the user got their answer without seeing a
+// restart notice. Under the bot↔tenant split there's no WebClient at boot —
+// the xoxb is request-scoped and only arrives with `/events`. So `deps` is
+// optional: when present (legacy / tests) recovery retries; when absent
+// (HTTP-driven tenant boot) recovery just clears running/stopping → idle,
+// silently. The frozen home in `session.json` lets us still resolve the
+// model + prompt for a future retry path; for this phase the silent clear
+// is the only behavior.
 export type RecoveryDeps = {
   web: WebClient;
   botUserId: string;
@@ -21,16 +32,21 @@ export type RecoveryDeps = {
 };
 
 // On boot, find any thread whose session.json says it was 'running' or
-// 'stopping' when the previous process died. Auto-retry the interrupted
-// turn transparently: the JSONL has the full conversation so buildMessages
-// reconstructs the same context the model was processing when it got
-// killed. The user sees a brief gap then gets their answer — no
-// "agent restarted" notice cluttering the thread.
+// 'stopping' when the previous process died.
 //
-// 'stopping' sessions are NOT retried (the user explicitly issued /stop;
+//   - With Slack deps (legacy / test seam): auto-retry the interrupted turn
+//     transparently. The JSONL has the full conversation so buildMessages
+//     reconstructs the same context the model was processing when it got
+//     killed. The user sees a brief gap then gets their answer — no
+//     "agent restarted" notice cluttering the thread.
+//   - Without Slack deps (HTTP-driven boot, #253): silently clear all
+//     running/stopping sessions back to idle. The user's interrupted turn
+//     freezes mid-message until their next mention; the spec accepts that
+//     trade explicitly.
+//
+// 'stopping' sessions are NEVER retried (the user explicitly issued /stop;
 // retrying would violate that intent). They're just cleared silently.
-export async function recoverInterruptedSessions(deps: RecoveryDeps): Promise<void> {
-  const { web, botUserId, fallbackModel, callModelOverride } = deps;
+export async function recoverInterruptedSessions(deps?: RecoveryDeps): Promise<void> {
   const interrupted = (await listSessions()).filter(
     ({ state }) => state.status === 'running' || state.status === 'stopping',
   );
@@ -52,24 +68,43 @@ export async function recoverInterruptedSessions(deps: RecoveryDeps): Promise<vo
       continue;
     }
 
-    // 'running' = turn was actively in flight. Find the user who triggered
-    // it (needed for kickoffTurn's creator resolution). Fall back to the
-    // bot's own id if we can't determine the originator — the turn will
-    // still fire, just with a generic git identity.
-    const originator = await findLastMentionUser(threadKey, botUserId);
+    // 'running' = turn was actively in flight. Without Slack deps we can't
+    // resume — the spec's accepted trade is a frozen partial message until
+    // the next mention. Just clear so the next mention starts fresh.
+    if (!deps) {
+      await clearSession(threadKey);
+      log.info('recovery', `[${threadKey}] was running; cleared (no Slack deps for retry)`);
+      continue;
+    }
+
+    // Recovery with Slack deps falls back to the home frozen in session.json.
+    // Without that we have nowhere to clone from on this turn — clear and
+    // let the next mention re-resolve from the envelope.
+    const frozenHome = state.home;
+    if (!frozenHome) {
+      await clearSession(threadKey);
+      log.warn('recovery', `[${threadKey}] no frozen home; cleared without retry`);
+      continue;
+    }
+
+    // Find the user who triggered the in-flight turn (needed for
+    // kickoffTurn's creator resolution). Fall back to the bot's own id if we
+    // can't determine the originator — the turn will still fire, just with a
+    // generic git identity.
+    const originator = await findLastMentionUser(threadKey, deps.botUserId);
 
     // Reset to idle BEFORE kicking off so startOrQueue's idempotent
     // running-flip writes against a clean state.
     await clearSession(threadKey);
     try {
       await kickoffTurn(
-        web,
+        deps.web,
         threadKey,
         decoded.channel,
         decoded.threadTs,
         originator,
-        fallbackModel,
-        callModelOverride,
+        { home: frozenHome, fallbackModel: deps.fallbackModel },
+        deps.callModelOverride,
       );
       log.info('recovery', `[${threadKey}] auto-retried interrupted turn`);
     } catch (err) {
