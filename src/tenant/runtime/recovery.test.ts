@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -32,35 +32,6 @@ afterEach(() => {
   delete process.env.AGENT_HOME_DIR;
 });
 
-function makeWebStub(): {
-  // biome-ignore lint/suspicious/noExplicitAny: stub mimics WebClient surface used by recovery
-  web: any;
-  posts: Array<{ channel: string; thread_ts?: string; text: string }>;
-} {
-  const posts: Array<{ channel: string; thread_ts?: string; text: string }> = [];
-  const web = {
-    chat: {
-      postMessage: mock(async (args: { channel: string; thread_ts?: string; text: string }) => {
-        posts.push(args);
-        return { ok: true, ts: `t${posts.length}` };
-      }),
-      update: mock(async () => ({ ok: true })),
-      delete: mock(async () => ({ ok: true })),
-    },
-    users: {
-      info: mock(async () => ({
-        ok: true,
-        user: { real_name: 'Test', profile: { email: 'test@example.com' } },
-      })),
-    },
-    reactions: {
-      add: mock(async () => ({ ok: true })),
-      remove: mock(async () => ({ ok: true })),
-    },
-  };
-  return { web, posts };
-}
-
 // biome-ignore lint/suspicious/noExplicitAny: test event shape
 async function appendEv(tk: string, ev: any): Promise<void> {
   ensureThreadDir(tk);
@@ -79,173 +50,64 @@ function slackMsg(tk: string, user: string, text: string) {
   };
 }
 
-function assistantMsg(tk: string, text: string) {
-  return {
-    event_id: newEventId(),
-    thread_key: tk,
-    source: 'assistant' as const,
-    type: 'message' as const,
-    ts: nowIso(),
-    ingested_at: nowIso(),
-    payload: { slack_ts: '1.0', text },
-  };
-}
-
 describe('recoverInterruptedSessions', () => {
-  // Under the bot↔tenant split (#253), `home` must be frozen in session.json
-  // for recovery to retry — there's no homes.json to fall back to. The
-  // production handler writes it on first mention; tests seed it directly.
+  // Under #253 the bot↔tenant split means recovery has no WebClient at
+  // boot (xoxb is request-scoped). Spec trade: drop the boot-time Slack
+  // notice AND the auto-retry. Recovery just reconciles state —
+  // running/stopping → idle — and the user's next mention starts fresh.
   const FROZEN_HOME = { remote: `file://${tmpdir()}/test-home` };
 
-  test('running session auto-retries (no restart notice posted)', async () => {
+  test('running session is silently cleared to idle (no retry, no notice)', async () => {
     const tk = threadKey('C123', '1700000000.000100');
     await writeSession(tk, { status: 'running', updated_at: 't', home: FROZEN_HOME });
     await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> do something`));
 
-    const { web, posts } = makeWebStub();
-    let kickedOff = 0;
-    const callModelOverride = mock(async () => {
-      kickedOff++;
-      return { content: 'ok', tool_calls: undefined };
-    });
-    await recoverInterruptedSessions({
-      web,
-      botUserId: BOT_USER,
-      fallbackModel: { name: 'm', base_url: 'http://x', api_key_env: 'NOPE' },
-      // biome-ignore lint/suspicious/noExplicitAny: stub
-      callModelOverride: callModelOverride as any,
-    });
+    await recoverInterruptedSessions();
 
-    expect(kickedOff).toBeGreaterThanOrEqual(1);
-    // No "agent restarted" notice — just the model's reply
-    expect(posts.every((p) => !p.text.includes('restarted'))).toBe(true);
+    expect((await readSession(tk))?.status).toBe('idle');
   });
 
-  test('stopping session is cleared silently without retry', async () => {
+  test('stopping session is cleared silently', async () => {
     const tk = threadKey('C456', '1700000001.000200');
     await writeSession(tk, { status: 'stopping', updated_at: 't' });
     await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> hi`));
 
-    const { web, posts } = makeWebStub();
-    let kickedOff = 0;
-    const callModelOverride = mock(async () => {
-      kickedOff++;
-      return { content: 'ok', tool_calls: undefined };
-    });
-    await recoverInterruptedSessions({
-      web,
-      botUserId: BOT_USER,
-      fallbackModel: undefined,
-      // biome-ignore lint/suspicious/noExplicitAny: stub
-      callModelOverride: callModelOverride as any,
-    });
+    await recoverInterruptedSessions();
 
-    expect(kickedOff).toBe(0);
-    expect(posts.every((p) => !p.text.includes('restarted'))).toBe(true);
     expect((await readSession(tk))?.status).toBe('idle');
   });
 
   test('no-op when there are no interrupted sessions', async () => {
-    const { web, posts } = makeWebStub();
-    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
-    expect(posts).toEqual([]);
+    await recoverInterruptedSessions();
+    // Nothing to assert beyond "doesn't throw" — listSessions is empty so
+    // there's no state to inspect.
   });
 
-  test('idle entries do not trigger recovery', async () => {
+  test('idle entries are left alone', async () => {
     const tk = threadKey('C9', '1700000099.000100');
     await writeSession(tk, { status: 'idle', updated_at: 't' });
-    const { web, posts } = makeWebStub();
-    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
-    expect(posts).toEqual([]);
-    expect((await readSession(tk))?.status).toBe('idle');
-  });
-
-  test('flips entries with undecodable threadKey to idle without posting', async () => {
-    await writeSession('no-separator', { status: 'running', updated_at: 't' });
-    const { web, posts } = makeWebStub();
-    await recoverInterruptedSessions({ web, botUserId: BOT_USER, fallbackModel: undefined });
-    expect(posts).toEqual([]);
-    expect((await readSession('no-separator'))?.status).toBe('idle');
-  });
-
-  test('running + no JSONL still retries (buildMessages handles empty JSONL)', async () => {
-    const tk = threadKey('C77', '1700000077.000102');
-    await writeSession(tk, { status: 'running', updated_at: 't', home: FROZEN_HOME });
-
-    const { web } = makeWebStub();
-    let kickedOff = 0;
-    const callModelOverride = mock(async () => {
-      kickedOff++;
-      return { content: 'ok', tool_calls: undefined };
-    });
-    await recoverInterruptedSessions({
-      web,
-      botUserId: BOT_USER,
-      fallbackModel: { name: 'm', base_url: 'http://x', api_key_env: 'NOPE' },
-      // biome-ignore lint/suspicious/noExplicitAny: stub
-      callModelOverride: callModelOverride as any,
-    });
-    expect(kickedOff).toBeGreaterThanOrEqual(1);
-  });
-
-  test('called without deps silently clears running sessions (no retry)', async () => {
-    const tk = threadKey('C8', '1700000088.000101');
-    await writeSession(tk, { status: 'running', updated_at: 't', home: FROZEN_HOME });
-    await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> hi`));
-    // No Slack deps → silent clear path (the production tenant boot calls
-    // recovery this way under #253; the request-scoped xoxb isn't available
-    // until /events arrives).
     await recoverInterruptedSessions();
     expect((await readSession(tk))?.status).toBe('idle');
   });
 
-  test('running session with no frozen home is cleared (no retry possible)', async () => {
-    const tk = threadKey('C7', '1700000077.000201');
-    // Legacy session.json shape (pre-#253) — no `home` field. Recovery has
-    // nowhere to clone from for this turn, so it just clears.
-    await writeSession(tk, { status: 'running', updated_at: 't' });
-    await appendEv(tk, slackMsg(tk, 'U1', `<@${BOT_USER}> hi`));
-    const { web, posts } = makeWebStub();
-    let kickedOff = 0;
-    const callModelOverride = mock(async () => {
-      kickedOff++;
-      return { content: 'ok', tool_calls: undefined };
-    });
-    await recoverInterruptedSessions({
-      web,
-      botUserId: BOT_USER,
-      fallbackModel: { name: 'm', base_url: 'http://x', api_key_env: 'NOPE' },
-      // biome-ignore lint/suspicious/noExplicitAny: stub
-      callModelOverride: callModelOverride as any,
-    });
-    expect(kickedOff).toBe(0);
-    expect(posts).toEqual([]);
-    expect((await readSession(tk))?.status).toBe('idle');
+  test('clears entries with undecodable threadKey too', async () => {
+    // `clearSession` doesn't care about threadKey decodability — it just
+    // rewrites session.json in place. Recovery used to special-case this
+    // for the retry path; the silent variant treats it uniformly.
+    await writeSession('no-separator', { status: 'running', updated_at: 't' });
+    await recoverInterruptedSessions();
+    expect((await readSession('no-separator'))?.status).toBe('idle');
   });
 
-  test('kickoffTurn failure does not abort recovery of other threads', async () => {
+  test('clears multiple interrupted sessions independently', async () => {
     const tk1 = threadKey('C1', '1700000000.000100');
     const tk2 = threadKey('C2', '1700000001.000200');
     await writeSession(tk1, { status: 'running', updated_at: 't', home: FROZEN_HOME });
-    await writeSession(tk2, { status: 'running', updated_at: 't', home: FROZEN_HOME });
-    await appendEv(tk1, slackMsg(tk1, 'U1', `<@${BOT_USER}> hi`));
-    await appendEv(tk2, slackMsg(tk2, 'U2', `<@${BOT_USER}> hi`));
+    await writeSession(tk2, { status: 'stopping', updated_at: 't' });
 
-    let calls = 0;
-    const callModelOverride = mock(async () => {
-      calls++;
-      if (calls === 1) throw new Error('boom');
-      return { content: 'ok', tool_calls: undefined };
-    });
-    const { web } = makeWebStub();
-    await recoverInterruptedSessions({
-      web,
-      botUserId: BOT_USER,
-      fallbackModel: { name: 'm', base_url: 'http://x', api_key_env: 'NOPE' },
-      // biome-ignore lint/suspicious/noExplicitAny: stub
-      callModelOverride: callModelOverride as any,
-    });
-    expect(calls).toBe(2);
+    await recoverInterruptedSessions();
+
     expect((await readSession(tk1))?.status).toBe('idle');
+    expect((await readSession(tk2))?.status).toBe('idle');
   });
 });

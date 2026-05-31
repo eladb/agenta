@@ -71,9 +71,9 @@ const readyRef = { value: false };
 
 // Recovery first — we want any 'running'/'stopping' marker cleared before
 // the first envelope arrives, so a new mention in an interrupted thread
-// can start fresh instead of queueing behind a phantom turn. No Slack deps
-// at boot (the spec accepts the "frozen partial message until next mention"
-// trade); the next phase formalizes the silent variant.
+// can start fresh instead of queueing behind a phantom turn. Silent: no
+// WebClient at boot under #253, so we just reconcile state — the spec
+// accepts the "frozen partial message until next mention" trade.
 try {
   await recoverInterruptedSessions();
 } catch (err) {
