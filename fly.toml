@@ -1,12 +1,18 @@
-# Fly app config for the agenta bot itself.
+# Fly app config for the agenta-bot Fly app.
+#
+# Under #253 this app keeps the legacy name but the single image now runs
+# in one of two roles selected by the entrypoint arg ("bot" or "tenant"),
+# default "tenant" — see Dockerfile's CMD. This file does NOT pin a role,
+# so today's deploy still runs as a tenant (with /data, sessions, sandboxes)
+# exactly as before. The Fly-side cut to a separate ingress bot app is a
+# follow-up operator step, not part of this PR.
 #
 # Single long-lived machine in iad with one persistent volume mounted at
-# /data. The bot is Slack-Socket-Mode + outbound HTTPS only — there is no
-# [http_service] / [[services]] section because nothing inbound hits this
-# machine.
+# /data. The tenant role is HTTP-only ingress (bot calls /events on
+# HEALTH_PORT); outbound HTTPS to the model gateway and Fly Machines API.
 #
 # The sandbox app (agenta-sandbox) is a SEPARATE Fly app and is configured
-# from sandbox/fly.toml; the bot creates per-thread machines there on
+# from sandbox/fly.toml; the tenant creates per-thread machines there on
 # demand via the Machines API.
 #
 # Provision via:  bun scripts/deploy-bot-fly.ts
@@ -19,9 +25,9 @@ primary_region = "iad"
 
 [env]
   AGENTA_DATA_DIR = "/data/agenta"
-  # Per-channel home config (#87) lives at config/homes.json in the image;
-  # entrypoint.sh clones each https:// entry into AGENT_HOMES_ROOT/<slug>
-  # on boot. file:// entries are used in-place (host path == working tree).
+  # Mirror root for per-thread home clones the tenant performs lazily on
+  # first mention (under #253 home arrives in the envelope; no boot-time
+  # prefetch). file:// homes never touch this dir.
   AGENT_HOMES_ROOT = "/data/homes"
   SANDBOX_PROVIDER = "fly"
   # Note: FLY_APP_NAME would be overridden by Fly's auto-injection of the
