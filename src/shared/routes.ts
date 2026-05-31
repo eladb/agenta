@@ -79,7 +79,10 @@ function validateWorkspaceRoutes(
     }
     out.channels = channels;
   }
-  if (out.default === undefined && (out.channels === undefined || Object.keys(out.channels).length === 0)) {
+  if (
+    out.default === undefined &&
+    (out.channels === undefined || Object.keys(out.channels).length === 0)
+  ) {
     throw new Error(
       `[routes.${teamId}] must declare "default" or at least one channel in "channels"`,
     );
