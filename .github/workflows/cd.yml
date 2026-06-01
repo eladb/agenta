@@ -75,10 +75,14 @@ jobs:
     timeout-minutes: 60
     # AWS creds for the ECS lane (steps 4-5). Region is a plain env, not a
     # secret. Harmless to the Fly steps — they don't read AWS.
+    # eu-central-1: the salto/ECS deployment moved here with the AWS-account
+    # migration (new account 954242454057). Note the Bedrock model region
+    # stays us-east-1 (MODEL_BASE_URL=bedrock://us-east-1) — independent of
+    # where the ECS task runs.
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION: us-east-1
+      AWS_REGION: eu-central-1
     steps:
       - uses: actions/checkout@v4
         with:
