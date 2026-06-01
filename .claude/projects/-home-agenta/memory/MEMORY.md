@@ -14,3 +14,6 @@
 - [keep-install-sh-current](keep-install-sh-current.md) — when a change adds a tool/package dep, update install.sh in the same change (Elad: install.sh is the box-provisioning source of truth).
 - [nanabot-cloudflare-access](nanabot-cloudflare-access.md) — Published pages on this box live at bensadeh.nanabot.me/<agent>/ and the whole nanabot.me domain is behind Cloudflare Access — not open-internet.
 - [nanabox-runtime-conventions](nanabox-runtime-conventions.md) — Mobile-composer attachments arrive as `[attached]`-marked paths under `~/.attachments/`; `~/.nana/config.json` holds per-agent knobs (rtl, tool_display, gh_dispatch_conclusions, icons).
+- [slack-manifest-update-recovers-app-state](slack-manifest-update-recovers-app-state.md) — First diagnostic on "bot WS-connects but no events flow" is `bun scripts/update-manifest.ts <name>` — re-asserts Socket Mode toggle + event subs that drift server-side.
+- [canary-must-pin-target-user-id](canary-must-pin-target-user-id.md) — Pin `CANARY_TARGET_USER_ID` per canary step; auth.test fallback on a shared `SLACK_BOT_TOKEN` silently routes every canary to one bot (PR #260).
+- [watchdog-pause-when-creds-broken](watchdog-pause-when-creds-broken.md) — When canary-monitor.sh can't reach a target because OUR creds are bad (not the target being down), pause that check instead of letting it page every 30 min.

@@ -28,8 +28,8 @@ Phase history, gotchas, and backlog live as GitHub issues — query directly, th
 
 ## Production runtime
 
-- **Bot on Fly** as `agenta-bot` (one shared-cpu-1x in `iad`, 1 GB volume `agenta_data` at `/data`). Deploy by pushing to `main` → `.github/workflows/cd.yml` runs e2e (against the `agenta-ci` app so prod Socket Mode is untouched) → deploy → canary, fail-stopping at each step. No inbound surface (Slack = outbound WS, model + Fly API = outbound HTTPS).
-- **Also runs as `salto` on ECS** — the same image is deployed by the same CD run to AWS ECS (acct `271443695230`, `us-east-1`, cluster+service `agenta-bot`, `SANDBOX_PROVIDER=ecs`, Fargate sandboxes in cluster `agenta-sandbox`) as a *different* Slack app (`A0B5VLX7QUT`, bot `salto`/`U0B65LMHRLL`). Different app ⇒ separate event streams ⇒ **no split-brain** with the Fly `agenta` bot. ECS on-disk state + exec → the `debug-thread` skill.
+- **Bot on Fly** as `agenta-bot` (one shared-cpu-1x in `iad`, 1 GB volume `agenta_data` at `/data`). Runs the **combo** entrypoint role — bot + tenant co-located in one machine, the bot's `tenants.json` rendered at boot from env (see `Combo entrypoint (single-tenant deployment)` below). Deploy by pushing to `main` → `.github/workflows/cd.yml` runs e2e (against the `agenta-ci` app so prod Socket Mode is untouched) → deploy → canary, fail-stopping at each step. No inbound surface (Slack = outbound WS, model + Fly API = outbound HTTPS).
+- **Also runs as `salto` on ECS** — same image, combo entrypoint, deployed by the same CD run to AWS ECS (cluster+service `agenta-bot`, `SANDBOX_PROVIDER=ecs`, Fargate sandboxes in cluster `agenta-sandbox`) as a *different* Slack app (`A0B5VLX7QUT`, bot `salto`/`U0B65LMHRLL`). Different app ⇒ separate event streams ⇒ **no split-brain** with the Fly `agenta` bot. ECS on-disk state + exec → the `debug-thread` skill. **Currently down** — the salto-staging IAM keys (acct `271443695230`) were rotated out 2026-05-31; salto recovery + the ECS combo deploy are pending an AWS-account migration. The salto/ECS check is paused in `~/.local/bin/canary-monitor.sh` until the new account's creds land in envstore + GH `secrets.AWS_*`.
 - **Canary watchdog** (host-local, not CD). `install.sh` installs a `*/30` cron on the claude-agents host running `~/.local/bin/canary-monitor.sh` → the double canary (agenta/Fly + salto/ECS); on a confirmed red it Slack-alerts `C0B307LP274` and `agents send`s the agenta agent (oncall) to investigate + bounded-remediate (restart only — redeploy/scale/destroy/secret changes escalate). Reusable recipe = the `/canary` skill.
 - **Per-deployment tenants config** (`config/tenants.json`, #253). Lives on the bot side and merges the route table (workspace + channel → `{ tenant, home }`) with the home spec — one channel-keyed file replaces the old separate routing + `homes.json`. Transport inferred from the home `remote` URL scheme: `file://` = tunneled no-mirror; `https://` = tunneled + mirror clone at `<AGENT_HOMES_ROOT>/<slug>` (PAT in `auth_env`); `ssh://`/`git@` = direct (#88 — sandbox clones/pushes straight to GitHub via deploy-key PEM in `auth_env`; tenant keeps a read-only mirror for prompt-source). Home spec arrives in each `/events` envelope; the tenant clones lazily on first use (no boot-time prefetch). Snapshot frozen into session.json on first mention (config edits affect new threads only). Default → `https://github.com/eladb/agenta-test-home`. First direct channel `C0B4MU6GCFQ` → `git@github.com:eladb/agenta-test-home-alone.git`, key in Fly secret `AGENTA_TEST_HOME_ALONE_DEPLOY_KEY`.
 - **Health check** `/health` on `HEALTH_PORT` (8080, `fly.toml` polls every 30s). Bot: 200 iff Socket Mode connected, else 503 (process+socket only — silent-deaf (#27) undetected). Tenant: 200 iff the HTTP server is up and post-recovery `readyRef` has latched true, else 503 (during boot recovery the bot's drain loop treats non-200 as "skip" so Slack will redeliver).
@@ -64,6 +64,25 @@ A **deployment** is `{ bot, N tenants, sandboxes }` all on one cloud. Two deploy
 ```
 
 Routing is most-specific-wins: `routes[team].channels[channel]` beats `routes[team].default`; missing workspace = drop + log + metric. `auth_env` is always an env-var NAME, never a value — the bot resolves `tenants[name].auth_env` against its own env (bearer to call the tenant), and forwards `home.auth_env` verbatim to the tenant (the tenant resolves it against its own env to get the git PAT or SSH key PEM). Secrets stay on whichever side owns them. Adding a tenant / binding a channel = PR to `tenants.json` + bot restart.
+
+### Combo entrypoint (single-tenant deployment)
+
+For the two single-tenant deployments today (agenta-Fly + salto-ECS), bot + tenant run **co-located** in the same container via the `combo` entrypoint role. The split in #253 was correct, but standing up a separate ingress bot app per cloud is operator work that hadn't happened yet; combo collapses both roles into one machine until the cutover, mirroring the dev pattern (`bun run start:bot` + `bun run start:tenant` on one box pointing at loopback).
+
+`/entrypoint.sh combo` renders `/tmp/tenants.json` at boot from env (`WORKSPACE_ID`, `DEFAULT_HOME_REMOTE`, optional `DEFAULT_HOME_AUTH_ENV` + `CHANNEL_HOMES_JSON`), starts the tenant in the background on `TENANT_INTERNAL_PORT` (default 8081), waits for its `/health`, then runs the bot in the foreground on `HEALTH_PORT` (8080) with `TENANTS_JSON_PATH=/tmp/tenants.json`. Fly's `[[checks]]` and ECS's container health check both hit the bot's `/health`. The bot's loopback tenants.json declares `auth_env: TENANT_SECRET`; both processes read that env var, so the bearer matches by construction.
+
+- Fly: `fly.toml` has `[processes] app = "combo"` — the string is passed as argv[1] to the Dockerfile ENTRYPOINT (`/entrypoint.sh combo`).
+- ECS: set the container's `command: ["combo"]` in the task def alongside the new env + `TENANT_SECRET` secret.
+
+Combo-specific env (Fly secrets / ECS task-def env, on top of the per-role required set):
+- `TENANT_SECRET` (required) — random secret both processes read; auth_env for the loopback tenant.
+- `WORKSPACE_ID` (required) — Slack team_id the workspace-default route is keyed under.
+- `DEFAULT_HOME_REMOTE` (required) — default home repo URL.
+- `DEFAULT_HOME_AUTH_ENV` (optional) — env-var NAME for the default home's PAT / SSH key. Omit for public + `file://` homes.
+- `CHANNEL_HOMES_JSON` (optional) — raw JSON for per-channel overrides (`routes[WORKSPACE_ID].channels`), e.g. `{"C0B4MU6GCFQ":{"tenant":"default","home":{"remote":"git@...","auth_env":"..."}}}`.
+- `TENANT_INTERNAL_PORT` (optional, default 8081) — loopback port for the in-container tenant.
+
+When the bot↔tenant cutover happens (separate ingress app per cloud), drop `combo` from the deployment's process command and run `bot` + `tenant` as two apps; the same env vars + secrets fan out per side.
 
 ## Repo layout
 
