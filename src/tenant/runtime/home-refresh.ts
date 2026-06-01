@@ -6,19 +6,26 @@
 //
 // Behavior by transport (see `resolveTransport` in `home-config.ts`):
 //   - `tunneled-file` (file://): no-op. The local path IS the working tree.
-//   - `tunneled-mirror` (https://): fetch + reset --hard origin/main using a
-//     token-spliced clone URL (matching `entrypoint.sh`'s shape).
-//   - `direct` (ssh:// / git@): fetch + reset --hard origin/HEAD using a
-//     short-lived 0600 PEM tempfile + the pinned known_hosts bundle.
+//   - `tunneled-mirror` (https://): clone (first use) or fetch + reset --hard
+//     using a token-spliced clone URL (matching `entrypoint.sh`'s shape).
+//   - `direct` (ssh:// / git@): clone (first use) or fetch + reset --hard
+//     using a short-lived 0600 PEM tempfile + the pinned known_hosts bundle.
+//
+// The INITIAL clone matters because nothing else seeds the mirror on a fresh
+// volume: under #253 entrypoint.sh stopped prefetching the home, leaving the
+// "lazy clone on first use" it promised to here (#262). The mirror is both
+// the prompt source AND, for tunneled transports, the repo the per-session
+// git server serves to the sandbox — so a missing mirror means no README/
+// skills and a failing in-sandbox clone, not just a stale prompt.
 //
 // All failures are non-fatal — we log a warning and let the prompt build
 // fall through to whatever is on disk. Never block the thread on a refresh.
 //
-// See `gh issue view 120` for the design.
+// See `gh issue view 120` (refresh) and `262` (initial clone) for the design.
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { log } from '../../shared/log';
 import { KNOWN_HOSTS_PATH } from '../git/bootstrap';
 import { type HomeConfig, resolveTransport } from './home-config';
@@ -52,9 +59,9 @@ const defaultRunner: Runner = async (cmd, env) => {
   return { code, stdout, stderr };
 };
 
-// Refresh the host-side mirror for `home` so a fresh prompt build reads
-// the latest README.md + skills/. Resolves on success or after a swallowed
-// warning; never throws.
+// Refresh (or, on first use, clone) the host-side mirror for `home` so a
+// fresh prompt build reads the latest README.md + skills/. Resolves on
+// success or after a swallowed warning; never throws.
 //
 // `runner` is injectable for tests so unit tests don't actually shell out.
 export async function refreshHomeMirror(
@@ -75,49 +82,69 @@ export async function refreshHomeMirror(
   // file:// — local path is the working tree, nothing to fetch.
   if (resolved.transport === 'tunneled-file') return;
 
-  // Both other transports need an existing mirror to refresh. If the
-  // directory doesn't exist yet (e.g. local dev that hasn't seeded the
-  // mirror, or a fresh deploy where entrypoint.sh hasn't run), skip with
-  // a warning — the prompt build will fall through to whatever's on disk
-  // (likely nothing, but that's the existing behavior).
-  if (!existsSync(join(resolved.mirrorPath, '.git'))) {
-    log.warn('home-refresh', `mirror at ${resolved.mirrorPath} has no .git; skipping refresh`);
-    return;
-  }
+  // First use vs. subsequent: a fresh volume has no mirror yet (entrypoint.sh
+  // stopped prefetching under #253), so clone it here; later mentions
+  // fetch+reset. A fresh clone lands on the default branch (already current),
+  // so the clone paths return without an extra refresh. (#262)
+  const hasMirror = existsSync(join(resolved.mirrorPath, '.git'));
 
   if (resolved.transport === 'tunneled-mirror') {
-    await refreshHttpsMirror(home, resolved.mirrorPath, runner);
+    if (hasMirror) await refreshHttpsMirror(home, resolved.mirrorPath, runner);
+    else await cloneHttpsMirror(home, resolved.mirrorPath, runner);
     return;
   }
   if (resolved.transport === 'direct') {
-    await refreshDirectMirror(home, resolved.mirrorPath, runner);
+    if (hasMirror) await refreshDirectMirror(home, resolved.mirrorPath, runner);
+    else await cloneDirectMirror(home, resolved.mirrorPath, runner);
     return;
   }
 }
 
-async function refreshHttpsMirror(home: HomeConfig, mirror: string, runner: Runner): Promise<void> {
+// Resolve the token-spliced https URL for clone/fetch, or null (with a
+// warning) when auth_env is missing/unset or the remote can't be parsed.
+function httpsAuthedUrl(home: HomeConfig, mirror: string): string | null {
   if (!home.auth_env) {
     log.warn('home-refresh', `[${mirror}] auth_env missing for https mirror; skipping`);
-    return;
+    return null;
   }
   const token = process.env[home.auth_env];
   if (!token || token.length === 0) {
-    log.warn('home-refresh', `[${mirror}] auth_env ${home.auth_env} not set; skipping refresh`);
-    return;
+    log.warn('home-refresh', `[${mirror}] auth_env ${home.auth_env} not set; skipping`);
+    return null;
   }
-  let cloneUrl: string;
   try {
-    cloneUrl = spliceToken(home.remote, token);
+    return spliceToken(home.remote, token);
   } catch (err) {
     log.warn(
       'home-refresh',
       `[${mirror}] failed to splice token into ${home.remote}: ${(err as Error).message}`,
     );
-    return;
+    return null;
   }
+}
+
+// First-use clone of an https mirror. `git clone` sets origin to the
+// token-spliced URL on disk — same as entrypoint.sh used to — which the
+// refresh path's anonymous `fetch <url>` then sidesteps anyway.
+async function cloneHttpsMirror(home: HomeConfig, mirror: string, runner: Runner): Promise<void> {
+  const cloneUrl = httpsAuthedUrl(home, mirror);
+  if (!cloneUrl) return;
+  mkdirSync(dirname(mirror), { recursive: true });
+  const cloned = await runner(['git', 'clone', cloneUrl, mirror, '--quiet']);
+  if (cloned.code !== 0) {
+    log.warn(
+      'home-refresh',
+      `[${mirror}] git clone failed (code ${cloned.code}): ${cloned.stderr.trim()}`,
+    );
+  }
+}
+
+async function refreshHttpsMirror(home: HomeConfig, mirror: string, runner: Runner): Promise<void> {
+  const cloneUrl = httpsAuthedUrl(home, mirror);
+  if (!cloneUrl) return;
   // `fetch <url>` (anonymous remote name) avoids re-writing `origin`'s URL
-  // on disk — entrypoint.sh already set origin to a token-spliced URL; we
-  // only need this one fetch to succeed.
+  // on disk — the initial clone / entrypoint.sh already set origin to a
+  // token-spliced URL; we only need this one fetch to succeed.
   const fetched = await runner(['git', '-C', mirror, 'fetch', cloneUrl, 'main', '--quiet']);
   if (fetched.code !== 0) {
     log.warn(
@@ -135,33 +162,66 @@ async function refreshHttpsMirror(home: HomeConfig, mirror: string, runner: Runn
   }
 }
 
+// Stage the PEM into a private 0600 tempfile under an 0700 tempdir and build
+// the GIT_SSH_COMMAND env (pinned known_hosts, strict host-key checking).
+// Returns null (with a warning) when auth_env is missing/unset. The CALLER
+// MUST `rmSync(dir, { recursive: true, force: true })` in a finally so key
+// material never leaks on disk.
+function stageSshEnv(
+  home: HomeConfig,
+  mirror: string,
+): { env: Record<string, string>; dir: string } | null {
+  if (!home.auth_env) {
+    log.warn('home-refresh', `[${mirror}] auth_env missing for direct mirror; skipping`);
+    return null;
+  }
+  const pem = process.env[home.auth_env];
+  if (!pem || pem.length === 0) {
+    log.warn('home-refresh', `[${mirror}] auth_env ${home.auth_env} not set; skipping`);
+    return null;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'agenta-home-refresh-'));
+  const keyFile = join(dir, 'id');
+  // Trailing newline mirrors entrypoint.sh; ssh tolerates either, but some
+  // OpenSSH versions warn without it.
+  writeFileSync(keyFile, pem.endsWith('\n') ? pem : `${pem}\n`, { mode: 0o600 });
+  const env = {
+    GIT_SSH_COMMAND: `ssh -i ${keyFile} -o IdentitiesOnly=yes -o UserKnownHostsFile=${KNOWN_HOSTS_PATH} -o StrictHostKeyChecking=yes`,
+  };
+  return { env, dir };
+}
+
+// First-use clone of a direct (ssh/git@) mirror over the staged key.
+async function cloneDirectMirror(home: HomeConfig, mirror: string, runner: Runner): Promise<void> {
+  const staged = stageSshEnv(home, mirror);
+  if (!staged) return;
+  try {
+    mkdirSync(dirname(mirror), { recursive: true });
+    const cloned = await runner(['git', 'clone', home.remote, mirror, '--quiet'], staged.env);
+    if (cloned.code !== 0) {
+      log.warn(
+        'home-refresh',
+        `[${mirror}] git clone failed (code ${cloned.code}): ${cloned.stderr.trim()}`,
+      );
+    }
+  } finally {
+    try {
+      rmSync(staged.dir, { recursive: true, force: true });
+    } catch (err) {
+      log.warn('home-refresh', `failed to clean up tmp key dir ${staged.dir}: ${(err as Error).message}`);
+    }
+  }
+}
+
 async function refreshDirectMirror(
   home: HomeConfig,
   mirror: string,
   runner: Runner,
 ): Promise<void> {
-  if (!home.auth_env) {
-    log.warn('home-refresh', `[${mirror}] auth_env missing for direct mirror; skipping`);
-    return;
-  }
-  const pem = process.env[home.auth_env];
-  if (!pem || pem.length === 0) {
-    log.warn('home-refresh', `[${mirror}] auth_env ${home.auth_env} not set; skipping refresh`);
-    return;
-  }
-  // Stage the PEM into a private 0600 tempfile under an 0700 tempdir.
-  // mkdtempSync gives us 0700 on the parent already; the key file is
-  // chmod'd to 0600 via writeFileSync's mode. Cleanup runs in finally
-  // regardless of success/failure to avoid leaking key material on disk.
-  const dir = mkdtempSync(join(tmpdir(), 'agenta-home-refresh-'));
-  const keyFile = join(dir, 'id');
+  const staged = stageSshEnv(home, mirror);
+  if (!staged) return;
   try {
-    // Trailing newline mirrors entrypoint.sh; ssh tolerates either, but
-    // some OpenSSH versions warn without it.
-    writeFileSync(keyFile, pem.endsWith('\n') ? pem : `${pem}\n`, { mode: 0o600 });
-    const gitSshCmd = `ssh -i ${keyFile} -o IdentitiesOnly=yes -o UserKnownHostsFile=${KNOWN_HOSTS_PATH} -o StrictHostKeyChecking=yes`;
-    const env = { GIT_SSH_COMMAND: gitSshCmd };
-    const fetched = await runner(['git', '-C', mirror, 'fetch', '--quiet'], env);
+    const fetched = await runner(['git', '-C', mirror, 'fetch', '--quiet'], staged.env);
     if (fetched.code !== 0) {
       log.warn(
         'home-refresh',
@@ -178,9 +238,9 @@ async function refreshDirectMirror(
     }
   } finally {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(staged.dir, { recursive: true, force: true });
     } catch (err) {
-      log.warn('home-refresh', `failed to clean up tmp key dir ${dir}: ${(err as Error).message}`);
+      log.warn('home-refresh', `failed to clean up tmp key dir ${staged.dir}: ${(err as Error).message}`);
     }
   }
 }
