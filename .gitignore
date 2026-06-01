@@ -13,6 +13,24 @@ data/
 .fly/
 .local/
 .canary-monitor.lock
+
+# $HOME dotfiles + secrets that land in-tree because repo root == agent $HOME.
+# None of these are repo content; keep them out so `git add -A` can't leak them.
+.ssh/
+.envstore
+.config/
+.npm/
+.cache/
+.docker/
+.claude.json
+.nana/
+.agents/
+.agent-browser/
+.bashrc
+.bash_logout
+.profile
+.cloud-locale-test.skip
+
 # Public status page runtime artifact — rewritten every 30 min by the canary
 # watchdog. Caddy serves it from the working tree; we don't churn the git tree.
 apps/status/public/status.json
