@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Agenta pre-receive hook.
+#
+# Lives at <agenta_repo>/git-hooks/pre-receive (NOT inside the customer repo's
+# .git/hooks/). Wired in per-invocation by agenta-git-shell which sets
+# core.hooksPath=<this dir> via GIT_CONFIG_*. Keeping it here means we never
+# write into the customer repo's hook tree — that tree is the user's
+# property — and the policy is versioned alongside the bot.
+#
+# Policy: each line of stdin is "<old_sha> <new_sha> <ref_name>".
+#   - Reject if ref_name != $AGENTA_ALLOWED_REF.
+#   - If old_sha is all zeros: ref is being created — accept.
+#   - Otherwise: require old_sha to be an ancestor of new_sha (fast-forward only).
+
+set -euo pipefail
+
+if [ -z "${AGENTA_ALLOWED_REF:-}" ]; then
+  echo "pre-receive: AGENTA_ALLOWED_REF env var not set; refusing" >&2
+  exit 1
+fi
+
+zero='0000000000000000000000000000000000000000'
+
+while read -r old_sha new_sha ref_name; do
+  if [ "$ref_name" != "$AGENTA_ALLOWED_REF" ]; then
+    echo "pre-receive: ref '$ref_name' is not allowed (only '$AGENTA_ALLOWED_REF')" >&2
+    exit 1
+  fi
+  if [ "$old_sha" = "$zero" ]; then
+    # Initial creation by the sandbox on first push — accept.
+    continue
+  fi
+  if ! git merge-base --is-ancestor "$old_sha" "$new_sha"; then
+    echo "pre-receive: non-fast-forward update to '$ref_name' rejected" >&2
+    exit 1
+  fi
+done
+
+exit 0

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Agenta post-receive hook.
+#
+# Lives at <agenta_repo>/git-hooks/post-receive and is wired in per-request
+# by src/git/git-server.ts via core.hooksPath, alongside pre-receive. Runs
+# AFTER pre-receive has accepted the push and the ref has been updated in
+# the bot's local working tree.
+#
+# Purpose: keep the GitHub origin in sync. Each session push lands as a new
+# `refs/heads/agenta/sessions/<thread_key>` ref locally; we propagate it to
+# origin so the volume isn't the only place those refs live.
+#
+# Best-effort + non-blocking. A failed push (no token, no network, GitHub
+# down, ref deleted upstream, etc.) is logged to stderr but does NOT fail
+# the receive — the session already succeeded on the local copy.
+#
+# stdin is "<old_sha> <new_sha> <ref_name>" per line.
+
+set -u
+
+# Skip cleanly when there's no `origin` configured (e.g. a local-only
+# agent home on a dev laptop). Sessions still work fine; we just have
+# nowhere to push to.
+if ! git remote get-url origin >/dev/null 2>&1; then
+  exit 0
+fi
+
+refs=()
+while read -r _old _new ref; do
+  refs+=("$ref")
+done
+
+# Detached push. Stdin closed so git won't try to read more from the
+# receive-pack pipe; stderr kept so failures are visible in the bot logs.
+{
+  for ref in "${refs[@]}"; do
+    if ! git push origin "$ref" 2>&1; then
+      echo "post-receive: push to origin failed for $ref" >&2
+    fi
+  done
+} </dev/null >&2 &
+
+exit 0

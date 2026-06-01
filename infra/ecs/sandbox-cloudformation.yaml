@@ -1,0 +1,349 @@
+AWSTemplateFormatVersion: '2010-09-09'
+# CloudFormation caps Description at 1024 chars (rendered, not YAML
+# source). Keep edits below that ceiling.
+Description: >-
+  agenta SANDBOX plane on ECS Fargate (phase 2, agenta #213, refactored
+  in #218). Sibling to cloudformation.yaml -- the bot stack is one
+  deploy, the sandbox stack is another, paired by VPC + bot-SG.
+  Resources: dedicated sandbox ECS cluster (used as the
+  `agenta_bot_instance` scope), ECR repo for the sandbox image, shared
+  EFS filesystem with one mount target per subnet. The task definition
+  mounts the EFS ROOT at /efs in the sandbox container; per-thread
+  isolation is a subdirectory under /efs, injected at RunTask time as
+  the SANDBOX_WORKSPACE_DIR env var via containerOverrides. No per-task
+  EFS access points -- the #213 design (per-thread access-point
+  override via --volume-configurations) wasn't buildable since
+  --volume-configurations is EBS-only. NO service resource: per-thread
+  tasks are RunTask'd on demand. IAM execution role: ECR pull + CWL
+  write. IAM task role: EFS ClientMount/Write/RootAccess on this fs.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: agenta-sandbox
+    Description: >
+      ECS cluster name. Doubles as the `agenta_bot_instance` tag value
+      that the provider uses to scope listAll()/killAll() -- one cluster
+      per bot instance is the convention from agenta #210.
+
+  EcrRepositoryName:
+    Type: String
+    Default: agenta-sandbox
+    Description: ECR repository name that holds the sandbox image.
+
+  LogGroupName:
+    Type: String
+    Default: /ecs/agenta-sandbox
+    Description: CloudWatch Logs group for sandbox tasks.
+
+  TaskFamily:
+    Type: String
+    Default: agenta-sandbox
+    Description: >
+      ECS task-definition family name. RunTask references the family
+      and gets the latest ACTIVE revision; per-thread customizations
+      land via containerOverrides / volumeConfigurations.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: >
+      VPC the sandbox cluster runs in. MUST be the same VPC as the bot
+      stack so the bot can dial sandbox task private IPs directly.
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      Subnets sandbox tasks run in. Tasks get NO public IP (private IP
+      only). For outbound HTTPS (git clone, package install, model
+      gateway egress from inside the sandbox) the subnets need either
+      a NAT Gateway or a VPC endpoint route. Public subnets also work
+      via assignPublicIp=ENABLED -- not the default here; flip in the
+      provider if you take that route.
+
+  BotSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >
+      Security group attached to the bot's Fargate task (TaskSecurityGroup
+      output from the BOT stack). Sandbox SG opens port 9000 ingress
+      from this SG only -- no public surface.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: >
+      ECR image tag the task definition pins. Override per-deploy via
+      `aws cloudformation deploy --parameter-overrides ImageTag=<sha>`.
+
+  TaskCpu:
+    Type: String
+    Default: '1024'
+    Description: >
+      Fargate vCPU units (1024 = 1 vCPU). Sandbox workloads (bash,
+      python, builds) are heavier than the bot itself; 1 vCPU matches
+      the Fly default.
+    AllowedValues: ['256', '512', '1024', '2048', '4096']
+
+  TaskMemory:
+    Type: String
+    Default: '2048'
+    Description: Fargate memory in MB (2048 = 2 GB).
+    AllowedValues: ['512', '1024', '2048', '3072', '4096', '5120', '6144', '7168', '8192']
+
+  SandboxEgress:
+    Type: String
+    Default: allow
+    Description: >
+      Passed as SANDBOX_EGRESS into the sandbox container. `allow` (default)
+      lets the in-container shell egress to anywhere the subnets route;
+      `block` installs an iptables OUTPUT block at sandbox boot
+      (loopback + RFC1918 + link-local only). See sandbox/entrypoint.sh.
+    AllowedValues: [allow, block]
+
+Resources:
+  # -- ECR --------------------------------------------------------------
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref EcrRepositoryName
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  # -- Logs -------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: 14
+
+  # -- EFS shared filesystem --------------------------------------------
+  # One EFS for the entire sandbox plane. Per-thread isolation is a
+  # subdirectory under /efs (mounted as the EFS root in the task
+  # definition below). The bot picks the per-thread path at RunTask
+  # time and passes it to the sandbox as SANDBOX_WORKSPACE_DIR. The
+  # sandbox entrypoint mkdir+chowns the dir before exec'ing the server.
+  # The shared sandbox user (uid 1000) owns every workspace; multi-tenant
+  # uid isolation isn't a requirement (#218 spec).
+  EfsFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-workspaces'
+        - Key: agenta_bot_instance
+          Value: !Ref ClusterName
+
+  EfsMountTarget0:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Select [0, !Ref SubnetIds]
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  # -- Security groups --------------------------------------------------
+  # Sandbox task SG. Ingress: port 9000 from the bot SG ONLY. Egress:
+  # all (clones, pip installs, model gateway calls, EFS NFS, ECR pulls).
+  SandboxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: agenta sandbox tasks -- port 9000 from bot SG only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: All egress (git, pip, model gateway, EFS, ECR, CWL)
+
+  SandboxIngressFromBot:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SandboxSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      SourceSecurityGroupId: !Ref BotSecurityGroupId
+      Description: Sandbox HTTP API + /tunnel WS from bot SG
+
+  # EFS SG: NFS (2049) from the sandbox SG only.
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: agenta sandbox EFS -- NFS from sandbox SG only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: All egress (NFS replies)
+
+  EfsIngressFromSandbox:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EfsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref SandboxSecurityGroup
+      Description: NFS from sandbox task SG
+
+  # -- IAM --------------------------------------------------------------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # Task role: EFS ClientMount/Write/RootAccess on the shared filesystem.
+  # Drops the access-point condition the #213 template carried -- since
+  # #218 there are no per-task access points, so scoping ClientMount to
+  # access-point ARNs would deny every mount. The whole filesystem is
+  # the sandbox plane; cross-thread isolation is the workspace
+  # subdirectory the bot picks per task. ClientRootAccess is required
+  # because the entrypoint runs as root briefly to mkdir+chown the
+  # per-thread workspace dir before dropping to the sandbox user.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EfsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !GetAtt EfsFileSystem.Arn
+
+  # -- Cluster + task definition ----------------------------------------
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  # Pre-registered task definition family. The provider calls RunTask
+  # against this family + overrides per-thread env (SANDBOX_TOKEN,
+  # SANDBOX_WORKSPACE_DIR) via containerOverrides at task launch time.
+  #
+  # The volume mounts the EFS ROOT at /efs in the sandbox container
+  # (no access point, no IAM auth -- both required per-task config that
+  # AWS won't let us override). The per-thread isolation is the
+  # SANDBOX_WORKSPACE_DIR env var the bot passes in, e.g. /efs/<slug>.
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - EfsMountTarget0
+    Properties:
+      Family: !Ref TaskFamily
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: workspace
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EfsFileSystem
+            TransitEncryption: ENABLED
+            # No AuthorizationConfig: IAM auth requires an access point,
+            # and we deliberately don't use one (#218). The task role's
+            # ClientMount/Write/RootAccess on the filesystem is what
+            # grants access.
+      ContainerDefinitions:
+        - Name: sandbox
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}'
+          Essential: true
+          # The sandbox server listens on port 9000 (sandbox/server/server.ts);
+          # the SG-level ingress rule is what actually permits the bot to dial.
+          PortMappings:
+            - ContainerPort: 9000
+              Protocol: tcp
+          # Mirrors sandbox/Dockerfile HEALTHCHECK so ECS surfaces
+          # task health to the bot's poll loop.
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -fsS http://localhost:9000/health || exit 1
+            Interval: 30
+            Timeout: 5
+            StartPeriod: 30
+            Retries: 3
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: sandbox
+          MountPoints:
+            # Mount the EFS filesystem ROOT at /efs. The bot picks the
+            # per-thread workspace subdirectory (e.g. /efs/<slug>) at
+            # RunTask time and passes it as SANDBOX_WORKSPACE_DIR.
+            - SourceVolume: workspace
+              ContainerPath: /efs
+              ReadOnly: false
+          # SANDBOX_TOKEN + SANDBOX_WORKSPACE_DIR are injected per-thread
+          # via overrides.containerOverrides at RunTask time.
+          # SANDBOX_EGRESS is the only template-level env.
+          Environment:
+            - Name: SANDBOX_EGRESS
+              Value: !Ref SandboxEgress
+
+Outputs:
+  ClusterArn:
+    Description: ECS sandbox cluster ARN
+    Value: !GetAtt Cluster.Arn
+
+  ClusterName:
+    Description: ECS sandbox cluster name (= AGENTA_ECS_SANDBOX_CLUSTER)
+    Value: !Ref Cluster
+
+  EcrRepositoryUri:
+    Description: ECR repo URI for `docker push`
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}'
+
+  EfsFileSystemId:
+    Description: >
+      EFS filesystem id backing sandbox workspaces. After #218 the bot
+      provider no longer reads this -- the task definition hard-codes
+      the filesystem in its `volumes:` block. Kept as a stack output
+      for operator visibility (e.g. when you want to `aws efs
+      describe-file-systems` against it).
+    Value: !Ref EfsFileSystem
+
+  SandboxSecurityGroupId:
+    Description: Sandbox task SG id (= AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS)
+    Value: !Ref SandboxSecurityGroup
+
+  TaskDefinitionArn:
+    Description: Current task definition ARN
+    Value: !Ref TaskDefinition
+
+  TaskFamily:
+    Description: Task family name the provider RunTasks against (= AGENTA_ECS_SANDBOX_TASK_FAMILY)
+    Value: !Ref TaskFamily
+
+  LogGroupName:
+    Description: CloudWatch log group for sandbox tasks
+    Value: !Ref LogGroup

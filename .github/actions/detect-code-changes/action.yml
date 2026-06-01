@@ -1,0 +1,111 @@
+name: Detect code changes
+description: >
+  Sets `outputs.code=true` if any path outside the `.ci-ignore`
+  allowlist (at repo root) changed in this PR / push. Also sets
+  `outputs.e2e_relevant=true` if any changed path is outside BOTH
+  `.ci-ignore` AND `.ci-e2e-ignore` — i.e. e2e would actually be
+  exercising something that changed. Used by both `ci.yml` and
+  `cd.yml`: doc-only changes skip everything; prod-only changes
+  (e.g. config/tenants.json) skip e2e but still deploy + canary.
+
+outputs:
+  code:
+    description: '`true` when at least one non-`.ci-ignore` path changed; `false` otherwise.'
+    value: ${{ steps.detect.outputs.code }}
+  e2e_relevant:
+    description: '`true` when at least one path outside both `.ci-ignore` and `.ci-e2e-ignore` changed.'
+    value: ${{ steps.detect.outputs.e2e_relevant }}
+
+runs:
+  using: composite
+  steps:
+    # The calling workflow MUST `actions/checkout@v4 with fetch-depth: 0`
+    # before calling this composite — local composite actions can't load
+    # their own action.yml before the repo is checked out, and we need
+    # both sides of the diff resolvable.
+    - id: detect
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Build an OR'd alternation from a `.ci-ignore`-style file.
+        # Echoes the regex on stdout, or empty string if the file is
+        # missing / empty / comments-only.
+        build_skip_re() {
+          local f="$1"
+          [ -f "$f" ] || { echo ""; return; }
+          grep -vE '^([[:space:]]*#|[[:space:]]*$)' "$f" \
+            | tr '\n' '|' | sed 's/|$//'
+        }
+
+        doc_re=$(build_skip_re "${GITHUB_WORKSPACE}/.ci-ignore")
+        e2e_re=$(build_skip_re "${GITHUB_WORKSPACE}/.ci-e2e-ignore")
+
+        if [ -z "$doc_re" ]; then
+          echo "No .ci-ignore patterns — treating all changes as code + e2e-relevant." >&2
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Combined skip pattern (doc OR prod-only). Used to decide
+        # whether e2e is worth running.
+        if [ -n "$e2e_re" ]; then
+          combined_re="${doc_re}|${e2e_re}"
+        else
+          combined_re="$doc_re"
+        fi
+
+        # Resolve base/head depending on event type.
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+          base="$(jq -r '.pull_request.base.sha' < "$GITHUB_EVENT_PATH")"
+          head="$(jq -r '.pull_request.head.sha' < "$GITHUB_EVENT_PATH")"
+        elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+          base="$(jq -r '.before' < "$GITHUB_EVENT_PATH")"
+          head="$(jq -r '.after' < "$GITHUB_EVENT_PATH")"
+          # Initial pushes / force-pushes can leave base as the zero sha.
+          # Fall back to comparing against the parent commit.
+          if [ "$base" = "0000000000000000000000000000000000000000" ] || [ -z "$base" ]; then
+            base="$(git rev-parse "${head}^" 2>/dev/null || echo "")"
+          fi
+        else
+          echo "Unsupported event ${GITHUB_EVENT_NAME} — running tests to be safe." >&2
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ -z "$base" ] || [ -z "$head" ]; then
+          echo "Could not resolve base/head — running tests to be safe." >&2
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Comparing $base...$head"
+        files=$(git diff --name-only "$base" "$head" || true)
+        echo "Changed files:"
+        echo "${files:-(none)}" | sed 's/^/  /'
+
+        if [ -z "$files" ]; then
+          # No diff (e.g. empty merge commit) — nothing to test.
+          echo "code=false" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # `code` = any file outside the doc-only skip list.
+        if echo "$files" | grep -qvE "$doc_re"; then
+          echo "code=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "code=false" >> "$GITHUB_OUTPUT"
+          echo "e2e_relevant=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # `e2e_relevant` = any file outside BOTH skip lists.
+        if echo "$files" | grep -qvE "$combined_re"; then
+          echo "e2e_relevant=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "e2e_relevant=false" >> "$GITHUB_OUTPUT"
+        fi

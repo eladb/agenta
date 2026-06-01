@@ -1,0 +1,47 @@
+# Paths that DO NOT trigger CI / CD when they're the only thing changed
+# in a PR or push. Lives at the repo root by convention (mirrors
+# .gitignore / .dockerignore). Used by .github/actions/detect-code-changes/
+# — both .github/workflows/ci.yml and .github/workflows/cd.yml read it.
+#
+# Despite the name, syntax is NOT gitignore — it's egrep (POSIX extended
+# regex), one pattern per line, matched against the full path from the
+# repo root. Lines starting with `#` and blank lines are ignored. Kept
+# as regex because the workflow's bash already supports it with no deps.
+#
+# Add a pattern here when you want changes to those paths to skip the
+# unit-tests + e2e + deploy + canary pipeline (they'll still record a
+# green check so branch protection is satisfied).
+#
+# Be CONSERVATIVE — anything that affects runtime behavior must NOT be
+# in this list:
+#   slack-manifests/*.json — scope changes affect the running bot
+#   .github/workflows/*.yml — workflow changes need verification
+#   package.json / bun.lock — dep changes
+#   Dockerfile / entrypoint.sh — image changes
+# Those will still fall through to the full pipeline by virtue of NOT
+# matching anything here.
+
+# Markdown anywhere (CLAUDE.md, SPEC.md, README.md, SETUP.md, skill
+# SKILL.md files, doc additions in any subdir).
+\.md$
+
+# Top-level non-code files.
+^LICENSE$
+^\.gitignore$
+^\.env\.example$
+
+# Operator-only box-provisioning script; never runs in the prod image.
+^install\.sh$
+
+# Operator-only host watchdog (deployed by install.sh); not in the prod image.
+^scripts/canary-monitor\.sh$
+
+# Host-served web content (status page under ~/apps/, served by Caddy); never
+# in the prod bot image, so changes here skip e2e+deploy+canary.
+^apps/
+
+# Operator-only per-agent web app server: the systemd --user unit installed by
+# install.sh and the Python server it runs. Host-local only, never in the prod
+# bot image.
+^systemd/
+^webserver/

@@ -1,0 +1,48 @@
+node_modules
+.env
+.env.*
+!.env.example
+*.log
+data/
+.DS_Store
+.slack-apps.json
+
+# Tool installs + runtime artifacts from install.sh / the canary watchdog
+# (this repo's root == the agent's $HOME, so these land in-tree).
+.bun/
+.fly/
+.local/
+.canary-monitor.lock
+
+# $HOME dotfiles + secrets that land in-tree because repo root == agent $HOME.
+# None of these are repo content; keep them out so `git add -A` can't leak them.
+.ssh/
+.config/
+.npm/
+.cache/
+.docker/
+.claude.json
+.nana/
+.agents/
+.agent-browser/
+.bashrc
+.bash_logout
+.profile
+.cloud-locale-test.skip
+
+# Public status page runtime artifact — rewritten every 30 min by the canary
+# watchdog. Caddy serves it from the working tree; we don't churn the git tree.
+apps/status/public/status.json
+.claude/*
+!.claude/skills/
+.nightly-cycle-summary.md
+
+# Auto-memory: track .claude/projects/-home-<handle>/memory/ but nothing else
+!.claude/projects/
+.claude/projects/*
+!.claude/projects/-home-*/
+.claude/projects/-home-*/*
+!.claude/projects/-home-*/memory/
+!.claude/projects/-home-*/memory/**
+!.claude/icon.svg
+!.claude/icon.png

@@ -1,0 +1,29 @@
+# Keep the bot build context minimal. The Dockerfile only COPYs a handful
+# of paths explicitly, but `fly deploy` still tarballs the whole repo as
+# build context — anything reachable here makes the upload slower.
+
+.git
+.github
+.claude
+.env
+.env.local
+.slack-apps.json
+node_modules
+data
+dist
+build
+*.log
+.DS_Store
+
+# Sandbox image has its own Dockerfile; that whole tree is shipped via
+# scripts/deploy-sandbox-fly.ts, not from the bot's build context.
+sandbox
+
+# Test fixtures, e2e helpers, scripts — none of these are needed at runtime.
+tests
+scripts
+slack-manifests
+ISSUES.md
+SPEC.md
+SETUP.md
+biome.json

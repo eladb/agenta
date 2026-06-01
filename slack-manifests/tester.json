@@ -1,0 +1,36 @@
+{
+  "display_information": {
+    "name": "agenta-tester",
+    "description": "Test user bot for agenta e2e tests",
+    "background_color": "#3d3d3d"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "agenta-tester",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "channels:history",
+        "files:write",
+        "channels:manage",
+        "channels:write.invites"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": ["message.channels"]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

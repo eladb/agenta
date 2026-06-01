@@ -1,0 +1,601 @@
+AWSTemplateFormatVersion: '2010-09-09'
+# CloudFormation caps Description at 1024 chars (rendered, not YAML source).
+# Keep edits below that ceiling -- run `python3 -c "import yaml; ..."` on
+# the rendered string after major rewrites to verify.
+Description: >-
+  agenta combo (bot+tenant) ECS Fargate deployment (#208 + combo #253).
+  Single Fargate task running /entrypoint.sh combo; public subnet +
+  public IP, no NAT, no ALB; outbound HTTPS only (Slack WS, model gateway,
+  Bedrock, sandbox provisioning). EFS for /data so atomic rename works for
+  session.json + sandbox state. Singleton enforced via deployment config
+  (minHealthyPercent=0, maxPercent=100) so the bot's own lockfile
+  (src/lockfile.ts) never sees two processes racing. Secrets come from
+  SSM Parameter Store (SecureString) under /<SsmParameterPrefix>/<NAME>,
+  injected via the task definition's `secrets:` block (no env-file
+  shipping, no AWS Secrets Manager surcharge). Operator populates them
+  once with `aws ssm put-parameter` -- see infra/ecs/README.md. ECR repo
+  and CloudWatch log group are created here so the stack bootstraps
+  everything an empty AWS account needs. scripts/deploy-bot-ecs.ts
+  builds, pushes both <sha> and :latest tags, registers a new task-def
+  revision pinned to the SHA, and force-rolls the service.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: agenta-bot
+    Description: Name of the ECS cluster created for the bot.
+
+  ServiceName:
+    Type: String
+    Default: agenta-bot
+    Description: Name of the ECS service running the bot task.
+
+  EcrRepositoryName:
+    Type: String
+    Default: agenta-bot
+    Description: ECR repository name that holds the bot image.
+
+  LogGroupName:
+    Type: String
+    Default: /ecs/agenta-bot
+    Description: CloudWatch Logs group for the bot task.
+
+  SsmParameterPrefix:
+    Type: String
+    Default: /agenta-bot
+    Description: >
+      Path prefix (no trailing slash) under which the bot's secrets live in
+      SSM Parameter Store as SecureString parameters. e.g. with the default,
+      MODEL_API_KEY lives at /agenta-bot/MODEL_API_KEY.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC the Fargate task and EFS will run in.
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      One or more public subnets (with a route to an Internet Gateway).
+      Task gets a public IP for egress; there is no inbound surface.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: >
+      ECR image tag the task definition pins. Override per-deploy via
+      `aws cloudformation deploy --parameter-overrides ImageTag=<sha>` or
+      let scripts/deploy-bot-ecs.ts register a new revision out-of-band.
+
+  TaskCpu:
+    Type: String
+    Default: '256'
+    Description: Fargate vCPU units (256 = 0.25 vCPU).
+    AllowedValues: ['256', '512', '1024', '2048', '4096']
+
+  TaskMemory:
+    Type: String
+    Default: '1024'
+    Description: Fargate memory in MB (1024 = 1 GB; matches Fly).
+    AllowedValues: ['512', '1024', '2048', '3072', '4096', '5120', '6144', '7168', '8192']
+
+  AgentaSandboxApp:
+    Type: String
+    Default: agenta-sandbox
+    Description: >
+      Fly app name that hosts per-thread sandbox machines. The bot stays
+      on SANDBOX_PROVIDER=fly even when deployed on ECS - sandboxes still
+      live on Fly. Injected as AGENTA_SANDBOX_APP.
+
+  FlyRegion:
+    Type: String
+    Default: iad
+    Description: Fly region for per-thread sandbox machines/volumes (injected as FLY_REGION).
+
+  SandboxProvider:
+    Type: String
+    Default: fly
+    AllowedValues: ['fly', 'ecs']
+    Description: >
+      Picks where per-thread sandboxes live. 'fly' provisions Fly machines,
+      'ecs' provisions Fargate tasks in the ECS cluster below. Injected as
+      SANDBOX_PROVIDER.
+
+  EcsSandboxCluster:
+    Type: String
+    Default: ''
+    Description: >
+      ECS cluster for per-thread sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_CLUSTER.
+
+  EcsSandboxSubnetIds:
+    Type: String
+    Default: ''
+    Description: >
+      Comma-separated subnet IDs for sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_SUBNET_IDS.
+
+  EcsSandboxSecurityGroupIds:
+    Type: String
+    Default: ''
+    Description: >
+      Comma-separated security group IDs for sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS.
+
+  EcsSandboxTaskFamily:
+    Type: String
+    Default: ''
+    Description: >
+      ECS task family for sandbox tasks. Only read when SandboxProvider=ecs.
+      Injected as AGENTA_ECS_SANDBOX_TASK_FAMILY.
+
+  DesiredCount:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 1
+    Description: >-
+      ECS service desired task count. The bot's src/lockfile.ts is a hard
+      singleton: >1 simply will not boot. Default 0 so the first stack
+      apply against an empty ECR + empty SSM does not crashloop pulling
+      a missing image; bump to 1 (re-deploy or `aws ecs update-service
+      --desired-count 1`) after the image is pushed and SSM is populated.
+
+  # -- Combo entrypoint (#253) ------------------------------------------
+  # This stack runs the single image in the `combo` role: bot + tenant
+  # co-located in one container. entrypoint.sh renders /tmp/tenants.json
+  # from the env below, runs the tenant on TENANT_INTERNAL_PORT, then the
+  # bot on HEALTH_PORT. The pre-#253 bot-only role no longer works
+  # standalone (the bot is pure ingress and needs a tenant to forward to).
+  # See CLAUDE.md "Combo entrypoint (single-tenant deployment)".
+  EntrypointRole:
+    Type: String
+    Default: combo
+    AllowedValues: ['combo', 'bot', 'tenant']
+    Description: >
+      argv[1] passed to /entrypoint.sh (overrides the Dockerfile
+      CMD ["tenant"]). 'combo' is the only viable single-container mode
+      post-#253.
+
+  WorkspaceId:
+    Type: String
+    Description: >
+      Slack team_id the workspace-default route is keyed under. Injected as
+      WORKSPACE_ID; entrypoint.sh keys routes[WORKSPACE_ID] off it.
+
+  DefaultHomeRemote:
+    Type: String
+    Description: >
+      Default home repo URL for the workspace route (file://, https://,
+      ssh:// or git@). Injected as DEFAULT_HOME_REMOTE.
+
+  DefaultHomeAuthEnv:
+    Type: String
+    Default: GITHUB_TOKEN
+    Description: >
+      Env-var NAME holding the deploy key / PAT for the default home.
+      Injected as DEFAULT_HOME_AUTH_ENV; MUST match a name in the Secrets
+      block below (and a SecureString at <SsmParameterPrefix>/<name>).
+      Empty only for public / file:// homes (then also drop the matching
+      Secrets entry).
+
+  ChannelHomesJson:
+    Type: String
+    Default: ''
+    Description: >
+      Raw JSON for routes[WorkspaceId].channels (per-channel home
+      overrides). Injected as CHANNEL_HOMES_JSON. Empty = none.
+
+  ModelBaseUrl:
+    Type: String
+    Default: https://api.anthropic.com/v1
+    Description: >
+      Model gateway base URL (MODEL_BASE_URL). bedrock://<region> selects
+      the Bedrock branch; the bearer goes in the MODEL_API_KEY secret.
+
+  ModelName:
+    Type: String
+    Default: claude-sonnet-4-6
+    Description: Model id / Bedrock inference-profile id (MODEL_NAME).
+
+Resources:
+  # -- ECR --------------------------------------------------------------
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref EcrRepositoryName
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  # -- Logs -------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: 30
+
+  # -- EFS for /data (persistent across task replacements) --------------
+  # Mounted at /data inside the container. The access point pins the
+  # POSIX uid/gid to root (0/0) for parity with Fly's volume behavior;
+  # the bot's threat model is "trusted code with secrets" so container
+  # uid isn't the security boundary - see issue #208.
+  EfsFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${ServiceName}-data'
+
+  EfsAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      PosixUser:
+        Uid: '0'
+        Gid: '0'
+      RootDirectory:
+        Path: /data
+        CreationInfo:
+          OwnerUid: '0'
+          OwnerGid: '0'
+          Permissions: '0755'
+
+  # One mount target per public subnet. ECS task ENIs in the same subnet
+  # use the local mount target for NFSv4 traffic over EFS SG.
+  EfsMountTarget0:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Select [0, !Ref PublicSubnetIds]
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  # -- Security groups --------------------------------------------------
+  # The bot task: no ingress at all (no ALB, no public service). All
+  # egress allowed - bot talks to Slack WS, model gateway, Fly Machines
+  # API, EFS, ECR, CloudWatch Logs, SSM, all over HTTPS / NFS.
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: agenta bot Fargate task - egress only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: All egress (Slack WS, model gateway, Fly API, ECR, EFS, CWL, SSM)
+
+  # EFS SG only accepts NFS (2049) from the task SG. No other source.
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: agenta bot EFS - NFS from task SG only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: All egress (NFS replies)
+
+  EfsIngressFromTask:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EfsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref TaskSecurityGroup
+      Description: NFS from bot task SG
+
+  # -- IAM --------------------------------------------------------------
+  # Execution role: ECS agent uses this to pull the image, write logs,
+  # and read SSM parameters BEFORE the container starts (for secrets
+  # injection).
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadSsmSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/*'
+              # SSM SecureString parameters are encrypted with the AWS-managed
+              # KMS key by default - Decrypt against that key is required for
+              # the execution role to actually read them.
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/aws/ssm'
+
+  # Task role: what the bot process itself can do at runtime. Only EFS
+  # access - the bot talks to Fly / Slack / model gateway with the tokens
+  # it gets from SSM, not via AWS APIs.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EfsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !GetAtt EfsFileSystem.Arn
+                Condition:
+                  StringEquals:
+                    elasticfilesystem:AccessPointArn: !GetAtt EfsAccessPoint.Arn
+        # ECS sandbox provider (phase 2, #213 / #218). The bot shells out
+        # to `aws ecs run-task` etc. against a SEPARATE sandbox cluster.
+        # No EFS access-point perms here — the post-#218 design mounts a
+        # shared EFS root + per-thread subdir, no per-thread access points.
+        # TODO: tighten Resource to sandbox stack ARNs once cross-stack
+        # outputs are wired through.
+        - PolicyName: EcsSandboxProvider
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                  - ecs:ListTasks
+                  - ecs:DescribeServices
+                  - ecs:TagResource
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+        # ECS Exec (SSM Session Manager data channel) so operators can
+        # `aws ecs execute-command` into the running bot task to read a
+        # thread's on-disk state (#226 — the debug-thread skill's ECS path).
+        # enableExecuteCommand on the service is necessary but not sufficient;
+        # the task role must also allow these or the in-task SSM agent never
+        # connects (TargetNotConnected).
+        - PolicyName: ExecuteCommand
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
+
+  # -- Cluster + task + service -----------------------------------------
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - EfsMountTarget0
+    Properties:
+      Family: !Ref ServiceName
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EfsFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EfsAccessPoint
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: bot
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}'
+          Essential: true
+          # Combo role (#253): bot + tenant in one container. ECS Command
+          # overrides the Dockerfile CMD ["tenant"] -> /entrypoint.sh combo.
+          Command:
+            - !Ref EntrypointRole
+          # Mirrors the Dockerfile HEALTHCHECK so ECS actually surfaces
+          # `healthStatus` on the task (without this block the task stays
+          # UNKNOWN forever and the deployment circuit breaker has no
+          # signal). CMD-SHELL is required for the ${HEALTH_PORT:-8080}
+          # shell expansion -- the CMD form skips the shell.
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -fsS "http://localhost:${HEALTH_PORT:-8080}/health" || exit 1
+            Interval: 30
+            Timeout: 5
+            StartPeriod: 30
+            Retries: 3
+          # No PortMappings -- nothing inbound.
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: bot
+          MountPoints:
+            - SourceVolume: data
+              ContainerPath: /data
+              ReadOnly: false
+          # Plain env - matches the Fly [env] block in fly.toml so the
+          # only delta between deployments is the secret source.
+          Environment:
+            - Name: AGENTA_DATA_DIR
+              Value: /data/agenta
+            - Name: AGENT_HOMES_ROOT
+              Value: /data/homes
+            - Name: AGENTA_SANDBOX_APP
+              Value: !Ref AgentaSandboxApp
+            - Name: SANDBOX_PROVIDER
+              Value: !Ref SandboxProvider
+            - Name: AGENTA_ECS_SANDBOX_CLUSTER
+              Value: !Ref EcsSandboxCluster
+            - Name: AGENTA_ECS_SANDBOX_SUBNET_IDS
+              Value: !Ref EcsSandboxSubnetIds
+            - Name: AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS
+              Value: !Ref EcsSandboxSecurityGroupIds
+            - Name: AGENTA_ECS_SANDBOX_TASK_FAMILY
+              Value: !Ref EcsSandboxTaskFamily
+            - Name: FLY_REGION
+              Value: !Ref FlyRegion
+            - Name: HEALTH_PORT
+              Value: '8080'
+            # -- Combo entrypoint (#253). entrypoint.sh reads these to render
+            # the loopback tenants.json and run bot + tenant co-located.
+            - Name: TENANT_INTERNAL_PORT
+              Value: '8081'
+            - Name: WORKSPACE_ID
+              Value: !Ref WorkspaceId
+            - Name: DEFAULT_HOME_REMOTE
+              Value: !Ref DefaultHomeRemote
+            - Name: DEFAULT_HOME_AUTH_ENV
+              Value: !Ref DefaultHomeAuthEnv
+            - Name: CHANNEL_HOMES_JSON
+              Value: !Ref ChannelHomesJson
+            # Model gateway endpoint + model id (auth is the MODEL_API_KEY
+            # secret below). bedrock://<region> -> Bedrock branch.
+            - Name: MODEL_BASE_URL
+              Value: !Ref ModelBaseUrl
+            - Name: MODEL_NAME
+              Value: !Ref ModelName
+          # Secrets pulled from SSM Parameter Store at task start. Each
+          # entry maps to /<SsmParameterPrefix>/<NAME>. Populate via:
+          #   aws ssm put-parameter --type SecureString --name /agenta-bot/MODEL_API_KEY --value ...
+          # FLY_API_TOKEN is required because the bot still provisions
+          # sandboxes against the Fly Machines API even when running on
+          # ECS (SANDBOX_PROVIDER=fly).
+          # Secrets pulled from SSM at task start. EVERY entry here must
+          # exist as a SecureString at <SsmParameterPrefix>/<NAME> before
+          # the task can start. Reworked for #253 + Bedrock (see
+          # infra/ecs/README.md): MODEL_BASE_URL/MODEL_NAME moved to plain
+          # env above; AWS_BEARER_TOKEN_BEDROCK dropped (post-#253 the
+          # gateway pins api_key_env=MODEL_API_KEY and never reads it);
+          # GITHUB_TOKEN / AGENTA_TEST_HOME_ALONE_DEPLOY_KEY / FLY_API_TOKEN
+          # dropped (acme's default home is direct-ssh and sandboxes are
+          # ECS, not Fly).
+          Secrets:
+            # Slack credentials (Socket Mode + Web API) for this deployment's app.
+            - Name: SLACK_APP_TOKEN
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SLACK_APP_TOKEN'
+            - Name: SLACK_BOT_TOKEN
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SLACK_BOT_TOKEN'
+            # Model gateway auth. For Bedrock (MODEL_BASE_URL=bedrock://<region>)
+            # this holds the long-term Bedrock bearer token — the gateway pins
+            # api_key_env=MODEL_API_KEY (src/tenant/index.ts), so the bearer
+            # MUST live here, not in AWS_BEARER_TOKEN_BEDROCK.
+            - Name: MODEL_API_KEY
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/MODEL_API_KEY'
+            # Bot<->tenant shared bearer for the loopback /events call (combo:
+            # the rendered tenants.json declares auth_env=TENANT_SECRET).
+            - Name: TENANT_SECRET
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/TENANT_SECRET'
+            # Default-home auth. HTTPS tunneled+mirror mode -> a GitHub PAT
+            # with read on the home repo. The NAME must match the
+            # DefaultHomeAuthEnv parameter so the tenant resolves
+            # process.env[DEFAULT_HOME_AUTH_ENV] to this value. (Swap to a
+            # *_DEPLOY_KEY PEM here if a channel uses direct-ssh git@ mode.)
+            - Name: GITHUB_TOKEN
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/GITHUB_TOKEN'
+            # acme_* tools shell out to acme-cloud with this token.
+            - Name: ACME_API_TOKEN
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/ACME_API_TOKEN'
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - EfsMountTarget0
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      # Singleton - stop the old task BEFORE starting the new one so the
+      # bot's lockfile (src/lockfile.ts) never sees two processes against
+      # the same EFS volume.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # Public IP only for egress (no ALB, no inbound). Avoids the
+          # ~$32/mo NAT Gateway tax - see issue #208 cost table.
+          AssignPublicIp: ENABLED
+          Subnets: !Ref PublicSubnetIds
+          SecurityGroups:
+            - !Ref TaskSecurityGroup
+
+Outputs:
+  ClusterArn:
+    Description: ECS cluster ARN
+    Value: !GetAtt Cluster.Arn
+
+  ServiceArn:
+    Description: ECS service ARN
+    Value: !Ref Service
+
+  TaskDefinitionArn:
+    Description: Current task definition ARN
+    Value: !Ref TaskDefinition
+
+  EcrRepositoryUri:
+    Description: ECR repo URI for `docker push`
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}'
+
+  EfsFileSystemId:
+    Description: EFS filesystem id backing /data
+    Value: !Ref EfsFileSystem
+
+  LogGroupName:
+    Description: CloudWatch log group for the bot
+    Value: !Ref LogGroup
+
+  SsmParameterPrefix:
+    Description: SSM Parameter Store prefix the task pulls secrets from
+    Value: !Ref SsmParameterPrefix

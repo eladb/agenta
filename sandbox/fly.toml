@@ -1,0 +1,13 @@
+# Fly app config for the sandbox image. Used by `fly deploy` to build the
+# Dockerfile in this directory and push to Fly's registry as
+# registry.fly.io/<app>:latest. There are no [[services]] / [http_service]
+# sections by design — `fly deploy --build-only --push` (driven by the
+# scripts/deploy-sandbox-fly.ts wrapper) only builds + pushes the image.
+# The bot creates per-thread machines on demand via the Fly Machines API,
+# each with its own services config.
+
+app = "agenta-sandbox"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
