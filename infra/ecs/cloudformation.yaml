@@ -3,10 +3,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 # Keep edits below that ceiling -- run `python3 -c "import yaml; ..."` on
 # the rendered string after major rewrites to verify.
 Description: >-
-  agenta bot ECS Fargate deployment (phase 1, agenta #208). Single Fargate
-  task, public subnet + public IP, no NAT, no ALB; bot is Socket-Mode +
-  outbound HTTPS only (Slack WS, model gateway, Fly Machines API for
-  sandbox provisioning). EFS for /data so atomic rename works for
+  agenta combo (bot+tenant) ECS Fargate deployment (#208 + combo #253).
+  Single Fargate task running /entrypoint.sh combo; public subnet +
+  public IP, no NAT, no ALB; outbound HTTPS only (Slack WS, model gateway,
+  Bedrock, sandbox provisioning). EFS for /data so atomic rename works for
   session.json + sandbox state. Singleton enforced via deployment config
   (minHealthyPercent=0, maxPercent=100) so the bot's own lockfile
   (src/lockfile.ts) never sees two processes racing. Secrets come from
@@ -139,6 +139,63 @@ Parameters:
       apply against an empty ECR + empty SSM does not crashloop pulling
       a missing image; bump to 1 (re-deploy or `aws ecs update-service
       --desired-count 1`) after the image is pushed and SSM is populated.
+
+  # -- Combo entrypoint (#253) ------------------------------------------
+  # This stack runs the single image in the `combo` role: bot + tenant
+  # co-located in one container. entrypoint.sh renders /tmp/tenants.json
+  # from the env below, runs the tenant on TENANT_INTERNAL_PORT, then the
+  # bot on HEALTH_PORT. The pre-#253 bot-only role no longer works
+  # standalone (the bot is pure ingress and needs a tenant to forward to).
+  # See CLAUDE.md "Combo entrypoint (single-tenant deployment)".
+  EntrypointRole:
+    Type: String
+    Default: combo
+    AllowedValues: ['combo', 'bot', 'tenant']
+    Description: >
+      argv[1] passed to /entrypoint.sh (overrides the Dockerfile
+      CMD ["tenant"]). 'combo' is the only viable single-container mode
+      post-#253.
+
+  WorkspaceId:
+    Type: String
+    Description: >
+      Slack team_id the workspace-default route is keyed under. Injected as
+      WORKSPACE_ID; entrypoint.sh keys routes[WORKSPACE_ID] off it.
+
+  DefaultHomeRemote:
+    Type: String
+    Description: >
+      Default home repo URL for the workspace route (file://, https://,
+      ssh:// or git@). Injected as DEFAULT_HOME_REMOTE.
+
+  DefaultHomeAuthEnv:
+    Type: String
+    Default: GITHUB_TOKEN
+    Description: >
+      Env-var NAME holding the deploy key / PAT for the default home.
+      Injected as DEFAULT_HOME_AUTH_ENV; MUST match a name in the Secrets
+      block below (and a SecureString at <SsmParameterPrefix>/<name>).
+      Empty only for public / file:// homes (then also drop the matching
+      Secrets entry).
+
+  ChannelHomesJson:
+    Type: String
+    Default: ''
+    Description: >
+      Raw JSON for routes[WorkspaceId].channels (per-channel home
+      overrides). Injected as CHANNEL_HOMES_JSON. Empty = none.
+
+  ModelBaseUrl:
+    Type: String
+    Default: https://api.anthropic.com/v1
+    Description: >
+      Model gateway base URL (MODEL_BASE_URL). bedrock://<region> selects
+      the Bedrock branch; the bearer goes in the MODEL_API_KEY secret.
+
+  ModelName:
+    Type: String
+    Default: claude-sonnet-4-6
+    Description: Model id / Bedrock inference-profile id (MODEL_NAME).
 
 Resources:
   # -- ECR --------------------------------------------------------------
@@ -374,6 +431,10 @@ Resources:
         - Name: bot
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}'
           Essential: true
+          # Combo role (#253): bot + tenant in one container. ECS Command
+          # overrides the Dockerfile CMD ["tenant"] -> /entrypoint.sh combo.
+          Command:
+            - !Ref EntrypointRole
           # Mirrors the Dockerfile HEALTHCHECK so ECS actually surfaces
           # `healthStatus` on the task (without this block the task stays
           # UNKNOWN forever and the deployment circuit breaker has no
@@ -421,48 +482,65 @@ Resources:
               Value: !Ref FlyRegion
             - Name: HEALTH_PORT
               Value: '8080'
+            # -- Combo entrypoint (#253). entrypoint.sh reads these to render
+            # the loopback tenants.json and run bot + tenant co-located.
+            - Name: TENANT_INTERNAL_PORT
+              Value: '8081'
+            - Name: WORKSPACE_ID
+              Value: !Ref WorkspaceId
+            - Name: DEFAULT_HOME_REMOTE
+              Value: !Ref DefaultHomeRemote
+            - Name: DEFAULT_HOME_AUTH_ENV
+              Value: !Ref DefaultHomeAuthEnv
+            - Name: CHANNEL_HOMES_JSON
+              Value: !Ref ChannelHomesJson
+            # Model gateway endpoint + model id (auth is the MODEL_API_KEY
+            # secret below). bedrock://<region> -> Bedrock branch.
+            - Name: MODEL_BASE_URL
+              Value: !Ref ModelBaseUrl
+            - Name: MODEL_NAME
+              Value: !Ref ModelName
           # Secrets pulled from SSM Parameter Store at task start. Each
           # entry maps to /<SsmParameterPrefix>/<NAME>. Populate via:
           #   aws ssm put-parameter --type SecureString --name /agenta-bot/MODEL_API_KEY --value ...
           # FLY_API_TOKEN is required because the bot still provisions
           # sandboxes against the Fly Machines API even when running on
           # ECS (SANDBOX_PROVIDER=fly).
+          # Secrets pulled from SSM at task start. EVERY entry here must
+          # exist as a SecureString at <SsmParameterPrefix>/<NAME> before
+          # the task can start. Reworked for #253 + Bedrock (see
+          # infra/ecs/README.md): MODEL_BASE_URL/MODEL_NAME moved to plain
+          # env above; AWS_BEARER_TOKEN_BEDROCK dropped (post-#253 the
+          # gateway pins api_key_env=MODEL_API_KEY and never reads it);
+          # GITHUB_TOKEN / AGENTA_TEST_HOME_ALONE_DEPLOY_KEY / FLY_API_TOKEN
+          # dropped (salto's default home is direct-ssh and sandboxes are
+          # ECS, not Fly).
           Secrets:
-            # Slack credentials (Socket Mode + Web API).
+            # Slack credentials (Socket Mode + Web API) for this deployment's app.
             - Name: SLACK_APP_TOKEN
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SLACK_APP_TOKEN'
             - Name: SLACK_BOT_TOKEN
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SLACK_BOT_TOKEN'
-            # Model gateway: OpenAI-compat endpoint + key + per-channel
-            # Bedrock override credential (referenced from config/homes.json).
+            # Model gateway auth. For Bedrock (MODEL_BASE_URL=bedrock://<region>)
+            # this holds the long-term Bedrock bearer token — the gateway pins
+            # api_key_env=MODEL_API_KEY (src/tenant/index.ts), so the bearer
+            # MUST live here, not in AWS_BEARER_TOKEN_BEDROCK.
             - Name: MODEL_API_KEY
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/MODEL_API_KEY'
-            - Name: MODEL_BASE_URL
-              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/MODEL_BASE_URL'
-            - Name: MODEL_NAME
-              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/MODEL_NAME'
-            - Name: AWS_BEARER_TOKEN_BEDROCK
-              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/AWS_BEARER_TOKEN_BEDROCK'
-            # Home-repo auth (referenced from config/homes.json's
-            # auth_env entries). GITHUB_TOKEN = HTTPS PAT for the default
-            # home; the *_DEPLOY_KEY entries are PEM-formatted SSH keys
-            # for direct-mode home repos.
+            # Bot<->tenant shared bearer for the loopback /events call (combo:
+            # the rendered tenants.json declares auth_env=TENANT_SECRET).
+            - Name: TENANT_SECRET
+              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/TENANT_SECRET'
+            # Default-home auth. HTTPS tunneled+mirror mode -> a GitHub PAT
+            # with read on the home repo. The NAME must match the
+            # DefaultHomeAuthEnv parameter so the tenant resolves
+            # process.env[DEFAULT_HOME_AUTH_ENV] to this value. (Swap to a
+            # *_DEPLOY_KEY PEM here if a channel uses direct-ssh git@ mode.)
             - Name: GITHUB_TOKEN
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/GITHUB_TOKEN'
-            - Name: AGENTA_TEST_HOME_ALONE_DEPLOY_KEY
-              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/AGENTA_TEST_HOME_ALONE_DEPLOY_KEY'
-            - Name: SALTO_SALESFORCE_PLAYGROUND_DEPLOY_KEY
-              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SALTO_SALESFORCE_PLAYGROUND_DEPLOY_KEY'
-            # Tool credentials: salto_* tools shell out to salto-cloud,
-            # web_search hits the Tavily API.
+            # salto_* tools shell out to salto-cloud with this token.
             - Name: SALTO_API_TOKEN
               ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/SALTO_API_TOKEN'
-            - Name: TAVILY_API_KEY
-              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/TAVILY_API_KEY'
-            # Sandbox provider: bot stays on Fly for per-thread sandboxes
-            # even when itself on ECS.
-            - Name: FLY_API_TOKEN
-              ValueFrom: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/FLY_API_TOKEN'
 
   Service:
     Type: AWS::ECS::Service

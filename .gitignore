@@ -17,7 +17,6 @@ data/
 # $HOME dotfiles + secrets that land in-tree because repo root == agent $HOME.
 # None of these are repo content; keep them out so `git add -A` can't leak them.
 .ssh/
-.envstore
 .config/
 .npm/
 .cache/

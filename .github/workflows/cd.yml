@@ -73,12 +73,21 @@ jobs:
     runs-on: ubuntu-latest
     # e2e + Fly deploy/canary + ECS deploy/canary in one serial job.
     timeout-minutes: 60
-    # AWS creds for the ECS lane (steps 4-5). Region is a plain env, not a
-    # secret. Harmless to the Fly steps — they don't read AWS.
+    # OIDC: the ECS lane assumes the agenta-cd-github role (account
+    # 870494683302) via GitHub's OIDC provider — no static AWS keys. The role
+    # is region-locked to eu-central-1 and trust-scoped to this repo's main
+    # branch. `id-token: write` lets the runner mint the OIDC token;
+    # `contents: read` restores the checkout scope (declaring permissions
+    # resets all others to none).
+    permissions:
+      id-token: write
+      contents: read
+    # AWS region for the ECS lane. Creds are assumed via OIDC in the
+    # "Configure AWS credentials" step below (not env keys). The Bedrock model
+    # region stays us-east-1 (MODEL_BASE_URL=bedrock://us-east-1) — independent
+    # of where the ECS task runs.
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION: us-east-1
+      AWS_REGION: eu-central-1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -154,6 +163,15 @@ jobs:
       # --- ECS lane (salto). Runs after the Fly canary, in this same job,
       # so it's gated on the same e2e and reuses the single tester without
       # Socket Mode contention (strictly sequential). See #229.
+      # OIDC: assume the region-locked deploy role; sets AWS_* in the job env
+      # for the ECS steps below (deploy-bot-ecs.ts / deploy-sandbox-ecs.ts /
+      # the salto canary's describe-services gate all use the default chain).
+      - name: Configure AWS credentials (OIDC)
+        if: steps.changed.outputs.code == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::870494683302:role/agenta-cd-github
+          aws-region: eu-central-1
       - name: Deploy bot image to ECS
         if: steps.changed.outputs.code == 'true'
         env:
