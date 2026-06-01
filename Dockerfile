@@ -17,8 +17,7 @@
 # Stages:
 #   1. deps     - `bun install --production` so the runtime image carries
 #                 only the prod dependency tree (no biome / @types / etc.).
-#   2. runtime  - Debian-slim Bun + git + ca-certificates + python3 + the
-#                 Salto CLI (tenant-only dep, harmless in bot mode).
+#   2. runtime  - Debian-slim Bun + git + ca-certificates + python3.
 
 FROM oven/bun:1 AS deps
 WORKDIR /app
@@ -30,17 +29,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ca-certificates jq python3 openssh-client curl awscli \
  && rm -rf /var/lib/apt/lists/*
-
-# Salto CLI on the tenant host (not the sandbox). The salto_* tools shell
-# out to `salto-cloud` here, using SALTO_API_TOKEN from the tenant's env
-# (Fly secret in prod). Pinned version — release shape is a single static
-# ELF binary at the tarball root, extracted to /usr/local/bin. Harmless in
-# bot mode (the bot never invokes it).
-ARG SALTO_CLI_VERSION=1.4.4
-RUN curl -fsSL "https://cli.salto.io/release/${SALTO_CLI_VERSION}/linux-x64.tar.gz" \
-      | tar -xz -C /usr/local/bin \
- && chmod +x /usr/local/bin/salto-cloud \
- && /usr/local/bin/salto-cloud --version
 
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
