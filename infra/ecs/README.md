@@ -35,7 +35,7 @@ aws cloudformation deploy \
 
 `DesiredCount=0` is the template's default, so you can omit the override — listed here for clarity. The stack creates the ECR repo, EFS filesystem + mount target + access point, IAM roles, security groups, CloudWatch log group, ECS cluster, task definition, and service — but launches zero tasks. That avoids the ECR-empty / SSM-empty crashloop the service would otherwise hit.
 
-Stack outputs include `EcrRepositoryUri`, `EfsFileSystemId`, and `SsmParameterPrefix` (default `/agenta-bot`). Override any of `ClusterName`, `ServiceName`, `EcrRepositoryName`, `LogGroupName`, `SsmParameterPrefix`, `AgentaSandboxApp`, `FlyRegion`, `TaskCpu`, `TaskMemory`, `ImageTag`, or `DesiredCount` via `--parameter-overrides` per deployment.
+Stack outputs include `EcrRepositoryUri`, `EfsFileSystemId`, and `SsmParameterPrefix` (default `/agenta-bot`). Override any of `ClusterName`, `ServiceName`, `EcrRepositoryName`, `LogGroupName`, `SsmParameterPrefix`, `AgentaSandboxApp`, `FlyRegion`, `TaskCpu`, `TaskMemory`, `ImageTag`, or `DesiredCount` via `--parameter-overrides` per deployment. For an ECS-sandbox deployment (phase 2, below) also override `SandboxProvider` (default `fly`; set `ecs`), `EcsSandboxCluster`, `EcsSandboxSubnetIds`, `EcsSandboxSecurityGroupIds`, and `EcsSandboxTaskFamily` (#220).
 
 ### 2. Populate SSM parameters
 
@@ -183,10 +183,11 @@ Fargate has no native auto-stop on idle: each per-thread sandbox runs continuous
    | Stack output | Bot env var |
    |---|---|
    | `ClusterName` | `AGENTA_ECS_SANDBOX_CLUSTER` |
-   | `EfsFileSystemId` | `AGENTA_ECS_SANDBOX_EFS_ID` |
    | `SandboxSecurityGroupId` | `AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS` (comma-list if you want multiple) |
    | (the subnets you passed) | `AGENTA_ECS_SANDBOX_SUBNET_IDS` |
    | `TaskFamily` | `AGENTA_ECS_SANDBOX_TASK_FAMILY` (optional, defaults to `agenta-sandbox`) |
+
+   The `EfsFileSystemId` output is no longer wired into a bot env var (#218 — the task definition hard-codes the filesystem in its `volumes:` block). It's still exported for operator visibility.
 
 2. **Push the sandbox image.**
 
@@ -198,23 +199,39 @@ Fargate has no native auto-stop on idle: each per-thread sandbox runs continuous
 
    There is no service to roll: the bot creates per-thread tasks on demand via `ecs run-task`. The image change takes effect on the next per-thread sandbox provision.
 
-3. **Switch the bot to ECS sandboxes.** Update the bot's SSM parameters to set `SANDBOX_PROVIDER=ecs` plus the five env vars from the table above. The bot stack template (`infra/ecs/cloudformation.yaml`) doesn't currently include these env entries — the operator either:
-   - extends the bot CFN template's `Environment:` block with the five `AGENTA_ECS_SANDBOX_*` vars + flips `SANDBOX_PROVIDER` to `ecs`, OR
-   - uses `aws ecs register-task-definition` out-of-band with the additional env entries and redeploys.
+3. **Switch the bot to ECS sandboxes.** The bot stack template (`infra/ecs/cloudformation.yaml`) exposes the provider choice and the four sandbox coordinates as CloudFormation parameters (#220). Re-deploy the bot stack with the phase-2 overrides:
 
-   Restart the bot service to pick up the change: `aws ecs update-service --cluster agenta-bot --service agenta-bot --force-new-deployment`.
+   ```sh
+   aws cloudformation deploy \
+     --stack-name agenta-bot \
+     --template-file infra/ecs/cloudformation.yaml \
+     --capabilities CAPABILITY_IAM \
+     --parameter-overrides \
+       VpcId=vpc-xxxxxxxx \
+       PublicSubnetIds=subnet-aaaaaaaa \
+       DesiredCount=1 \
+       SandboxProvider=ecs \
+       EcsSandboxCluster=agenta-sandbox \
+       EcsSandboxSubnetIds=subnet-aaaaaaaa \
+       EcsSandboxSecurityGroupIds=sg-xxxxxxxx \
+       EcsSandboxTaskFamily=agenta-sandbox
+   ```
+
+   `SandboxProvider` defaults to `fly`; the four `AGENTA_ECS_SANDBOX_*` env entries always render (harmless empty strings while `SandboxProvider=fly`, since the bot only reads them when `=ecs`). **Pass these overrides on every subsequent `cloudformation deploy` of an ECS-sandbox stack** — omitting them resets `SandboxProvider` to `fly` and the bot silently reverts to Fly sandboxes. Updating the template-managed task definition rolls the service automatically; no separate `--force-new-deployment` is needed.
 
 ### What gets created per thread
 
 - One `aws ecs run-task` in the sandbox cluster (one Fargate task per thread, tagged with `agenta_bot_instance=<ClusterName>` for safe scoping).
-- One EFS access point pinned under `/sandboxes/<thread-slug>` with POSIX uid/gid 1000.
+- One subdirectory on the shared EFS filesystem at `/efs/<thread-slug>`, mkdir+chowned by the sandbox entrypoint when it sees `SANDBOX_WORKSPACE_DIR` in its environment.
 
-Tear-down via `/delete` in Slack does `aws ecs stop-task` + `aws efs delete-access-point`. The boot-time orphan reap (`src/sandbox/index.ts:reapOrphanSandboxes`) walks tasks + access points by tag and prunes anything not referenced by a `session.json` record.
+The task definition mounts the EFS root at `/efs`; per-thread isolation is the subdirectory the bot picks at RunTask time and passes via `SANDBOX_WORKSPACE_DIR` in `containerOverrides`. There are no per-thread EFS access points (the #213 design tried that and ran into `--volume-configurations` being EBS-only — see #218 for the full story).
+
+Tear-down via `/delete` in Slack does `aws ecs stop-task`. The workspace directory on EFS is left in place — orphan dirs accumulate until a future explicit sweep (deferred from #218; expected to be either a periodic cleaner or an `rm -rf /efs/<slug>` step in the `/delete` path). The boot-time orphan reap (`src/sandbox/index.ts:reapOrphanSandboxes`) walks tasks by tag and stops anything not referenced by a `session.json` record; it does NOT touch workspace dirs.
 
 ### Operator must add (deferred from the sandbox stack)
 
 - The **bot stack's task SG** already has wide egress, so no ingress change is required on the bot side — the WS direction is bot → sandbox, not the other way around.
-- If you want sandbox tasks to egress for `pip install` / `git clone` / model gateway calls, the subnets you pass need either a NAT Gateway or VPC endpoints. The sandbox stack doesn't manage either — that's a VPC-shape concern.
+- If you want sandbox tasks to egress for `pip install` / `git clone` / model gateway calls, they reach the internet via their own public IP: the provider assigns one by default (`AGENTA_ECS_SANDBOX_ASSIGN_PUBLIC_IP=ENABLED`, #220), matching the bot's own no-NAT design, so a public subnet needs no NAT Gateway or VPC endpoints. Set that env var to `DISABLED` only if you run sandbox tasks in private subnets fronted by a NAT Gateway / VPC endpoints (a VPC-shape concern the sandbox stack doesn't manage). Either way the sandbox SG still blocks all inbound except port 9000 from the bot SG.
 
 ## Open items (see issue #213 and beyond)
 

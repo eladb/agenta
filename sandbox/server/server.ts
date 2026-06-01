@@ -36,9 +36,13 @@ import type { ServerWebSocket } from 'bun';
 
 const PORT = Number(process.env.SANDBOX_PORT ?? 9000);
 const TOKEN = process.env.SANDBOX_TOKEN;
-// The sandbox user's home dir doubles as the workspace; it's also the mount
-// point for the per-thread persistent volume managed by the bot.
-const WORKSPACE = '/home/sandbox';
+// Workspace directory: defaults to the sandbox user's home dir (which is
+// also the per-thread persistent volume mount for docker/fly providers).
+// The ECS provider (#218) overrides via SANDBOX_WORKSPACE_DIR=/efs/<slug>
+// so a single shared EFS root + per-thread subdirectory replaces the
+// per-thread access points that #213 originally tried to use.
+// entrypoint.sh mkdir+chowns the directory before exec'ing the server.
+const WORKSPACE = process.env.SANDBOX_WORKSPACE_DIR ?? '/home/sandbox';
 // Hard cap on /exec runtime. Long-hanging commands (e.g. `curl` to a blocked
 // host waiting on TCP timeout) would otherwise block the model's turn
 // indefinitely. The model sees a clean error in stderr and can adjust.

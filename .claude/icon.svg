@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- magenta chat bubble, rounded, with a tail at bottom-left -->
+  <path d="M12 6 H52 A10 10 0 0 1 62 16 V40 A10 10 0 0 1 52 50 H28 L18 60 L20 50 H12 A10 10 0 0 1 2 40 V16 A10 10 0 0 1 12 6 Z" fill="#D81B60"/>
+  <!-- bold lowercase 'a' centered, white -->
+  <text x="32" y="40" font-family="-apple-system, system-ui, 'Segoe UI', sans-serif" font-size="32" font-weight="800" text-anchor="middle" fill="#FFFFFF">a</text>
+</svg>

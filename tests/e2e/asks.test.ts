@@ -1,16 +1,16 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { _resetAsks, getPendingAskByThread } from '../../src/runtime/asks';
-import { threadKey } from '../../src/runtime/thread';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { _resetAsks, getPendingAskByThread } from '../../src/tenant/runtime/asks';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
   deleteThread,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitFor,
@@ -40,7 +40,7 @@ function scriptReply(message: AssistantMessage): void {
 beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
 }, 120_000);
 
 afterAll(async () => {

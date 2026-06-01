@@ -6,6 +6,26 @@ node_modules
 data/
 .DS_Store
 .slack-apps.json
+
+# Tool installs + runtime artifacts from install.sh / the canary watchdog
+# (this repo's root == the agent's $HOME, so these land in-tree).
+.bun/
+.fly/
+.local/
+.canary-monitor.lock
+# Public status page runtime artifact — rewritten every 30 min by the canary
+# watchdog. Caddy serves it from the working tree; we don't churn the git tree.
+apps/status/public/status.json
 .claude/*
 !.claude/skills/
 .nightly-cycle-summary.md
+
+# Auto-memory: track .claude/projects/-home-<handle>/memory/ but nothing else
+!.claude/projects/
+.claude/projects/*
+!.claude/projects/-home-*/
+.claude/projects/-home-*/*
+!.claude/projects/-home-*/memory/
+!.claude/projects/-home-*/memory/**
+!.claude/icon.svg
+!.claude/icon.png

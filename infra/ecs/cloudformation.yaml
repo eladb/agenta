@@ -91,6 +91,43 @@ Parameters:
     Default: iad
     Description: Fly region for per-thread sandbox machines/volumes (injected as FLY_REGION).
 
+  SandboxProvider:
+    Type: String
+    Default: fly
+    AllowedValues: ['fly', 'ecs']
+    Description: >
+      Picks where per-thread sandboxes live. 'fly' provisions Fly machines,
+      'ecs' provisions Fargate tasks in the ECS cluster below. Injected as
+      SANDBOX_PROVIDER.
+
+  EcsSandboxCluster:
+    Type: String
+    Default: ''
+    Description: >
+      ECS cluster for per-thread sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_CLUSTER.
+
+  EcsSandboxSubnetIds:
+    Type: String
+    Default: ''
+    Description: >
+      Comma-separated subnet IDs for sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_SUBNET_IDS.
+
+  EcsSandboxSecurityGroupIds:
+    Type: String
+    Default: ''
+    Description: >
+      Comma-separated security group IDs for sandbox tasks. Only read when
+      SandboxProvider=ecs. Injected as AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS.
+
+  EcsSandboxTaskFamily:
+    Type: String
+    Default: ''
+    Description: >
+      ECS task family for sandbox tasks. Only read when SandboxProvider=ecs.
+      Injected as AGENTA_ECS_SANDBOX_TASK_FAMILY.
+
   DesiredCount:
     Type: Number
     Default: 0
@@ -255,6 +292,53 @@ Resources:
                 Condition:
                   StringEquals:
                     elasticfilesystem:AccessPointArn: !GetAtt EfsAccessPoint.Arn
+        # ECS sandbox provider (phase 2, #213 / #218). The bot shells out
+        # to `aws ecs run-task` etc. against a SEPARATE sandbox cluster.
+        # No EFS access-point perms here — the post-#218 design mounts a
+        # shared EFS root + per-thread subdir, no per-thread access points.
+        # TODO: tighten Resource to sandbox stack ARNs once cross-stack
+        # outputs are wired through.
+        - PolicyName: EcsSandboxProvider
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                  - ecs:ListTasks
+                  - ecs:DescribeServices
+                  - ecs:TagResource
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+        # ECS Exec (SSM Session Manager data channel) so operators can
+        # `aws ecs execute-command` into the running bot task to read a
+        # thread's on-disk state (#226 — the debug-thread skill's ECS path).
+        # enableExecuteCommand on the service is necessary but not sufficient;
+        # the task role must also allow these or the in-task SSM agent never
+        # connects (TargetNotConnected).
+        - PolicyName: ExecuteCommand
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
 
   # -- Cluster + task + service -----------------------------------------
   Cluster:
@@ -324,7 +408,15 @@ Resources:
             - Name: AGENTA_SANDBOX_APP
               Value: !Ref AgentaSandboxApp
             - Name: SANDBOX_PROVIDER
-              Value: fly
+              Value: !Ref SandboxProvider
+            - Name: AGENTA_ECS_SANDBOX_CLUSTER
+              Value: !Ref EcsSandboxCluster
+            - Name: AGENTA_ECS_SANDBOX_SUBNET_IDS
+              Value: !Ref EcsSandboxSubnetIds
+            - Name: AGENTA_ECS_SANDBOX_SECURITY_GROUP_IDS
+              Value: !Ref EcsSandboxSecurityGroupIds
+            - Name: AGENTA_ECS_SANDBOX_TASK_FAMILY
+              Value: !Ref EcsSandboxTaskFamily
             - Name: FLY_REGION
               Value: !Ref FlyRegion
             - Name: HEALTH_PORT

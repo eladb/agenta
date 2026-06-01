@@ -2,21 +2,21 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
-import { containerName } from '../../src/sandbox';
-import { ensureImage } from '../../src/sandbox/docker';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
+import { containerName } from '../../src/tenant/sandbox';
+import { ensureImage } from '../../src/tenant/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
-  deleteThread,
   DOCKER_PROVIDER_ACTIVE,
+  deleteThread,
   getDataDir,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitFor,
@@ -71,7 +71,7 @@ beforeAll(async () => {
   channel = requireEnv('TEST_CHANNEL_ID');
   process.env.SANDBOX_EXEC_TIMEOUT_MS = '8000';
   await ensureImage();
-  [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
 }, 120_000);
 
 afterAll(async () => {
@@ -132,14 +132,18 @@ test.if(HAS_DOCKER)(
 
     // Simulate restart + force-remove the container behind the bot's back.
     // The named volume is NOT removed (docker rm -fv removes anonymous
-    // volumes only; named volumes survive). Release the per-bot lockfile
-    // too — `startAgent` below calls `acquire('agent')`, which would
-    // otherwise refuse because the file still names THIS pid.
+    // volumes only; named volumes survive). Release both lockfiles AND
+    // stop the tenant HTTP server — `startBotAndTenant` below re-acquires
+    // 'bot' + 'agent' and starts a fresh tenant on a new port; without
+    // these teardowns we'd race the locks (refuses with our own pid)
+    // and leak the loopback socket.
     await agent.socket.disconnect();
+    agent.tenant.stop();
     agent.lock.release();
-    const { _resetImageReadyCache } = await import('../../src/sandbox/docker');
+    agent.agentLock.release();
+    const { _resetImageReadyCache } = await import('../../src/tenant/sandbox/docker');
     _resetImageReadyCache();
-    const { _resetSyncedAttachments } = await import('../../src/sandbox');
+    const { _resetSyncedAttachments } = await import('../../src/tenant/sandbox');
     _resetSyncedAttachments();
 
     const rm = spawnSync('docker', ['rm', '-fv', containerName(tk)]);
@@ -149,7 +153,7 @@ test.if(HAS_DOCKER)(
     const volInspect = spawnSync('docker', ['volume', 'inspect', volume1 ?? '__missing__']);
     expect(volInspect.status).toBe(0);
 
-    agent = await startAgent(scriptedCallModel);
+    agent = await startBotAndTenant(scriptedCallModel);
 
     // Turn 2: read the marker. The new container is attached to the
     // existing volume, so `cat ~/marker` should still return `first-boot`.

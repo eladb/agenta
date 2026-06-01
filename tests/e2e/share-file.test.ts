@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -11,9 +11,9 @@ import {
   getDataDir,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitFor,
@@ -53,7 +53,7 @@ beforeAll(async () => {
   if (!HAS_DOCKER) return;
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
 }, 120_000);
 
 afterAll(async () => {

@@ -1,0 +1,20 @@
+{
+  "_comment": "Example per-deployment bot config (#253). Copy to config/tenants.json and adjust. The bot loads this at boot; the tenant never reads it. `tenants[name].url` is the tenant service's /events endpoint; `auth_env` is the NAME of the env var on the bot host holding the shared bearer secret (resolved at dispatch). `routes` is keyed by Slack team_id (workspace_id) — most-specific-wins: routes[team].channels[channel] beats routes[team].default. `home.auth_env` is forwarded to the tenant verbatim; the tenant resolves the secret against its own env.",
+  "tenants": {
+    "agentalabs": {
+      "url": "http://localhost:8081/",
+      "auth_env": "AGENTALABS_TENANT_SECRET"
+    }
+  },
+  "routes": {
+    "T0B304AJPUZ": {
+      "default": {
+        "tenant": "agentalabs",
+        "home": {
+          "remote": "https://github.com/eladb/agenta-test-home",
+          "auth_env": "GITHUB_TOKEN"
+        }
+      }
+    }
+  }
+}

@@ -1,20 +1,20 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { dataRoot, messagesPath } from '../../src/persistence/store';
-import { threadKey } from '../../src/runtime/thread';
-import { ensureImage } from '../../src/sandbox/docker';
+import { dataRoot, messagesPath } from '../../src/tenant/persistence/store';
+import { threadKey } from '../../src/tenant/runtime/thread';
+import { ensureImage } from '../../src/tenant/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
   createGoldenCallModel,
-  deleteThread,
   DOCKER_PROVIDER_ACTIVE,
+  deleteThread,
   mention,
   requireEnv,
-  setupTempDataDirFromFixture,
   safeShutdown,
-  startAgent,
+  setupTempDataDirFromFixture,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitForReply,
@@ -48,7 +48,7 @@ beforeAll(async () => {
   setupTempDataDirFromFixture(join(import.meta.dir, 'fixtures', 'python-charts-home'));
   channel = requireEnv('TEST_CHANNEL_ID');
   await ensureImage();
-  // Note: each test calls `startAgent(callModel)` itself so the golden CallModel
+  // Note: each test calls `startBotAndTenant(callModel)` itself so the golden CallModel
   // is per-test (positional replay is scoped to one test's call sequence).
   tester = await startTester();
 }, 120_000);
@@ -69,7 +69,7 @@ test.skipIf(!ENABLED)(
       basename(import.meta.path),
       'loads and uses python-charts',
     );
-    agent = await startAgent(callModel);
+    agent = await startBotAndTenant(callModel);
 
     const threadTs = await mention(
       tester,

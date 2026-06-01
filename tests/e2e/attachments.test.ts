@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
+import type { Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import { BINARY_BYTES, PDF_BYTES, PNG_BYTES, TEXT_BYTES } from './fixtures';
 import {
   type Agent,
@@ -14,9 +14,9 @@ import {
   requireEnv,
   resetStubCalls,
   STUB_REPLY_PREFIX,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   stubCalls,
   type Tester,
@@ -33,7 +33,7 @@ const createdThreads: string[] = [];
 beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startAgent(), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(), startTester()]);
 }, 120_000);
 
 afterAll(async () => {

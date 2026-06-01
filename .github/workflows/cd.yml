@@ -17,20 +17,33 @@ name: CD
 #              via the tester and asserts chat reply + bash + /delete.
 #              Catches deploy-only regressions (env, image, fly volume)
 #              that e2e against the runner can't.
+#   4. deploy ECS — scripts/deploy-bot-ecs.ts rolls the salto bot on AWS
+#              ECS (bot image), plus scripts/deploy-sandbox-ecs.ts when
+#              sandbox/** changed. Same image/commit as the Fly deploy.
+#   5. canary ECS — scripts/canary.ts (AGENTA_DEPLOY_TARGET=ecs) against
+#              the deployed salto bot, which spins a real in-VPC Fargate
+#              sandbox. This canary is salto's only e2e-grade coverage:
+#              e2e can't reach in-VPC sandbox private IPs from a runner.
+#
+# The ECS lane (4-5) runs AFTER the Fly canary in the SAME job, so it's
+# gated on the same e2e (an earlier failed step stops the job before
+# salto deploys) and the single shared tester is never driven by two
+# canaries at once. salto + agenta always deploy the same commit. See #229.
 #
 # A red step fails the workflow — prod never sees code that didn't pass
 # e2e, and the default GitHub Actions failure email is the alarm if
 # canary regresses after a deploy. Manual rollback is
-# `flyctl releases rollback -a agenta-bot`.
+# `flyctl releases rollback -a agenta-bot` (Fly) /
+# `aws ecs update-service` to a prior task-def revision (ECS).
 #
 # Doc-only commits skip every active step (no point running e2e + deploy
 # + canary when only CLAUDE.md changed) but the workflow still completes
 # green so the timeline stays clean. The skip allowlist lives in
 # `.ci-ignore` at the repo root.
 #
-# Prod-only changes (config/homes.json, fly.toml, slack-manifests, etc.)
+# Prod-only changes (config/tenants.json, fly.toml, slack-manifests, etc.)
 # skip the e2e step but still run deploy + canary — e2e wouldn't
-# exercise those paths anyway (helpers.ts overrides AGENT_HOMES_CONFIG
+# exercise those paths anyway (helpers.ts mints an inline tenants config
 # per run; the test Slack apps are separate from prod). That allowlist
 # lives in `.ci-e2e-ignore`.
 #
@@ -58,7 +71,14 @@ concurrency:
 jobs:
   cd:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # e2e + Fly deploy/canary + ECS deploy/canary in one serial job.
+    timeout-minutes: 60
+    # AWS creds for the ECS lane (steps 4-5). Region is a plain env, not a
+    # secret. Harmless to the Fly steps — they don't read AWS.
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,18 +131,86 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: bun run deploy
 
-      # Canary uses the production agent's bot token only to resolve the
-      # prod agent's user id (no Socket Mode client is connected to it).
-      # The tester drives the conversation via TEST_APP_TOKEN/TEST_BOT_TOKEN.
+      # Canary pins the bot user the tester mentions via CANARY_TARGET_USER_ID
+      # so the Fly gate actually verifies the AGENTA deployment. Without the
+      # pin, canary.ts falls back to auth.test on the single repo-level
+      # SLACK_BOT_TOKEN secret — which resolves to the SALTO bot
+      # (U0B65LMHRLL). For months that made both this step AND the salto
+      # canary below mention salto in their respective channels, so a salto
+      # outage masked as "agenta canary failed" and an agenta regression
+      # would never have been caught here at all. See `canary-monitor.sh`,
+      # which already follows this per-target pin.
       - name: Canary (production)
         if: steps.changed.outputs.code == 'true'
         env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CANARY_TARGET_USER_ID: U0B2WQUHK6Z
           TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
           TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
           TEST_CHANNEL_ID: ${{ secrets.CANARY_CHANNEL_ID }}
           FLY_APP_NAME: agenta-bot
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: bun run canary
+
+      # --- ECS lane (salto). Runs after the Fly canary, in this same job,
+      # so it's gated on the same e2e and reuses the single tester without
+      # Socket Mode contention (strictly sequential). See #229.
+      - name: Deploy bot image to ECS
+        if: steps.changed.outputs.code == 'true'
+        env:
+          AGENTA_ECS_CLUSTER: agenta-bot
+          AGENTA_ECS_SERVICE: agenta-bot
+        run: bun scripts/deploy-bot-ecs.ts
+
+      # Gate the sandbox image rebuild on sandbox/** changes so unrelated
+      # merges don't pay the build+push. Resolve base/head like
+      # detect-code-changes: zero-sha / empty before → parent of head.
+      - name: Detect sandbox changes
+        id: sandbox
+        if: steps.changed.outputs.code == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="${{ github.event.before }}"
+          head="${{ github.sha }}"
+          if [ "$before" = "0000000000000000000000000000000000000000" ] || [ -z "$before" ]; then
+            base="$(git rev-parse "${head}^" 2>/dev/null || echo "")"
+          else
+            base="$before"
+          fi
+          if [ -z "$base" ]; then
+            echo "Could not resolve base — rebuilding sandbox image to be safe." >&2
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$base" "$head" -- 'sandbox/**' || true)
+          echo "Changed sandbox files: ${files:-(none)}"
+          if [ -n "$files" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy sandbox image to ECS
+        if: steps.changed.outputs.code == 'true' && steps.sandbox.outputs.changed == 'true'
+        env:
+          AGENTA_ECS_SANDBOX_CLUSTER: agenta-sandbox
+        run: bun scripts/deploy-sandbox-ecs.ts
+
+      # Canary against the deployed salto bot. Reuses the shared tester
+      # (TEST_*) — safe because this runs strictly after the Fly canary
+      # above. SALTO_CANARY_CHANNEL_ID has the salto bot + tester invited.
+      # CANARY_TARGET_USER_ID pinned to the salto bot user (see Fly canary
+      # comment above).
+      - name: Canary (salto / ECS)
+        if: steps.changed.outputs.code == 'true'
+        env:
+          AGENTA_DEPLOY_TARGET: ecs
+          AGENTA_ECS_CLUSTER: agenta-bot
+          AGENTA_ECS_SERVICE: agenta-bot
+          CANARY_TARGET_USER_ID: U0B65LMHRLL
+          TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
+          TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
+          TEST_CHANNEL_ID: ${{ secrets.SALTO_CANARY_CHANNEL_ID }}
         run: bun run canary
 
       - name: Prod-only change — E2E skipped

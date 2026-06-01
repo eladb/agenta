@@ -1,0 +1,16 @@
+- [user-style](user-style.md) — Elad's collaboration preferences: plain URLs, don't re-ask after forks, dev-bot iteration loop, iteration is allowed.
+- [session-preservation-invariant](session-preservation-invariant.md) — when adding a new SessionState field, must preserve it across all four writeSession sites or it silently disappears each turn (#135 cautionary tale).
+- [slack-app-bootstrap-gotchas](slack-app-bootstrap-gotchas.md) — `apps.manifest.create` needs both `display_information.name` AND `features.bot_user.display_name`; tester app is shared, pre-populate `.slack-apps.json` to avoid dupe.
+- [dev-bot-process-management](dev-bot-process-management.md) — `pkill -f bun` is unreliable on this host; use `kill -9 <pid>` after one polite attempt. Port 8080 conflict is the symptom.
+- [host-shared-config-rules](host-shared-config-rules.md) — host-wide rules: confirm scope before editing skills/CLAUDE.md, prefer /schedule over cron, only agent-host edits CLAUDE.host.md.
+- [github-auto-merge-wedge](github-auto-merge-wedge.md) — when a PR wedges with all signals green, close + redo on fresh branch (don't `--admin`); GitHub legacy combined-status API quirk.
+- [socket-mode-redelivery](socket-mode-redelivery.md) — Slack Socket Mode redelivers missed events on reconnect; affects e2e tests that post before `startAgent`.
+- [cd-e2e-chronic-flakes](cd-e2e-chronic-flakes.md) — agenta CD is whack-a-mole when red; each fix surfaces the next. Prod unaffected. Expect 3-5 rounds.
+- [salto-channel-setup](salto-channel-setup.md) — Salto channel config: Bedrock model, salto-cloud CLI, plugin submodule, 1st-person persona, display:pretty.
+- [prompt-unfrozen](prompt-unfrozen.md) — system prompt rebuilds every mention (not frozen). Home/model/display still freeze. Prompt caching would break this.
+- [bedrock-translation-gotcha](bedrock-translation-gotcha.md) — Bedrock has two shape rules: tool_result before user text, no trailing assistant (no prefill). Both enforced in `translateToBedrock`.
+- [slack-per-app-scoping](slack-per-app-scoping.md) — Slack manifest features are per-app; agenta's multi-app split (agenta/salto/dev/ci) gives natural per-channel scoping for free.
+- [canary-monitoring-setup](canary-monitoring-setup.md) — host-local 30-min cron watchdog runs the double canary; on red it Slack-alerts + wakes this agent as oncall. Not in the repo.
+- [keep-install-sh-current](keep-install-sh-current.md) — when a change adds a tool/package dep, update install.sh in the same change (Elad: install.sh is the box-provisioning source of truth).
+- [nanabot-cloudflare-access](nanabot-cloudflare-access.md) — Published pages on this box live at bensadeh.nanabot.me/<agent>/ and the whole nanabot.me domain is behind Cloudflare Access — not open-internet.
+- [nanabox-runtime-conventions](nanabox-runtime-conventions.md) — Mobile-composer attachments arrive as `[attached]`-marked paths under `~/.attachments/`; `~/.nana/config.json` holds per-agent knobs (rtl, tool_display, gh_dispatch_conclusions, icons).

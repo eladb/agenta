@@ -29,3 +29,19 @@
 ^LICENSE$
 ^\.gitignore$
 ^\.env\.example$
+
+# Operator-only box-provisioning script; never runs in the prod image.
+^install\.sh$
+
+# Operator-only host watchdog (deployed by install.sh); not in the prod image.
+^scripts/canary-monitor\.sh$
+
+# Host-served web content (status page under ~/apps/, served by Caddy); never
+# in the prod bot image, so changes here skip e2e+deploy+canary.
+^apps/
+
+# Operator-only per-agent web app server: the systemd --user unit installed by
+# install.sh and the Python server it runs. Host-local only, never in the prod
+# bot image.
+^systemd/
+^webserver/

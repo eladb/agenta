@@ -33,8 +33,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { WebClient } from '@slack/web-api';
-import { resolveDeployTarget } from '../src/runtime/deploy-target';
-import { threadKey as makeThreadKey } from '../src/runtime/thread';
+import { resolveDeployTarget } from '../src/tenant/runtime/deploy-target';
+import { threadKey as makeThreadKey } from '../src/tenant/runtime/thread';
 import { mention, requireEnv, startTester, waitForReply } from '../tests/e2e/helpers';
 
 const STEP_TIMEOUT_MS = 60_000;
@@ -126,16 +126,7 @@ async function waitForEcsHealth(): Promise<void> {
   while (Date.now() < deadline) {
     const r = spawnSync(
       'aws',
-      [
-        'ecs',
-        'describe-services',
-        '--cluster',
-        cluster,
-        '--services',
-        service,
-        '--output',
-        'json',
-      ],
+      ['ecs', 'describe-services', '--cluster', cluster, '--services', service, '--output', 'json'],
       { encoding: 'utf8' },
     );
     if (r.status !== 0) {
@@ -220,10 +211,7 @@ async function agentBotUserId(): Promise<string> {
 
 type StepResult = { name: string; ok: boolean; detail: string; elapsedMs: number };
 
-async function step(
-  name: string,
-  fn: () => Promise<string>,
-): Promise<StepResult> {
+async function step(name: string, fn: () => Promise<string>): Promise<StepResult> {
   process.stderr.write(`canary: step "${name}" start\n`);
   const t0 = Date.now();
   try {
