@@ -1,12 +1,22 @@
-# Fly app config for the agenta bot itself.
+# Fly app config for the agenta-bot Fly app.
+#
+# Under #253 the image splits into a `bot` (Slack ingress) role and a
+# `tenant` (agent harness) role. For the agenta single-tenant deployment
+# both roles run co-located in this one machine via the `combo`
+# entrypoint mode: tenant on TENANT_INTERNAL_PORT (8081, loopback only),
+# bot on HEALTH_PORT (8080, Fly's health check + Slack Socket Mode). The
+# entrypoint renders /tmp/tenants.json at boot from WORKSPACE_ID +
+# DEFAULT_HOME_REMOTE + optional CHANNEL_HOMES_JSON and points it at the
+# loopback tenant. A separate ingress Fly app is a future cutover; for
+# now `combo` matches the dev workflow (CLAUDE.md "Dev tenants.json
+# points the workspace route at http://localhost:<tenant-port>/").
 #
 # Single long-lived machine in iad with one persistent volume mounted at
-# /data. The bot is Slack-Socket-Mode + outbound HTTPS only — there is no
-# [http_service] / [[services]] section because nothing inbound hits this
-# machine.
+# /data. No public surface: outbound HTTPS to Slack Socket Mode + model
+# gateway + Fly Machines API only.
 #
 # The sandbox app (agenta-sandbox) is a SEPARATE Fly app and is configured
-# from sandbox/fly.toml; the bot creates per-thread machines there on
+# from sandbox/fly.toml; the tenant creates per-thread machines there on
 # demand via the Machines API.
 #
 # Provision via:  bun scripts/deploy-bot-fly.ts
@@ -17,11 +27,17 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile"
 
+[processes]
+  # `combo` runs bot + tenant co-located. The string is passed as argv[1]
+  # to the Dockerfile's ENTRYPOINT (/entrypoint.sh), so the actual
+  # command is `/entrypoint.sh combo`.
+  app = "combo"
+
 [env]
   AGENTA_DATA_DIR = "/data/agenta"
-  # Per-channel home config (#87) lives at config/homes.json in the image;
-  # entrypoint.sh clones each https:// entry into AGENT_HOMES_ROOT/<slug>
-  # on boot. file:// entries are used in-place (host path == working tree).
+  # Mirror root for per-thread home clones the tenant performs lazily on
+  # first mention (under #253 home arrives in the envelope; no boot-time
+  # prefetch). file:// homes never touch this dir.
   AGENT_HOMES_ROOT = "/data/homes"
   SANDBOX_PROVIDER = "fly"
   # Note: FLY_APP_NAME would be overridden by Fly's auto-injection of the
@@ -32,6 +48,20 @@ primary_region = "iad"
   AGENTA_SANDBOX_APP = "agenta-sandbox"
   FLY_REGION = "iad"
   HEALTH_PORT = "8080"
+  TENANT_INTERNAL_PORT = "8081"
+  # Slack team_id the bot's default route is keyed under; renders into
+  # the bot's auto-generated tenants.json at boot. agentalabs workspace.
+  WORKSPACE_ID = "T0B304AJPUZ"
+  # Default home repo used when no per-channel override matches. Private,
+  # so the tenant needs a PAT — `auth_env` references the GITHUB_TOKEN
+  # Fly secret already set on this app.
+  DEFAULT_HOME_REMOTE = "https://github.com/eladb/agenta-test-home"
+  DEFAULT_HOME_AUTH_ENV = "GITHUB_TOKEN"
+  # Per-channel home overrides as raw JSON (routes[WORKSPACE_ID].channels).
+  # First direct channel C0B4MU6GCFQ → agenta-test-home-alone over SSH
+  # using the deploy-key PEM stashed in the Fly secret
+  # AGENTA_TEST_HOME_ALONE_DEPLOY_KEY.
+  CHANNEL_HOMES_JSON = '{"C0B4MU6GCFQ":{"tenant":"default","home":{"remote":"git@github.com:eladb/agenta-test-home-alone.git","auth_env":"AGENTA_TEST_HOME_ALONE_DEPLOY_KEY"}}}'
 
 [[mounts]]
   source = "agenta_data"
@@ -52,9 +82,9 @@ primary_region = "iad"
   method = "GET"
   path = "/health"
 
-# Single machine — the bot uses src/lockfile.ts to enforce one instance, so
-# a second machine would refuse to start anyway. The deploy strategy is
-# "immediate" because we have no second machine to roll over into.
+# Single machine — the tenant uses src/shared/lockfile.ts to enforce one
+# instance, so a second machine would refuse to start anyway. The deploy
+# strategy is "immediate" because we have no second machine to roll over into.
 [deploy]
   strategy = "immediate"
 

@@ -41,9 +41,9 @@ name: CD
 # green so the timeline stays clean. The skip allowlist lives in
 # `.ci-ignore` at the repo root.
 #
-# Prod-only changes (config/homes.json, fly.toml, slack-manifests, etc.)
+# Prod-only changes (config/tenants.json, fly.toml, slack-manifests, etc.)
 # skip the e2e step but still run deploy + canary — e2e wouldn't
-# exercise those paths anyway (helpers.ts overrides AGENT_HOMES_CONFIG
+# exercise those paths anyway (helpers.ts mints an inline tenants config
 # per run; the test Slack apps are separate from prod). That allowlist
 # lives in `.ci-e2e-ignore`.
 #
@@ -131,13 +131,19 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: bun run deploy
 
-      # Canary uses the production agent's bot token only to resolve the
-      # prod agent's user id (no Socket Mode client is connected to it).
-      # The tester drives the conversation via TEST_APP_TOKEN/TEST_BOT_TOKEN.
+      # Canary pins the bot user the tester mentions via CANARY_TARGET_USER_ID
+      # so the Fly gate actually verifies the AGENTA deployment. Without the
+      # pin, canary.ts falls back to auth.test on the single repo-level
+      # SLACK_BOT_TOKEN secret — which resolves to the SALTO bot
+      # (U0B65LMHRLL). For months that made both this step AND the salto
+      # canary below mention salto in their respective channels, so a salto
+      # outage masked as "agenta canary failed" and an agenta regression
+      # would never have been caught here at all. See `canary-monitor.sh`,
+      # which already follows this per-target pin.
       - name: Canary (production)
         if: steps.changed.outputs.code == 'true'
         env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CANARY_TARGET_USER_ID: U0B2WQUHK6Z
           TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
           TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
           TEST_CHANNEL_ID: ${{ secrets.CANARY_CHANNEL_ID }}
@@ -193,13 +199,15 @@ jobs:
       # Canary against the deployed salto bot. Reuses the shared tester
       # (TEST_*) — safe because this runs strictly after the Fly canary
       # above. SALTO_CANARY_CHANNEL_ID has the salto bot + tester invited.
+      # CANARY_TARGET_USER_ID pinned to the salto bot user (see Fly canary
+      # comment above).
       - name: Canary (salto / ECS)
         if: steps.changed.outputs.code == 'true'
         env:
           AGENTA_DEPLOY_TARGET: ecs
           AGENTA_ECS_CLUSTER: agenta-bot
           AGENTA_ECS_SERVICE: agenta-bot
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CANARY_TARGET_USER_ID: U0B65LMHRLL
           TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
           TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
           TEST_CHANNEL_ID: ${{ secrets.SALTO_CANARY_CHANNEL_ID }}

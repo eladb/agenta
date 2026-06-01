@@ -76,14 +76,21 @@ function awsJson<T>(args: string[], context: string): T {
 
 // 1. Tooling + account/region.
 if (run('aws', ['--version'], { capture: true }).status !== 0) {
-  die('aws CLI not found on PATH. Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html');
+  die(
+    'aws CLI not found on PATH. Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html',
+  );
 }
 if (run('docker', ['version', '--format', '{{.Server.Version}}'], { capture: true }).status !== 0) {
   die('docker not found on PATH or daemon not running.');
 }
 
-const caller = awsJson<{ Account: string }>(['sts', 'get-caller-identity'], 'aws sts get-caller-identity');
-const region = process.env.AWS_REGION ?? run('aws', ['configure', 'get', 'region'], { capture: true }).stdout.trim();
+const caller = awsJson<{ Account: string }>(
+  ['sts', 'get-caller-identity'],
+  'aws sts get-caller-identity',
+);
+const region =
+  process.env.AWS_REGION ??
+  run('aws', ['configure', 'get', 'region'], { capture: true }).stdout.trim();
 if (!region) die('AWS_REGION is not set and `aws configure get region` returned nothing.');
 console.log(`✓ aws account=${caller.Account} region=${region}`);
 
@@ -113,8 +120,11 @@ const svcWrap = awsJson<ServiceShape>(
   'aws ecs describe-services',
 );
 const svc = svcWrap.services?.[0];
-if (!svc) die(`service ${SERVICE} not found in cluster ${CLUSTER}; did you run the CloudFormation stack?`);
-console.log(`✓ service ${svc.serviceName} (desired=${svc.desiredCount}) currently on ${svc.taskDefinition}`);
+if (!svc)
+  die(`service ${SERVICE} not found in cluster ${CLUSTER}; did you run the CloudFormation stack?`);
+console.log(
+  `✓ service ${svc.serviceName} (desired=${svc.desiredCount}) currently on ${svc.taskDefinition}`,
+);
 
 type TaskDefShape = {
   taskDefinition: {

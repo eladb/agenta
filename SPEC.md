@@ -1,5 +1,9 @@
 # SPEC: Slack Thread-Backed Agentic Sandbox Bot (v1)
 
+## v2: multi-tenant split
+
+The runtime now ships in two roles — a Slack-ingress **bot** and an agent-harness **tenant** — built from one image. The bot owns Socket Mode + routing via `config/tenants.json`; tenants own data volumes, sessions, sandboxes, and model calls; they talk over `POST /events` with a per-tenant shared bearer. The full design and migration plan live in **GitHub issue [#253](https://github.com/eladb/agenta/issues/253)** (eladb/agenta). The sections below remain the v1 source of truth for everything inside a single tenant — session lifecycle, sandbox, persistence, model gateway. Where v1 says "the bot does X" and X is now a tenant-side concern (recovery, JSONL, sandboxes), read it as "the tenant does X".
+
 ## 1) Problem Statement
 Build a single-workspace Slack bot platform where each thread can host an isolated, long-running agent session with filesystem/shell tooling, sandbox isolation, and persistent thread history. The system must be simple, deterministic, and bootstrap-friendly for implementation by multiple agents.
 

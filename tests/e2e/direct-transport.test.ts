@@ -22,8 +22,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -33,9 +33,9 @@ import {
   mention,
   requireEnv,
   STUB_REPLY_PREFIX,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitForReply,
@@ -115,12 +115,12 @@ if (!SHOULD_RUN) {
     homeOverride = withTempHomeConfig(REMOTE ?? '', AUTH_ENV);
 
     channel = requireEnv('TEST_CHANNEL_ID');
-    [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+    [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
 
     // Make sure we start from a known-good remote state (the README must
     // exist for the agent's prompt builder, which clones the mirror on
     // boot via entrypoint.sh — for tests it short-circuits since we go
-    // through the in-process startAgent path).
+    // through the in-process startBotAndTenant path).
     const probe = gitWithKey(['ls-remote', REMOTE ?? '', 'HEAD']);
     if (probe.status !== 0) {
       throw new Error(

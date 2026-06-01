@@ -26,9 +26,7 @@ if (name !== 'agent' && name !== 'tester' && name !== 'ci') {
 }
 
 const repoRoot = join(import.meta.dir, '..');
-const manifest = JSON.parse(
-  readFileSync(join(repoRoot, `slack-manifests/${name}.json`), 'utf8'),
-);
+const manifest = JSON.parse(readFileSync(join(repoRoot, `slack-manifests/${name}.json`), 'utf8'));
 const cache = loadCache();
 const appId = cache[name]?.app_id;
 if (typeof appId !== 'string') {

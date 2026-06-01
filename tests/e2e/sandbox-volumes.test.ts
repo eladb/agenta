@@ -1,19 +1,19 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import type { AssistantMessage, CallModel, Message } from '../../src/model/gateway';
-import { threadKey } from '../../src/runtime/thread';
-import { containerName } from '../../src/sandbox';
-import { ensureImage, volumeName } from '../../src/sandbox/docker';
+import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
+import { threadKey } from '../../src/tenant/runtime/thread';
+import { containerName } from '../../src/tenant/sandbox';
+import { ensureImage, volumeName } from '../../src/tenant/sandbox/docker';
 import {
   type Agent,
   cleanupTempDataDir,
-  deleteThread,
   DOCKER_PROVIDER_ACTIVE,
+  deleteThread,
   mention,
   requireEnv,
-  setupTempDataDir,
   safeShutdown,
-  startAgent,
+  setupTempDataDir,
+  startBotAndTenant,
   startTester,
   type Tester,
   waitFor,
@@ -62,7 +62,7 @@ beforeAll(async () => {
   channel = requireEnv('TEST_CHANNEL_ID');
   process.env.SANDBOX_EXEC_TIMEOUT_MS = '8000';
   await ensureImage();
-  [agent, tester] = await Promise.all([startAgent(scriptedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
 }, 120_000);
 
 afterAll(async () => {

@@ -18,7 +18,13 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type Cache, loadCache, saveCache, slackApi, withTokenRefresh } from './slack-config-tokens';
+import {
+  type Cache,
+  loadCache,
+  saveCache,
+  slackApi,
+  withTokenRefresh,
+} from './slack-config-tokens';
 
 const ROOT = join(import.meta.dir, '..');
 const MANIFEST = join(ROOT, 'slack-manifests/ci.json');
