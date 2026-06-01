@@ -3,8 +3,15 @@
 # install.sh — provision the agenta agent toolchain on a fresh box.
 #
 # Installs the binaries an agenta agent needs that aren't part of a base
-# Ubuntu image: bun (runtime), flyctl (deploy/ssh/canary), the aws CLI
-# (ECS), and docker (local sandbox provider). gh is assumed pre-installed.
+# image: bun (runtime), flyctl (deploy/ssh/canary), the aws CLI (ECS +
+# CloudFormation + CodeBuild + SSM), and docker (local sandbox provider).
+# gh is assumed pre-installed.
+#
+# Cross-platform: Linux (Ubuntu agent box) AND macOS (Darwin). On macOS the
+# aws CLI v2 installs via the official .pkg (current-user, no sudo — v2 is
+# required for `aws sso login`) and docker can't be auto-installed (build ECS
+# images via the AWS CodeBuild fallback instead — see CLAUDE.md "ECS image
+# builds"). The PATH block is written to .zshrc too (macOS default shell).
 # Also ensures the apt prereqs the canary + canary-monitor toolchain needs
 # (jq, unzip, curl), installs the 30-min double-canary watchdog
 # (scripts/canary-monitor.sh → ~/.local/bin + a cron entry), and persists
@@ -36,9 +43,10 @@ have() { command -v "$1" >/dev/null 2>&1 || { [ -n "${2:-}" ] && [ -x "$2" ]; };
 # scripts/canary.ts + .env at runtime).
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+OS="$(uname -s)"   # Linux | Darwin — selects download artifacts + install method
 case "$(uname -m)" in
-  x86_64)  BUN_ARCH="x64";      AWS_ARCH="x86_64" ;;
-  aarch64) BUN_ARCH="aarch64";  AWS_ARCH="aarch64" ;;
+  x86_64)         BUN_ARCH="x64";      AWS_ARCH="x86_64" ;;
+  aarch64|arm64)  BUN_ARCH="aarch64";  AWS_ARCH="aarch64" ;;   # macOS reports arm64
   *) warn "unsupported arch $(uname -m); bun/aws steps may fail" ;;
 esac
 
@@ -87,11 +95,12 @@ install_apt_prereqs() {
 install_bun() {
   if have bun "$HOME/.bun/bin/bun"; then log "bun present"; return; fi
   log "installing bun (user-level → ~/.bun)"
+  local plat; [ "$OS" = "Darwin" ] && plat="darwin" || plat="linux"
   local tmp; tmp="$(mktemp -d)"
-  curl -fsSL "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-${BUN_ARCH}.zip" -o "$tmp/bun.zip"
+  curl -fsSL "https://github.com/oven-sh/bun/releases/latest/download/bun-${plat}-${BUN_ARCH}.zip" -o "$tmp/bun.zip"
   extract_zip "$tmp/bun.zip" "$tmp"
   mkdir -p "$HOME/.bun/bin"
-  install -m 0755 "$tmp/bun-linux-${BUN_ARCH}/bun" "$HOME/.bun/bin/bun"
+  install -m 0755 "$tmp/bun-${plat}-${BUN_ARCH}/bun" "$HOME/.bun/bin/bun"
   rm -rf "$tmp"
 }
 
@@ -103,16 +112,44 @@ install_flyctl() {
 
 install_aws() {
   if have aws "$HOME/.local/bin/aws"; then log "aws present"; return; fi
-  log "installing aws CLI v2 (user-level → ~/.local)"
   local tmp; tmp="$(mktemp -d)"
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip" -o "$tmp/awscliv2.zip"
-  extract_zip "$tmp/awscliv2.zip" "$tmp"
-  "$tmp/aws/install" -i "$HOME/.local/aws-cli" -b "$HOME/.local/bin"
+  if [ "$OS" = "Darwin" ]; then
+    # macOS: AWS CLI v2 via the official .pkg, current-user install (no sudo)
+    # per AWS docs — v2 is required for `aws sso login` (v1 lacks it). The
+    # choices.xml redirects the install under ~/.local; binary lands at
+    # ~/.local/aws-cli/aws, which we symlink onto PATH.
+    log "installing aws CLI v2 (macOS, current-user, no sudo)"
+    curl -fsSL "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$tmp/AWSCLIV2.pkg"
+    cat > "$tmp/aws-choices.xml" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array><dict>
+  <key>choiceAttribute</key><string>customLocation</string>
+  <key>attributeSetting</key><string>$HOME/.local</string>
+  <key>choiceIdentifier</key><string>default</string>
+</dict></array></plist>
+XML
+    installer -pkg "$tmp/AWSCLIV2.pkg" -target CurrentUserHomeDirectory -applyChoiceChangesXML "$tmp/aws-choices.xml"
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$HOME/.local/aws-cli/aws" "$HOME/.local/bin/aws"
+    ln -sf "$HOME/.local/aws-cli/aws_completer" "$HOME/.local/bin/aws_completer"
+  else
+    log "installing aws CLI v2 (linux, user-level → ~/.local)"
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip" -o "$tmp/awscliv2.zip"
+    extract_zip "$tmp/awscliv2.zip" "$tmp"
+    "$tmp/aws/install" -i "$HOME/.local/aws-cli" -b "$HOME/.local/bin"
+  fi
   rm -rf "$tmp"
 }
 
 install_docker() {
   if command -v docker >/dev/null 2>&1; then log "docker present: $(command -v docker)"; return; fi
+  if [ "$OS" = "Darwin" ]; then
+    warn "docker not auto-installable on macOS (Docker Desktop / colima are GUI/brew installs)."
+    warn "  For ECS image builds without local docker, build remotely via AWS CodeBuild"
+    warn "  (project 'agenta-image-build' in the salto account) — see CLAUDE.md 'ECS image builds'."
+    return
+  fi
   local sudo=""
   if [ "$(id -u)" -eq 0 ]; then
     sudo=""
@@ -136,7 +173,7 @@ install_docker() {
 # Make sure the user-level bin dirs are on PATH for future shells.
 ensure_path() {
   local marker="# agenta install.sh PATH"
-  for rc in "$HOME/.bashrc" "$HOME/.profile"; do
+  for rc in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc"; do
     [ -f "$rc" ] || continue
     grep -qF "$marker" "$rc" && continue
     {

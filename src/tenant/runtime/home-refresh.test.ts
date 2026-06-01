@@ -85,8 +85,40 @@ describe('refreshHomeMirror', () => {
     ]);
   });
 
-  test('https:// skips with a warning when the mirror has no .git', async () => {
+  test('https:// clones when the mirror has no .git (first use, #262)', async () => {
+    // No .git seeded → initial clone with the token-spliced URL.
+    const mirror = join(tmpRoot, 'github.com-owner-missing');
     process.env.HOME_REFRESH_TEST_PAT = 'tok-abc';
+    const { runner, calls } = makeRunner();
+    await refreshHomeMirror(
+      { remote: 'https://github.com/owner/missing', auth_env: 'HOME_REFRESH_TEST_PAT' },
+      runner,
+    );
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.cmd).toEqual([
+      'git',
+      'clone',
+      'https://x-access-token:tok-abc@github.com/owner/missing',
+      mirror,
+      '--quiet',
+    ]);
+  });
+
+  test('ssh:// clones when the mirror has no .git (first use, #262)', async () => {
+    const remote = 'git@github.com:owner/missing.git';
+    const mirror = join(tmpRoot, 'github.com-owner-missing-git');
+    process.env.HOME_REFRESH_TEST_PEM =
+      '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----';
+    const { runner, calls } = makeRunner();
+    await refreshHomeMirror({ remote, auth_env: 'HOME_REFRESH_TEST_PEM' }, runner);
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.cmd).toEqual(['git', 'clone', remote, mirror, '--quiet']);
+    expect(calls[0]?.env?.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=yes');
+  });
+
+  test('https:// with no .git and missing auth_env skips without cloning', async () => {
+    // First-use path must still no-op (not throw) when the secret is unset.
+    delete process.env.HOME_REFRESH_TEST_PAT;
     const { runner, calls } = makeRunner();
     await refreshHomeMirror(
       { remote: 'https://github.com/owner/missing', auth_env: 'HOME_REFRESH_TEST_PAT' },
