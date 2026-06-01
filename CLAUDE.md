@@ -136,7 +136,10 @@ src/
       gateway.ts      createCallModel: fetch /chat/completions; tool_calls; OpenRouter-friendly headers
       context.ts      buildMessages: JSONL → OpenAI messages; reattaches tool_calls; synthesizes orphan stubs
       tools/          one file per tool (def + describe + invoke); index.ts = TOOLS registry; _registry.test.ts = contracts.
-                      get-current-time, fetch_url, bash, read-file, write-file, edit-file, grep, glob, list-dir, ask-user, share-file
+                      get-current-time, fetch_url, bash, read-file, write-file, edit-file, grep, glob, list-dir, ask-user, share-file.
+                      Extensible: index.ts:registerExtraTools(env) scans every dir in AGENTA_EXTRA_TOOLS for *.ts/*.js modules and
+                      registers each default-export Tool/Tool[] alongside the built-ins (validated, fail-fast, no name collisions).
+                      Called once at tenant boot (index.ts) so an overlay image can add tools without editing core source.
     sandbox/
       provider.ts     SandboxProvider interface + SandboxEndpoint
       persistence.ts  load/save/clear/sweep sandbox (wraps session-store)
@@ -216,7 +219,7 @@ tests/golden/  <file>/<name>.jsonl recorded (request,response) replayed position
 
 **Optional, bot-only:** `HEALTH_PORT` (default 8080; `fly.toml` polls this).
 
-**Optional, tenant-only:** `AGENTA_DATA_DIR` · `MODEL_NAME` (default `claude-sonnet-4-6`) · `MODEL_BASE_URL` (default `https://api.anthropic.com/v1`; **prod sets API_KEY+BASE_URL+NAME together as Fly secrets — if BASE_URL is unset the key goes to api.anthropic.com → 401; rotate all three together**) · `SYSTEM_PROMPT` (prepended to README) · `AGENT_HOME_DIR` (test-only prompt-source override) · `SANDBOX_PROVIDER` (docker|fly|ecs) · `SANDBOX_EGRESS` (allow|block) · `FLY_APP_NAME`+`FLY_API_TOKEN` (when fly) · `FLY_REGION` · `SANDBOX_EXEC_TIMEOUT_MS` (default 60s) · `HEALTH_PORT` (default 8080; `/events` + `/health` share the same Bun.serve).
+**Optional, tenant-only:** `AGENTA_DATA_DIR` · `MODEL_NAME` (default `claude-sonnet-4-6`) · `MODEL_BASE_URL` (default `https://api.anthropic.com/v1`; **prod sets API_KEY+BASE_URL+NAME together as Fly secrets — if BASE_URL is unset the key goes to api.anthropic.com → 401; rotate all three together**) · `SYSTEM_PROMPT` (prepended to README) · `AGENT_HOME_DIR` (test-only prompt-source override) · `SANDBOX_PROVIDER` (docker|fly|ecs) · `SANDBOX_EGRESS` (allow|block) · `FLY_APP_NAME`+`FLY_API_TOKEN` (when fly) · `FLY_REGION` · `SANDBOX_EXEC_TIMEOUT_MS` (default 60s) · `HEALTH_PORT` (default 8080; `/events` + `/health` share the same Bun.serve) · `AGENTA_EXTRA_TOOLS` (comma-separated dirs scanned at boot for extra `*.ts`/`*.js` tool modules — each default-exports a `Tool`/`Tool[]` registered alongside the built-ins; unset ⇒ built-ins only; used by overlay images to add tools without editing core).
 
 **Setup script (rotate every 12h):** `SLACK_CONFIG_ACCESS_TOKEN`, `SLACK_CONFIG_REFRESH_TOKEN`.
 

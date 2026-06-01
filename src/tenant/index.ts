@@ -23,6 +23,7 @@ import { acquire } from '../shared/lockfile';
 import { log } from '../shared/log';
 import { teardownAllSessions } from './git/bootstrap';
 import { startHttp } from './http';
+import { registerExtraTools } from './model/tools';
 import type { ModelTriplet } from './runtime/home-config';
 import { recoverInterruptedSessions } from './runtime/recovery';
 import { reapOrphanSandboxes } from './sandbox';
@@ -79,6 +80,13 @@ try {
 } catch (err) {
   log.warn('boot', `recovery failed: ${(err as Error).message}`);
 }
+
+// Extra tools (overlay images): scan AGENTA_EXTRA_TOOLS dirs and register
+// their tools alongside the built-ins. Must complete before the first
+// envelope arrives — turn.ts reads TOOLS/TOOL_DEFS at call-time, so the
+// registry just has to be fully populated by the time /events is served. A
+// broken overlay fails boot loudly rather than running a half-registry.
+await registerExtraTools();
 
 // Sandboxes survive bot restart: per-thread routing info lives in
 // session.json, the provider re-hydrates from disk on the next mention.

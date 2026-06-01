@@ -57,7 +57,6 @@ const PRETTY_TOOL_LABELS: Record<string, string> = {
   fetch_url: 'Fetching URL',
   share_file: 'Sharing file',
   ask_user: 'Asking',
-  salto_cli: 'Running Salto CLI',
   github_create_pr: 'Opening GitHub PR',
   github_update_pr: 'Updating PR',
   github_pr_comment: 'Commenting on PR',
@@ -432,7 +431,7 @@ export async function runTurn(
         // underneath, both plain text (no inline-code / fenced backticks).
         // bash gets the live preview behavior; everything else just shows
         // a result placeholder until the tool returns.
-        const hasLivePreview = tc.function.name === 'bash' || tc.function.name === 'salto_cli';
+        const hasLivePreview = tc.function.name === 'bash';
         const label = toolLabel(tc);
         const bulletIdx = liveLines.length;
         liveLines.push(label);
