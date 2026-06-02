@@ -55,8 +55,15 @@ function readEvents(threadTs: string): Event[] {
 async function createThread(seed: string): Promise<string> {
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, seed);
   createdThreads.push(threadTs);
-  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
-    t.startsWith(STUB_REPLY_PREFIX),
+  await waitForReply(
+    tester,
+    channel,
+    threadTs,
+    agent.botUserId,
+    (t) => t.startsWith(STUB_REPLY_PREFIX),
+    // 90s (vs the 45s default): docker-in-CI cold start makes the first reply
+    // slow; the default flaked under the #276 CD shakedown.
+    { timeoutMs: 90_000 },
   );
   return threadTs;
 }
@@ -82,7 +89,7 @@ test('edit of a non-mention thread reply is recorded as a slack edit event', asy
           e.payload.slack_ts === replyTs &&
           e.payload.text === originalText,
       ),
-    { what: 'initial reply ingested' },
+    { what: 'initial reply ingested', timeoutMs: 90_000 },
   );
 
   const newText = 'edited version';
@@ -97,7 +104,7 @@ test('edit of a non-mention thread reply is recorded as a slack edit event', asy
           e.payload.slack_ts === replyTs &&
           e.payload.new_text === newText,
       ),
-    { what: 'edit event recorded' },
+    { what: 'edit event recorded', timeoutMs: 90_000 },
   );
 
   const events = readEvents(threadTs);
@@ -105,7 +112,7 @@ test('edit of a non-mention thread reply is recorded as a slack edit event', asy
   const editIdx = events.findIndex((e) => e.type === 'edit' && e.payload.slack_ts === replyTs);
   expect(msgIdx).toBeGreaterThanOrEqual(0);
   expect(editIdx).toBeGreaterThan(msgIdx);
-});
+}, 300_000);
 
 test('delete of a non-mention thread reply is recorded as a slack delete event', async () => {
   const threadTs = await createThread(`e2e-delete-${Date.now()}`);
@@ -123,7 +130,7 @@ test('delete of a non-mention thread reply is recorded as a slack delete event',
       readEvents(threadTs).some(
         (e) => e.source === 'slack' && e.type === 'message' && e.payload.slack_ts === replyTs,
       ),
-    { what: 'reply ingested' },
+    { what: 'reply ingested', timeoutMs: 90_000 },
   );
 
   await tester.web.chat.delete({ channel, ts: replyTs });
@@ -133,7 +140,7 @@ test('delete of a non-mention thread reply is recorded as a slack delete event',
       readEvents(threadTs).some(
         (e) => e.source === 'slack' && e.type === 'delete' && e.payload.slack_ts === replyTs,
       ),
-    { what: 'delete event recorded' },
+    { what: 'delete event recorded', timeoutMs: 90_000 },
   );
 
   // event stream preserves the original message + delete, in order
@@ -142,4 +149,4 @@ test('delete of a non-mention thread reply is recorded as a slack delete event',
   const delIdx = events.findIndex((e) => e.type === 'delete' && e.payload.slack_ts === replyTs);
   expect(msgIdx).toBeGreaterThanOrEqual(0);
   expect(delIdx).toBeGreaterThan(msgIdx);
-});
+}, 300_000);
