@@ -84,15 +84,17 @@ run_tenant_setup() {
   mkdir -p "$DATA_DIR" "$HOMES_ROOT"
 }
 
-render_combo_tenants_json() {
+render_tenants_json() {
   # Build a single-tenant tenants.json that routes the workspace's default
-  # at the loopback tenant. Writes to $1.
-  local out_path="$1"
-  : "${WORKSPACE_ID:?combo: WORKSPACE_ID required (Slack team_id)}"
-  : "${DEFAULT_HOME_REMOTE:?combo: DEFAULT_HOME_REMOTE required}"
-  : "${TENANT_SECRET:?combo: TENANT_SECRET required (auth_env value for the loopback tenant)}"
-
-  local tenant_port="${TENANT_INTERNAL_PORT:-8081}"
+  # at the tenant reachable at the URL in $1; writes the file to $2.
+  #   combo: $1 = http://127.0.0.1:<TENANT_INTERNAL_PORT>  (loopback sibling)
+  #   bot:   $1 = $TENANT_URL                              (external tenant
+  #              service, e.g. Cloud Map http://tenant.agenta.local:8080)
+  local tenant_url="$1"
+  local out_path="$2"
+  : "${WORKSPACE_ID:?WORKSPACE_ID required (Slack team_id)}"
+  : "${DEFAULT_HOME_REMOTE:?DEFAULT_HOME_REMOTE required}"
+  : "${TENANT_SECRET:?TENANT_SECRET required (auth_env value for the tenant)}"
 
   # Build the default home block. auth_env is optional (file:// + public
   # https don't need one).
@@ -108,7 +110,7 @@ render_combo_tenants_json() {
   local channels_json="${CHANNEL_HOMES_JSON:-{\}}"
 
   jq -n \
-    --arg url "http://127.0.0.1:${tenant_port}" \
+    --arg url "$tenant_url" \
     --arg tk "TENANT_SECRET" \
     --arg ws "$WORKSPACE_ID" \
     --argjson home "$default_home_json" \
@@ -135,6 +137,16 @@ wait_for_tenant_ready() {
 case "$ROLE" in
   bot)
     echo "[entrypoint] role=bot"
+    # Decoupled deployment: when TENANT_URL is set, render tenants.json from
+    # env (same shape as combo) pointing the workspace default route at the
+    # external tenant service. Without TENANT_URL, fall back to an
+    # operator-provided config/tenants.json via TENANTS_JSON_PATH.
+    if [ -n "${TENANT_URL:-}" ]; then
+      TENANTS_JSON_OUT="${TENANTS_JSON_PATH:-/tmp/tenants.json}"
+      render_tenants_json "$TENANT_URL" "$TENANTS_JSON_OUT"
+      export TENANTS_JSON_PATH="$TENANTS_JSON_OUT"
+      echo "[entrypoint] rendered tenants.json -> $TENANTS_JSON_OUT (tenant=$TENANT_URL)"
+    fi
     exec bun src/bot/index.ts
     ;;
   tenant)
@@ -153,7 +165,7 @@ case "$ROLE" in
     BOT_PORT="${HEALTH_PORT:-8080}"
 
     TENANTS_JSON_OUT="${TENANTS_JSON_PATH:-/tmp/tenants.json}"
-    render_combo_tenants_json "$TENANTS_JSON_OUT"
+    render_tenants_json "http://127.0.0.1:${TENANT_PORT}" "$TENANTS_JSON_OUT"
     export TENANTS_JSON_PATH="$TENANTS_JSON_OUT"
     echo "[entrypoint] rendered tenants.json -> $TENANTS_JSON_OUT"
 

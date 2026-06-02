@@ -151,22 +151,79 @@ export async function readSession(threadKey: string): Promise<SessionState | und
   }
 }
 
+// Per-threadKey serialization for read-modify-write of session.json (#254
+// review #6). Each setter below (and the status flips in session.ts) reads
+// the current record, mutates one field, and writes the whole thing back.
+// With the bot↔tenant split, `/events` is concurrent, so two of these can
+// interleave — e.g. `setGit` reads before `setSandbox` writes, then `setGit`
+// writes back its stale view and DROPS the sandbox handle. The result is a
+// thread whose sandbox task is running but whose session.json has no
+// `sandbox` field, so every later turn reports "sandbox not initialized".
+// Chaining all mutations for a given threadKey through one promise tail makes
+// each read-modify-write atomic w.r.t. the others (single-process tenant).
+const sessionLocks = new Map<string, Promise<unknown>>();
+
+function withSessionLock<T>(threadKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = sessionLocks.get(threadKey) ?? Promise.resolve();
+  // Run fn after prev settles (success OR failure) so one bad write can't
+  // wedge the chain. `run` carries fn's real result to the caller.
+  const run = prev.then(fn, fn);
+  // Store a rejection-swallowed tail so the next waiter never sees fn's error.
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  sessionLocks.set(threadKey, tail);
+  // Drop the map entry once we're the last in line (bounds the map by the
+  // number of threads with in-flight writes, not all threads ever seen).
+  void tail.then(() => {
+    if (sessionLocks.get(threadKey) === tail) sessionLocks.delete(threadKey);
+  });
+  return run;
+}
+
+// The single read-modify-write primitive. `mutate` receives the current
+// on-disk state (or undefined) and returns the next full state, or undefined
+// to skip the write. Runs under the per-threadKey lock so concurrent callers
+// serialize instead of clobbering each other. `updated_at` is stamped here so
+// callers never have to.
+export async function updateSession(
+  threadKey: string,
+  mutate: (prev: SessionState | undefined) => SessionState | undefined,
+): Promise<void> {
+  await withSessionLock(threadKey, async () => {
+    const prev = await readSession(threadKey);
+    const next = mutate(prev);
+    if (next === undefined) return;
+    next.updated_at = new Date().toISOString();
+    await writeSession(threadKey, next);
+  });
+}
+
+// Spread only the routing fields that survive a status transition / clear.
+// Centralizes the "preserve sandbox/git/home/model/display" list so the
+// status flips in session.ts and clearSession stay in sync.
+export function preservedFields(prev: SessionState | undefined): Partial<SessionState> {
+  if (!prev) return {};
+  return {
+    ...(prev.sandbox !== undefined ? { sandbox: prev.sandbox } : {}),
+    ...(prev.git !== undefined ? { git: prev.git } : {}),
+    ...(prev.home !== undefined ? { home: prev.home } : {}),
+    ...(prev.model !== undefined ? { model: prev.model } : {}),
+    ...(prev.display !== undefined ? { display: prev.display } : {}),
+  };
+}
+
 // "Clear" no longer means delete — going idle leaves the file in place with
 // status: 'idle' so the sandbox / git / home / model / display records
-// survive across turns. Read existing state first so we preserve those
-// fields when transitioning. `/delete` removes the entire thread dir,
-// which takes session.json with it.
+// survive across turns. `/delete` removes the entire thread dir, which takes
+// session.json with it.
 export async function clearSession(threadKey: string): Promise<void> {
-  const existing = await readSession(threadKey);
-  await writeSession(threadKey, {
+  await updateSession(threadKey, (existing) => ({
     status: 'idle',
-    updated_at: new Date().toISOString(),
-    ...(existing?.sandbox !== undefined ? { sandbox: existing.sandbox } : {}),
-    ...(existing?.git !== undefined ? { git: existing.git } : {}),
-    ...(existing?.home !== undefined ? { home: existing.home } : {}),
-    ...(existing?.model !== undefined ? { model: existing.model } : {}),
-    ...(existing?.display !== undefined ? { display: existing.display } : {}),
-  });
+    updated_at: '',
+    ...preservedFields(existing),
+  }));
 }
 
 // Atomic read-modify-write that sets (or clears, when undefined) the
@@ -179,50 +236,36 @@ export async function setSandbox(
   threadKey: string,
   sandbox: SandboxRecord | undefined,
 ): Promise<void> {
-  const existing = await readSession(threadKey);
-  if (!existing) {
-    if (sandbox === undefined) return;
-    // No prior state: write a minimal idle record carrying just the sandbox.
-    // This branch shouldn't be exercised in practice (handler always writes a
-    // 'running' record before any tool — and therefore any sandbox — runs),
-    // but it keeps the API total.
-    await writeSession(threadKey, {
-      status: 'idle',
-      updated_at: new Date().toISOString(),
-      sandbox,
-    });
-    return;
-  }
-  const next: SessionState = {
-    ...existing,
-    updated_at: new Date().toISOString(),
-    ...(sandbox !== undefined ? { sandbox } : {}),
-  };
-  if (sandbox === undefined) delete next.sandbox;
-  await writeSession(threadKey, next);
+  await updateSession(threadKey, (existing) => {
+    if (!existing) {
+      if (sandbox === undefined) return undefined;
+      // No prior state: write a minimal idle record carrying just the sandbox.
+      // This branch shouldn't be exercised in practice (handler always writes a
+      // 'running' record before any tool — and therefore any sandbox — runs),
+      // but it keeps the API total.
+      return { status: 'idle', updated_at: '', sandbox };
+    }
+    const next: SessionState = { ...existing };
+    if (sandbox !== undefined) next.sandbox = sandbox;
+    else delete next.sandbox;
+    return next;
+  });
 }
 
 // Atomic read-modify-write of the `git` record (symmetric with setSandbox).
 // Called by `ensureRepoBootstrap` once it's generated a keypair + added it
 // to authorized_keys. `undefined` clears the record (used for cleanup).
 export async function setGit(threadKey: string, git: GitRecord | undefined): Promise<void> {
-  const existing = await readSession(threadKey);
-  if (!existing) {
-    if (git === undefined) return;
-    await writeSession(threadKey, {
-      status: 'idle',
-      updated_at: new Date().toISOString(),
-      git,
-    });
-    return;
-  }
-  const next: SessionState = {
-    ...existing,
-    updated_at: new Date().toISOString(),
-    ...(git !== undefined ? { git } : {}),
-  };
-  if (git === undefined) delete next.git;
-  await writeSession(threadKey, next);
+  await updateSession(threadKey, (existing) => {
+    if (!existing) {
+      if (git === undefined) return undefined;
+      return { status: 'idle', updated_at: '', git };
+    }
+    const next: SessionState = { ...existing };
+    if (git !== undefined) next.git = git;
+    else delete next.git;
+    return next;
+  });
 }
 
 // Atomic read-modify-write of the `home` record (#87). Called once on
@@ -230,23 +273,16 @@ export async function setGit(threadKey: string, git: GitRecord | undefined): Pro
 // only (remote + auth_env) — slug, transport, and paths recompute on
 // read via `resolveTransport`. `undefined` clears the field.
 export async function setHome(threadKey: string, home: HomeConfig | undefined): Promise<void> {
-  const existing = await readSession(threadKey);
-  if (!existing) {
-    if (home === undefined) return;
-    await writeSession(threadKey, {
-      status: 'idle',
-      updated_at: new Date().toISOString(),
-      home,
-    });
-    return;
-  }
-  const next: SessionState = {
-    ...existing,
-    updated_at: new Date().toISOString(),
-    ...(home !== undefined ? { home } : {}),
-  };
-  if (home === undefined) delete next.home;
-  await writeSession(threadKey, next);
+  await updateSession(threadKey, (existing) => {
+    if (!existing) {
+      if (home === undefined) return undefined;
+      return { status: 'idle', updated_at: '', home };
+    }
+    const next: SessionState = { ...existing };
+    if (home !== undefined) next.home = home;
+    else delete next.home;
+    return next;
+  });
 }
 
 // Atomic read-modify-write of the `model` triplet (#128). Symmetric with
@@ -254,23 +290,16 @@ export async function setHome(threadKey: string, home: HomeConfig | undefined): 
 // snapshot is just the triplet (name + base_url + api_key_env); the API key
 // value is read at use time, never persisted here.
 export async function setModel(threadKey: string, model: ModelTriplet | undefined): Promise<void> {
-  const existing = await readSession(threadKey);
-  if (!existing) {
-    if (model === undefined) return;
-    await writeSession(threadKey, {
-      status: 'idle',
-      updated_at: new Date().toISOString(),
-      model,
-    });
-    return;
-  }
-  const next: SessionState = {
-    ...existing,
-    updated_at: new Date().toISOString(),
-    ...(model !== undefined ? { model } : {}),
-  };
-  if (model === undefined) delete next.model;
-  await writeSession(threadKey, next);
+  await updateSession(threadKey, (existing) => {
+    if (!existing) {
+      if (model === undefined) return undefined;
+      return { status: 'idle', updated_at: '', model };
+    }
+    const next: SessionState = { ...existing };
+    if (model !== undefined) next.model = model;
+    else delete next.model;
+    return next;
+  });
 }
 
 // Atomic read-modify-write of the `display` config (#141). Symmetric with
@@ -280,23 +309,16 @@ export async function setDisplay(
   threadKey: string,
   display: DisplayConfig | undefined,
 ): Promise<void> {
-  const existing = await readSession(threadKey);
-  if (!existing) {
-    if (display === undefined) return;
-    await writeSession(threadKey, {
-      status: 'idle',
-      updated_at: new Date().toISOString(),
-      display,
-    });
-    return;
-  }
-  const next: SessionState = {
-    ...existing,
-    updated_at: new Date().toISOString(),
-    ...(display !== undefined ? { display } : {}),
-  };
-  if (display === undefined) delete next.display;
-  await writeSession(threadKey, next);
+  await updateSession(threadKey, (existing) => {
+    if (!existing) {
+      if (display === undefined) return undefined;
+      return { status: 'idle', updated_at: '', display };
+    }
+    const next: SessionState = { ...existing };
+    if (display !== undefined) next.display = display;
+    else delete next.display;
+    return next;
+  });
 }
 
 export async function listSessions(): Promise<Array<{ threadKey: string; state: SessionState }>> {
