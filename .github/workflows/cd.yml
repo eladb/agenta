@@ -1,48 +1,42 @@
 name: CD
 
-# Gated deploy pipeline. Runs on push to main.
+# Test-only pipeline. Runs on push to main.
 #
-#   1. e2e   — full tests/e2e/ suite. The in-process agent uses the
-#              DEDICATED `agenta-ci` Slack app (CI_SLACK_*), not the
-#              production agent app. Slack Socket Mode load-balances
-#              events between every client connected on the same app
-#              token, so reusing prod's token would route ~half of
-#              prod's events to the runner during the test window —
-#              the CI app has its own connection, zero contention. The
-#              tester bot (TEST_*) is the puppet driving the channel.
-#   2. deploy — `bun run deploy` (scripts/deploy-bot-fly.ts) only if
-#              e2e is green. Rolls the agenta-bot Fly machine to the
-#              new image.
-#   3. canary — scripts/canary.ts mentions the just-deployed prod bot
-#              via the tester and asserts chat reply + bash + /delete.
-#              Catches deploy-only regressions (env, image, fly volume)
-#              that e2e against the runner can't.
+# Since the agenta Fly deployment was torn down (2026-06-02), there is no
+# longer any prod app to deploy or canary. CD now runs only the e2e suite.
+# The acme/ECS deployment lives in its own repo (acme-io/slack-agent,
+# #267) with its own OIDC CD — it never deployed from here.
 #
-# A red step fails the workflow — prod never sees code that didn't pass
-# e2e, and the default GitHub Actions failure email is the alarm if
-# canary regresses after a deploy. Manual rollback is
-# `flyctl releases rollback -a agenta-bot`.
+#   e2e — full tests/e2e/ suite, on the docker sandbox provider
+#         (ubuntu-latest ships Docker, so dockerProvider runs locally on
+#         the runner — this also exercises the ~13 docker-gated sandbox
+#         test cases that the old fly-provider run skipped). The
+#         in-process agent uses the DEDICATED `agenta-ci` Slack app
+#         (CI_SLACK_*), not any production agent app. Slack Socket Mode
+#         load-balances events between every client connected on the same
+#         app token, so a shared token would route ~half its events to the
+#         runner during the test window — the CI app has its own
+#         connection, zero contention. The tester bot (TEST_*) is the
+#         puppet driving the channel.
 #
-# Doc-only commits skip every active step (no point running e2e + deploy
-# + canary when only CLAUDE.md changed) but the workflow still completes
-# green so the timeline stays clean. The skip allowlist lives in
-# `.ci-ignore` at the repo root.
+# A red e2e step fails the workflow; the default GitHub Actions failure
+# email is the alarm. (No deploy/canary steps any more, so no
+# deploy-only regression to catch and no manual-rollback path.)
 #
-# Prod-only changes (config/tenants.json, fly.toml, slack-manifests, etc.)
-# skip the e2e step but still run deploy + canary — e2e wouldn't
-# exercise those paths anyway (helpers.ts mints an inline tenants config
-# per run; the test Slack apps are separate from prod). That allowlist
-# lives in `.ci-e2e-ignore`.
+# Doc-only commits skip e2e but the workflow still completes green so the
+# timeline stays clean. The skip allowlist lives in `.ci-ignore` at the
+# repo root.
+#
+# Prod-only changes (config/tenants.json, slack-manifests, etc.) also skip
+# e2e via `.ci-e2e-ignore` — e2e wouldn't exercise those paths anyway
+# (helpers.ts mints an inline tenants config per run; the test Slack apps
+# are separate). With deploy/canary gone these commits now no-op entirely,
+# but the tier is harmless and left in place (reworking change-detection is
+# a separate concern).
 #
 # Concurrency: serialize runs AND preempt in-flight runs when a newer
-# commit lands. Reasons —
-# (a) only one agenta-ci Socket Mode client at a time, else two CI
-# runs would split events 50/50;
-# (b) interleaved deploys would race each other;
-# (c) we want the latest commit to reach prod fast — a flurry of merges
-#     shouldn't backlog 30+ min behind a stale run. Cancel-in-progress
-#     SIGTERMs the running job (bun's signal handlers fire cleanly,
-#     sockets disconnect) so only the newest commit gets to deploy.
+# commit lands — only one agenta-ci Socket Mode client at a time, else two
+# CI runs would split events 50/50.
 
 on:
   push:
@@ -50,15 +44,14 @@ on:
 
 concurrency:
   group: cd
-  # Queue runs instead of cancelling: a follow-on doc-only push hits .ci-ignore
-  # and no-ops, but if it cancels an in-flight real deploy, prod can be left on
-  # the old image (incident 2026-05-19, fix #116).
+  # Queue runs instead of cancelling so two agenta-ci Socket Mode clients
+  # never overlap and split events 50/50.
   cancel-in-progress: false
 
 jobs:
   cd:
     runs-on: ubuntu-latest
-    # e2e + Fly deploy/canary in one serial job.
+    # e2e only — no deploy/canary since the Fly deployment was torn down.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -94,43 +87,17 @@ jobs:
           TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
           TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
           MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
-          FLY_APP_NAME: agenta-sandbox
-          FLY_REGION: iad
-          FLY_API_TOKEN: ${{ secrets.FLY_SANDBOX_API_TOKEN }}
-          # Fly sandbox provider — uses the pre-pushed agenta-sandbox app/image.
-          # Docker-gated test files skip cleanly via `test.if(DOCKER_PROVIDER_ACTIVE)`.
-          SANDBOX_PROVIDER: fly
+          # Docker sandbox provider — ubuntu-latest ships Docker, so
+          # dockerProvider runs locally on the runner. This also exercises
+          # the docker-gated sandbox test cases that skip cleanly via
+          # `test.if(DOCKER_PROVIDER_ACTIVE)` under other providers.
+          SANDBOX_PROVIDER: docker
         run: bun run e2e
-
-      - name: Install flyctl
-        if: steps.changed.outputs.code == 'true'
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Deploy to production
-        if: steps.changed.outputs.code == 'true'
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: bun run deploy
-
-      # Canary pins the bot user the tester mentions via CANARY_TARGET_USER_ID
-      # so the Fly gate actually verifies the AGENTA deployment. Without the
-      # pin, canary.ts falls back to auth.test on the single repo-level
-      # SLACK_BOT_TOKEN secret, which need not resolve to the agenta bot.
-      - name: Canary (production)
-        if: steps.changed.outputs.code == 'true'
-        env:
-          CANARY_TARGET_USER_ID: U0B2WQUHK6Z
-          TEST_APP_TOKEN: ${{ secrets.TEST_APP_TOKEN }}
-          TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
-          TEST_CHANNEL_ID: ${{ secrets.CANARY_CHANNEL_ID }}
-          FLY_APP_NAME: agenta-bot
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: bun run canary
 
       - name: Prod-only change — E2E skipped
         if: steps.changed.outputs.code == 'true' && steps.changed.outputs.e2e_relevant == 'false'
-        run: echo "Only .ci-e2e-ignore-allowlisted paths changed; skipping e2e (deploy + canary still run)."
+        run: echo "Only .ci-e2e-ignore-allowlisted paths changed; skipping e2e."
 
       - name: Doc-only — CD skipped
         if: steps.changed.outputs.code == 'false'
-        run: echo "Only doc-allowlisted paths changed; skipping e2e + deploy + canary."
+        run: echo "Only doc-allowlisted paths changed; skipping e2e."
