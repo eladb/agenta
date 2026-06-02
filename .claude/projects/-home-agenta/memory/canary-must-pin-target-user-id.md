@@ -7,6 +7,8 @@ metadata:
   originSessionId: 2c39036d-3357-4679-8941-5e865798a190
 ---
 
+**STATUS (2026-06-02): the CD canary steps this references were REMOVED in #277** (Fly teardown — CD is now test-only, no deploy/canary). So the "cd.yml does this" claim below is historical. The principle still holds for the host watchdog (`canary-monitor.sh`, currently unarmed — see [[canary-monitoring-setup]]) and for any future canary step: keep this in mind only if a canary is ever re-introduced.
+
 `scripts/canary.ts:204` resolves the bot the tester mentions in two ways: explicit `CANARY_TARGET_USER_ID`, else `auth.test(SLACK_BOT_TOKEN)`. With a single repo-level `secrets.SLACK_BOT_TOKEN` shared across multiple canary steps, the auth.test fallback resolves to the SAME bot for every step — every canary tests THAT bot's reply path, in whatever channel each step happens to use.
 
 **Why:** Pre-#260 `cd.yml` had this exact bug. `secrets.SLACK_BOT_TOKEN` resolved to the acme bot (U0B65LMHRLL), so the "Canary (production)" Fly step tested acme's reply path in `CANARY_CHANNEL_ID` instead of agenta's, and the "Canary (acme / ECS)" step tested acme's reply path in `ACME_CANARY_CHANNEL_ID`. Both gates rode on acme's health. An agenta-only regression couldn't have been caught here; a acme outage looked like an agenta canary fail (mis-paged for two hours on 2026-05-31). Fixed in PR #260 by pinning per step.
