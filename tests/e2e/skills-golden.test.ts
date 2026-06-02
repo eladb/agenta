@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { dataRoot, messagesPath } from '../../src/tenant/persistence/store';
+import type { CallModel } from '../../src/tenant/model/gateway';
+import { messagesPath } from '../../src/tenant/persistence/store';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import { ensureImage } from '../../src/tenant/sandbox/docker';
 import {
@@ -65,10 +66,22 @@ afterAll(async () => {
 test.skipIf(!ENABLED)(
   'loads and uses python-charts',
   async () => {
-    const { callModel, flush } = createGoldenCallModel(
+    const { callModel: replayModel, flush } = createGoldenCallModel(
       basename(import.meta.path),
       'loads and uses python-charts',
     );
+    // The system prompt is rebuilt per mention and no longer persisted to
+    // session.json, so capture the system message actually sent to the model on
+    // the first call — that's where we verify the python-charts skills block was
+    // projected into the prompt (host-side skills loading).
+    let firstSystemPrompt = '';
+    const callModel: CallModel = async (messages, opts) => {
+      if (!firstSystemPrompt) {
+        const sys = messages.find((m) => m.role === 'system');
+        if (sys && typeof sys.content === 'string') firstSystemPrompt = sys.content;
+      }
+      return replayModel(messages, opts);
+    };
     agent = await startBotAndTenant(callModel);
 
     const threadTs = await mention(
@@ -146,12 +159,10 @@ test.skipIf(!ENABLED)(
     // did and we don't second-guess it here.
     expect(toolNames.some((n) => n === 'bash' || n === 'write_file')).toBe(true);
 
-    // The skills block should have been projected into the system prompt
-    // (skills loading is a host-side step, distinct from whether the model
-    // chose to read the SKILL.md — small prompts often don't need to).
-    const sessionPath = `${dataRoot()}/${tk}/session.json`;
-    const session = JSON.parse(readFileSync(sessionPath, 'utf8')) as { system_prompt?: string };
-    expect(session.system_prompt ?? '').toContain('python-charts');
+    // The skills block should have been projected into the system prompt sent to
+    // the model (skills loading is a host-side step, distinct from whether the
+    // model chose to read the SKILL.md — small prompts often don't need to).
+    expect(firstSystemPrompt).toContain('python-charts');
 
     await flush();
   },
