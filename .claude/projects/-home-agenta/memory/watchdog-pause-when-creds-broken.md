@@ -7,6 +7,8 @@ metadata:
   originSessionId: 2c39036d-3357-4679-8941-5e865798a190
 ---
 
+**STATUS (2026-06-02): the watchdog is currently UNARMED** (cron removed at the 2026-06-01 teardown) and the agenta/Fly target it used to check no longer exists (Fly deployment destroyed — see [[canary-monitoring-setup]]). The principle below still applies the next time the watchdog is re-armed (most likely for salto/ECS once the AWS migration lands).
+
 Distinguish a *target outage* (the bot is down, restart might recover it) from a *watchdog blind spot* (our local AWS/Slack/Fly creds went bad, the bot might be fine and we just can't tell). The bounded remediation the watchdog's oncall prompt asks for assumes target outage; running the remediation against a watchdog blind spot uses the same dead creds and fails identically. Pasting the same "still blocked" thread reply every 30 min costs tokens without producing signal.
 
 **Why:** On 2026-05-31 the salto-staging IAM keys (both `.env` and GH `secrets.AWS_*`) were rotated out mid-fix-forward. The watchdog's salto/ECS canary started failing with `InvalidClientTokenId` on `aws describe-services` — the bot's runtime might have been fine, but no way to tell. The watchdog kept paging on the 30-min cadence. Elad's call: pause the check and stop the firehose.
