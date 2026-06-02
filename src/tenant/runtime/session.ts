@@ -3,12 +3,8 @@ import { log } from '../../shared/log';
 import type { CallModel } from '../model/gateway';
 import { postInThread } from '../slack/post';
 import type { DisplayStyle } from './home-config';
-import { clearSession, readSession, writeSession } from './session-store';
+import { clearSession, preservedFields, updateSession } from './session-store';
 import { runTurn, type TurnInput } from './turn';
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
 
 type Status = 'idle' | 'running' | 'stopping';
 
@@ -60,16 +56,11 @@ export async function startOrQueue(
   // we don't drop it on idle → running. The provider may write a fresh
   // record back during this turn (or not at all, if no sandbox-touching
   // tool runs).
-  const prior = await readSession(input.threadKey);
-  await writeSession(input.threadKey, {
+  await updateSession(input.threadKey, (prior) => ({
     status: 'running',
-    updated_at: nowIso(),
-    ...(prior?.sandbox !== undefined ? { sandbox: prior.sandbox } : {}),
-    ...(prior?.git !== undefined ? { git: prior.git } : {}),
-    ...(prior?.home !== undefined ? { home: prior.home } : {}),
-    ...(prior?.model !== undefined ? { model: prior.model } : {}),
-    ...(prior?.display !== undefined ? { display: prior.display } : {}),
-  });
+    updated_at: '',
+    ...preservedFields(prior),
+  }));
   // Lets runTurn signal "I consumed a mid-turn mention" so the post-turn
   // pending-check doesn't kick off a redundant follow-up turn.
   const onMidTurnConsume = (): void => {
@@ -92,16 +83,11 @@ export async function startOrQueue(
       // If /stop fired during the turn we are now in 'stopping'; flip back
       // to 'running' since the user has since sent a new mention.
       s.status = 'running';
-      const carry = await readSession(input.threadKey);
-      await writeSession(input.threadKey, {
+      await updateSession(input.threadKey, (carry) => ({
         status: 'running',
-        updated_at: nowIso(),
-        ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
-        ...(carry?.git !== undefined ? { git: carry.git } : {}),
-        ...(carry?.home !== undefined ? { home: carry.home } : {}),
-        ...(carry?.model !== undefined ? { model: carry.model } : {}),
-        ...(carry?.display !== undefined ? { display: carry.display } : {}),
-      });
+        updated_at: '',
+        ...preservedFields(carry),
+      }));
     }
   } finally {
     s.status = 'idle';
@@ -122,18 +108,14 @@ export async function signalStop(
     s.status = 'stopping';
     s.pending = false;
     // Persist BEFORE firing abort: otherwise the abort cascade lets the
-    // turn's `finally { clearSession }` race ahead of our writeSession and
-    // leave a stale `stopping` file behind.
-    const carry = await readSession(tk);
-    await writeSession(tk, {
+    // turn's `finally { clearSession }` race ahead of our write and leave a
+    // stale `stopping` file behind. updateSession serializes both writes on
+    // the same per-thread lock, so awaiting it here guarantees the ordering.
+    await updateSession(tk, (carry) => ({
       status: 'stopping',
-      updated_at: nowIso(),
-      ...(carry?.sandbox !== undefined ? { sandbox: carry.sandbox } : {}),
-      ...(carry?.git !== undefined ? { git: carry.git } : {}),
-      ...(carry?.home !== undefined ? { home: carry.home } : {}),
-      ...(carry?.model !== undefined ? { model: carry.model } : {}),
-      ...(carry?.display !== undefined ? { display: carry.display } : {}),
-    });
+      updated_at: '',
+      ...preservedFields(carry),
+    }));
     s.abort.abort();
     log.info('session', `[${tk}] stop signaled`);
     return;

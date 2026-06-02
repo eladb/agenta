@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeSession } from '../runtime/session-store';
 import { _resetImageReadyCache, dockerProvider } from './docker';
+import { ecsProvider } from './ecs';
 import { _resetFlyState, flyProvider } from './fly';
-import { containerName, reapOrphanSandboxes } from './index';
+import { containerName, reapOrphanSandboxes, selectProvider } from './index';
 
 // reapOrphanSandboxes is provider-agnostic: it asks `provider.listAll`,
 // cross-references with `listSessions`, and calls `provider.destroyById`
@@ -149,5 +150,22 @@ describe('reapOrphanSandboxes', () => {
     });
     await reapOrphanSandboxes();
     expect(destroyed).toEqual(['a', 'c']);
+  });
+});
+
+describe('selectProvider', () => {
+  // Single source of truth for SANDBOX_PROVIDER → provider. Regression guard
+  // for the bug where git/bootstrap kept a SECOND selector that fell through
+  // to docker for `ecs`: on the ECS deployment the first sandbox-touching
+  // tool resolved docker's getEndpoint, which (seeing a `provider: 'ecs'`
+  // record) cleared the sandbox field and threw "sandbox not initialized".
+  test('maps each SANDBOX_PROVIDER name to its provider', () => {
+    expect(selectProvider('docker')).toBe(dockerProvider);
+    expect(selectProvider('fly')).toBe(flyProvider);
+    expect(selectProvider('ecs')).toBe(ecsProvider);
+  });
+
+  test('throws on an unknown provider name', () => {
+    expect(() => selectProvider('podman')).toThrow(/unknown SANDBOX_PROVIDER/);
   });
 });

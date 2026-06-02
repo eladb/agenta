@@ -20,9 +20,7 @@ import { basename, join } from 'node:path';
 import { log } from '../../shared/log';
 import { resolveTransport } from '../runtime/home-config';
 import { readSession, setGit } from '../runtime/session-store';
-import { runBash } from '../sandbox';
-import { dockerProvider } from '../sandbox/docker';
-import { flyProvider } from '../sandbox/fly';
+import { runBash, sandboxEndpoint } from '../sandbox';
 import { type GitServerHandle, startGitServer } from './git-server';
 import { startTunnel, stopTunnel, type TunnelHandle } from './ws-tunnel';
 
@@ -56,12 +54,6 @@ const handles = new Map<string, SessionHandles>();
 
 export function refFor(threadKey: string): string {
   return `refs/heads/agenta/sessions/${threadKey}`;
-}
-
-function selectProviderForEndpoint(): { getEndpoint: typeof dockerProvider.getEndpoint } {
-  const name = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
-  if (name === 'fly') return flyProvider;
-  return dockerProvider;
 }
 
 // Run a command inside the sandbox, throw on non-zero. Bootstrap is a
@@ -121,10 +113,11 @@ export async function ensureRepoBootstrap(threadKey: string): Promise<void> {
   log.info('git', `[${threadKey}] git server on 127.0.0.1:${gitServer.port}`);
 
   // 2. Open the WS tunnel to the sandbox's /tunnel route. We pull the
-  //    sandbox base URL + bearer token straight from the active provider's
-  //    endpoint — same path as every other sandbox HTTP call.
-  const provider = selectProviderForEndpoint();
-  const ep = await provider.getEndpoint(threadKey);
+  //    sandbox base URL + bearer token straight from the configured
+  //    provider's endpoint — same selector + path as every other sandbox
+  //    HTTP call (docker | fly | ecs), so the tunnel always targets the
+  //    same sandbox runBash talks to.
+  const ep = await sandboxEndpoint(threadKey);
 
   let tunnel: TunnelHandle;
   try {

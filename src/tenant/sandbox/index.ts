@@ -18,8 +18,14 @@ export { containerName };
 // endpoint returns.
 export type DockerResult = { stdout: string; stderr: string; exitCode: number };
 
-function selectProvider(): SandboxProvider {
-  const name = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
+// The single SANDBOX_PROVIDER → provider mapping. Exported (and arg-taking,
+// for unit tests) so every caller resolves the provider through ONE place.
+// git/bootstrap used to keep its own selector that fell through to docker
+// for `ecs`; that drift is what broke the ECS deployment (first sandbox tool
+// wiped the session's sandbox record and threw "sandbox not initialized").
+export function selectProvider(
+  name = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase(),
+): SandboxProvider {
   if (name === 'docker') return dockerProvider;
   if (name === 'fly') return flyProvider;
   if (name === 'ecs') return ecsProvider;
@@ -131,7 +137,11 @@ export async function reapOrphanSandboxes(): Promise<void> {
   }
 }
 
-async function endpoint(threadKey: string): Promise<SandboxEndpoint> {
+// Resolve the live sandbox endpoint for a thread via the configured
+// provider. Exported so out-of-module callers (git/bootstrap's WS-tunnel
+// setup) reach the sandbox through the SAME provider selection as every
+// other sandbox HTTP call instead of re-deriving it.
+export async function sandboxEndpoint(threadKey: string): Promise<SandboxEndpoint> {
   return provider.getEndpoint(threadKey);
 }
 
@@ -191,7 +201,7 @@ async function postJson(
   body: object,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  const ep = await endpoint(threadKey);
+  const ep = await sandboxEndpoint(threadKey);
   const res = await fetch(`${ep.baseUrl}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...ep.headers },
@@ -210,7 +220,7 @@ export async function runBash(
   signal?: AbortSignal,
   onChunk?: (kind: 'stdout' | 'stderr', chunk: string) => void,
 ): Promise<DockerResult> {
-  const ep = await endpoint(threadKey);
+  const ep = await sandboxEndpoint(threadKey);
   const res = await fetch(`${ep.baseUrl}/exec`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...ep.headers },
