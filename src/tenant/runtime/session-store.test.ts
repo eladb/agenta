@@ -8,6 +8,7 @@ import {
   readSession,
   type SandboxRecord,
   type SessionState,
+  setGit,
   setHome,
   setSandbox,
   writeSession,
@@ -129,6 +130,42 @@ describe('session-store', () => {
   test('setSandbox(undefined) on a thread with no session.json is a no-op', async () => {
     await setSandbox('never-existed-2', undefined);
     expect(await readSession('never-existed-2')).toBeUndefined();
+  });
+
+  // Regression (#254 review #6): concurrent setters must not clobber each
+  // other. Pre-fix, setSandbox and setGit each read the same prior state and
+  // the last writer wins — dropping the other's field. That left threads with
+  // a running sandbox task but no `sandbox` in session.json, so every later
+  // turn reported "sandbox not initialized". With the per-thread lock both
+  // fields must survive.
+  test('concurrent setSandbox + setGit both persist (no clobber)', async () => {
+    await writeSession('tk-race', { status: 'running', updated_at: 't0' });
+    const sb: SandboxRecord = {
+      provider: 'ecs',
+      task_arn: 'arn:task/abc',
+      workspace_path: '/efs/x',
+      sandbox_token: 'tok',
+    };
+    const git = { ref: 'refs/heads/agenta/sessions/tk-race' };
+    await Promise.all([setSandbox('tk-race', sb), setGit('tk-race', git)]);
+    const after = await readSession('tk-race');
+    expect(after?.status).toBe('running');
+    expect(after?.sandbox).toEqual(sb);
+    expect(after?.git).toEqual(git);
+  });
+
+  // The lock must also serialize many interleaved updates without losing any.
+  test('updateSession serializes concurrent field writes', async () => {
+    await writeSession('tk-many', { status: 'running', updated_at: 't0' });
+    await Promise.all([
+      setSandbox('tk-many', { provider: 'docker', container_name: 'c', token: 't' }),
+      setGit('tk-many', { ref: 'refs/heads/x' }),
+      setHome('tk-many', { remote: 'https://example.com/r.git', auth_env: 'GITHUB_TOKEN' }),
+    ]);
+    const after = await readSession('tk-many');
+    expect(after?.sandbox).toBeDefined();
+    expect(after?.git).toBeDefined();
+    expect(after?.home).toBeDefined();
   });
 
   test('clearSession preserves the sandbox record across the running -> idle transition', async () => {
