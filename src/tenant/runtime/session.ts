@@ -1,12 +1,20 @@
 import type { WebClient } from '@slack/web-api';
 import { log } from '../../shared/log';
 import type { CallModel } from '../model/gateway';
-import { postInThread } from '../slack/post';
+import { addReaction, postInThread, removeReaction } from '../slack/post';
 import type { DisplayStyle } from './home-config';
 import { clearSession, preservedFields, updateSession } from './session-store';
 import { runTurn, type TurnInput } from './turn';
 
 type Status = 'idle' | 'running' | 'stopping';
+
+// The 🤔 "thinking" reaction is the bot's first "I got your message, I'm
+// working on it" signal. The handler fires it (via markThinking) the instant
+// a mention is committed to a turn — long before the model/home resolve — so
+// it lands near-instantly. Ownership is session-level (not per-turn): a burst
+// of mentions coalesces into one session, and all of their reactions are
+// cleared together when the thread returns to idle (#283).
+const REACTION_THINKING = 'thinking_face';
 
 type Session = {
   status: Status;
@@ -15,6 +23,10 @@ type Session = {
   // batching: after the current turn finishes we run one more turn that
   // picks up everything queued (the JSONL already has the new messages).
   pending: boolean;
+  // Thinking (🤔) reactions added for this session's in-flight mentions.
+  // Removed in bulk when the thread goes idle (startOrQueue's finally) or
+  // when kickoffTurn throws before startOrQueue runs (clearThinking).
+  thinking: Array<{ channel: string; ts: string }>;
 };
 
 const sessions = new Map<string, Session>();
@@ -22,7 +34,7 @@ const sessions = new Map<string, Session>();
 function getSession(tk: string): Session {
   let s = sessions.get(tk);
   if (!s) {
-    s = { status: 'idle', pending: false };
+    s = { status: 'idle', pending: false, thinking: [] };
     sessions.set(tk, s);
   }
   return s;
@@ -30,6 +42,28 @@ function getSession(tk: string): Session {
 
 export function getStatus(tk: string): Status {
   return sessions.get(tk)?.status ?? 'idle';
+}
+
+// Record + fire a 🤔 reaction on a mention the handler just committed to a
+// turn. Best-effort: addReaction swallows errors, and we don't await it from
+// the handler — the point is instant feedback, not blocking the turn kickoff.
+// The {channel, ts} is tracked on the session so the batch cleanup
+// (startOrQueue's finally) removes every one when the thread goes idle.
+export function markThinking(web: WebClient, tk: string, channel: string, ts: string): void {
+  const s = getSession(tk);
+  s.thinking.push({ channel, ts });
+  void addReaction(web, channel, ts, REACTION_THINKING);
+}
+
+// Remove every 🤔 reaction recorded for this session and clear the list.
+// Called once per batch when the thread returns to idle, and by the handler
+// if kickoffTurn throws before startOrQueue ever runs (no-orphan guarantee).
+export async function clearThinking(web: WebClient, tk: string): Promise<void> {
+  const s = sessions.get(tk);
+  if (!s || s.thinking.length === 0) return;
+  const pending = s.thinking;
+  s.thinking = [];
+  await Promise.all(pending.map((r) => removeReaction(web, r.channel, r.ts, REACTION_THINKING)));
 }
 
 // For tests.
@@ -93,6 +127,9 @@ export async function startOrQueue(
     s.status = 'idle';
     s.abort = undefined;
     s.pending = false;
+    // Once-per-batch cleanup: remove every 🤔 the handler added for the
+    // mentions that coalesced into this session. Best-effort.
+    await clearThinking(web, input.threadKey);
     await clearSession(input.threadKey);
   }
 }
