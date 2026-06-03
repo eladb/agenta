@@ -4,18 +4,31 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CallModel } from '../model/gateway';
 import { newEventId, nowIso, record } from '../persistence/events';
-import { getStatus, resetSessions, signalStop, startOrQueue } from './session';
+import {
+  clearThinking,
+  getStatus,
+  markThinking,
+  resetSessions,
+  signalStop,
+  startOrQueue,
+} from './session';
 
 // Minimal WebClient stub — runTurn uses postInThread/editMessage, which call
-// web.chat.postMessage / web.chat.update. Each returns { ts }.
+// web.chat.postMessage / web.chat.update. Each returns { ts }. The
+// reactions.add/remove calls (used by markThinking/clearThinking) are
+// recorded so the thinking-reaction tests can assert on them.
 function makeWebStub(): {
   // biome-ignore lint/suspicious/noExplicitAny: stub mimics WebClient surface used by turn.ts
   web: any;
   posts: Array<{ text: string }>;
   edits: Array<{ ts: string; text: string }>;
+  reactionsAdded: Array<{ ts: string; name: string }>;
+  reactionsRemoved: Array<{ ts: string; name: string }>;
 } {
   const posts: Array<{ text: string }> = [];
   const edits: Array<{ ts: string; text: string }> = [];
+  const reactionsAdded: Array<{ ts: string; name: string }> = [];
+  const reactionsRemoved: Array<{ ts: string; name: string }> = [];
   const web = {
     chat: {
       postMessage: mock(async (args: { text: string }) => {
@@ -28,8 +41,18 @@ function makeWebStub(): {
       }),
       delete: mock(async () => ({ ok: true })),
     },
+    reactions: {
+      add: mock(async (args: { timestamp: string; name: string }) => {
+        reactionsAdded.push({ ts: args.timestamp, name: args.name });
+        return { ok: true };
+      }),
+      remove: mock(async (args: { timestamp: string; name: string }) => {
+        reactionsRemoved.push({ ts: args.timestamp, name: args.name });
+        return { ok: true };
+      }),
+    },
   };
-  return { web, posts, edits };
+  return { web, posts, edits, reactionsAdded, reactionsRemoved };
 }
 
 let dataDir: string;
@@ -233,5 +256,62 @@ describe('session state machine', () => {
     // would run another full turn → 4 model calls.
     expect(n).toBe(2);
     expect(getStatus('k1')).toBe('idle');
+  });
+});
+
+describe('thinking reaction (session-level)', () => {
+  test('markThinking adds 🤔 on the mention and a successful turn clears it', async () => {
+    const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
+    // Handler fires markThinking right before kickoffTurn.
+    markThinking(web, 'k1', 'C', '1.5');
+    // markThinking fires addReaction fire-and-forget; let it land.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(reactionsAdded.some((r) => r.ts === '1.5' && r.name === 'thinking_face')).toBe(true);
+
+    const callModel: CallModel = async () => ({ role: 'assistant', content: 'hi' });
+    await startOrQueue(web, callModel, 'sys', input);
+
+    // startOrQueue's finally removes the thinking reaction when the thread
+    // returns to idle.
+    expect(reactionsRemoved.some((r) => r.ts === '1.5' && r.name === 'thinking_face')).toBe(true);
+    expect(getStatus('k1')).toBe('idle');
+  });
+
+  test('a burst of mentions all get 🤔, all cleared together at idle', async () => {
+    const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
+    // Three mentions coalesce into one session (one batch).
+    markThinking(web, 'k1', 'C', '1.1');
+    markThinking(web, 'k1', 'C', '1.2');
+    markThinking(web, 'k1', 'C', '1.3');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(reactionsAdded.filter((r) => r.name === 'thinking_face').map((r) => r.ts).sort()).toEqual(
+      ['1.1', '1.2', '1.3'],
+    );
+
+    const callModel: CallModel = async () => ({ role: 'assistant', content: 'hi' });
+    await startOrQueue(web, callModel, 'sys', input);
+
+    expect(
+      reactionsRemoved.filter((r) => r.name === 'thinking_face').map((r) => r.ts).sort(),
+    ).toEqual(['1.1', '1.2', '1.3']);
+  });
+
+  test('clearThinking removes 🤔 when kickoffTurn throws before startOrQueue', async () => {
+    const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
+    // Simulate the handler path: markThinking lands, then kickoffTurn throws
+    // (e.g. model/home resolution fails) before startOrQueue ever runs — the
+    // handler's catch calls clearThinking so nothing is orphaned.
+    markThinking(web, 'k1', 'C', '2.2');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(reactionsAdded.some((r) => r.ts === '2.2' && r.name === 'thinking_face')).toBe(true);
+
+    await clearThinking(web, 'k1');
+    expect(reactionsRemoved.some((r) => r.ts === '2.2' && r.name === 'thinking_face')).toBe(true);
+
+    // Idempotent: a second clear (e.g. startOrQueue's finally if it had run)
+    // removes nothing more.
+    reactionsRemoved.length = 0;
+    await clearThinking(web, 'k1');
+    expect(reactionsRemoved.length).toBe(0);
   });
 });
