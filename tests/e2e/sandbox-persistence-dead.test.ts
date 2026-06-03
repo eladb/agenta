@@ -119,7 +119,10 @@ test.if(HAS_DOCKER)(
     const tk = threadKey(channel, threadTs);
 
     await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'marker set', {
-      timeoutMs: 60_000,
+      // 120s (not 60s): the docker container boot on a cold CI runner is far
+      // slower than on a dev box. This cap, not the test budget, was the
+      // limiter that flaked under docker-in-CI (#276 shakedown).
+      timeoutMs: 120_000,
     });
     await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
 
@@ -175,7 +178,10 @@ test.if(HAS_DOCKER)(
 
     await mention(tester, agent.botUserId, channel, threadTs, 'check marker');
     await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'read complete', {
-      timeoutMs: 60_000,
+      // 120s: turn 2 re-provisions a fresh container and reattaches the
+      // surviving volume — the slowest step, and slower still on a cold CI
+      // runner.
+      timeoutMs: 120_000,
     });
     await waitFor(() => calls.length === 4, { what: 'four model calls', timeoutMs: 30_000 });
 
@@ -193,5 +199,5 @@ test.if(HAS_DOCKER)(
     expect(session2.sandbox?.volume_name).toBe(volume1);
     expect(session2.sandbox?.token).toBe(token1);
   },
-  240_000,
+  360_000,
 );
