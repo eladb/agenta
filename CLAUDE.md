@@ -248,7 +248,7 @@ bun run deploy         # deploy-bot-fly.ts: agenta-bot + agenta_data in iad
 ## Tests
 
 - **Unit** next to source; never touch Slack/Anthropic (`attachments`/`gateway` stub `fetch`).
-- **E2E** boot bot + tenant in-process against real Slack (`helpers.ts:startBotAndTenant` opens Socket Mode in the bot and `POST /events` on a loopback port for the tenant, then wires a one-tenant `tenants.json` pointing at it); **the model is stubbed** (`stubCallModel` records each `messages` array into `stubCalls[]`, returns `stub: <last user text>`). Clean up Slack mutations in `afterAll`. No real-model e2e (cost/flake) — gate behind a flag if ever needed. `--timeout 30000` (model + backfill exceed 5s).
+- **E2E** boot bot + tenant in-process against real Slack (`helpers.ts:startBotAndTenant` opens Socket Mode in the bot and `POST /events` on a loopback port for the tenant, then wires a one-tenant `tenants.json` pointing at it); **the model is stubbed** (`stubCallModel` records each `messages` array into `stubCalls[]`, returns `stub: <last user text>`). Clean up Slack mutations in `afterAll`. No real-model e2e (cost/flake) — gate behind a flag if ever needed. `run-e2e.ts` runs each file with `--timeout 180000` and `helpers.ts` `waitFor`/`waitForReply` default to 90s — both raised for the slower docker-in-CI sandbox after CD moved e2e off Fly (#276); pass an explicit `timeoutMs` for known-slow/-fast steps.
 
 ## Git / GitHub
 
