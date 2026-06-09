@@ -92,21 +92,23 @@ function firstChunkOf(appends: Chunk[]): Chunk | undefined {
 }
 
 describe('runTurn task_update streaming', () => {
-  test('starts the stream with timeline mode + recipient pair + a task row', async () => {
-    const { web, starts } = makeStreamWebStub();
+  test('opens the stream lazily in text mode with the recipient pair (no chip)', async () => {
+    const { web, starts, appends } = makeStreamWebStub();
     const callModel: CallModel = async () => ({ role: 'assistant', content: 'hi there' });
     await runTurn(web, callModel, 'sys', input, undefined, undefined, 'task_update');
 
     expect(starts).toHaveLength(1);
     const s = starts[0];
-    // Spike correction: display mode is "timeline", recipient pair required.
-    expect(s?.task_display_mode).toBe('timeline');
+    // No task_display_mode — we stream in plain text mode so a conversation
+    // turn carries no leading task-row chip. Recipient pair still required.
+    expect(s?.task_display_mode).toBeUndefined();
     expect(s?.recipient_team_id).toBe('T1');
     expect(s?.recipient_user_id).toBe('U1');
-    // First chunk MUST be a task_update row, not markdown_text.
+    // First chunk for a no-tool reply is the markdown body, not a task row.
     const chunks = s?.chunks as Chunk[];
-    expect(chunks[0]?.type).toBe('task_update');
-    expect(chunks[0]?.status).toBe('in_progress');
+    expect(chunks[0]?.type).toBe('markdown_text');
+    // A pure conversation turn emits no task_update row at all.
+    expect(appends.some((c) => c.type === 'task_update')).toBe(false);
   });
 
   test('a no-tool reply streams markdown then stops with feedback + disclaimer', async () => {
@@ -127,16 +129,34 @@ describe('runTurn task_update streaming', () => {
     expect(blocks.some((b) => b.type === 'context')).toBe(true);
   });
 
-  test('first emitted chunk is always a task row (never markdown lead-in)', async () => {
+  test('a tool turn with no reasoning opens on the real tool row (no placeholder)', async () => {
     const { web, appends } = makeStreamWebStub();
-    const callModel: CallModel = async () => ({
-      role: 'assistant',
-      content: 'reasoning then reply',
-    });
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_t',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'done' };
+    };
     await runTurn(web, callModel, 'sys', input, undefined, undefined, 'task_update');
-    // The very first chunk Slack ever sees (the startStream lead chunk,
-    // recorded first in appends) is a task_update row.
-    expect(firstChunkOf(appends)?.type).toBe('task_update');
+    // The very first chunk Slack ever sees is the tool's OWN row — there is no
+    // synthetic placeholder "Thinking…" row preceding it.
+    const first = firstChunkOf(appends);
+    expect(first?.type).toBe('task_update');
+    expect(first?.id).toBe('call_t');
+    expect(first?.status).toBe('in_progress');
+    expect(appends.some((c) => c.id === '__thinking__')).toBe(false);
   });
 
   test('a tool call becomes one row keyed by tool_call_id: in_progress → complete', async () => {

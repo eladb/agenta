@@ -8,13 +8,15 @@
 //
 // Naming note (easy to trip on): the user-facing display STYLE is
 // `task_update` (matches the `/task_update` toggle and the `DisplayStyle`
-// union). The Slack WIRE display-MODE is `task_display_mode: 'timeline'`.
-// `task_update` is also the CHUNK `type` for a timeline row. So:
-//   - DisplayStyle 'task_update'  → our internal opt-in name
-//   - task_display_mode 'timeline' → the startStream arg value
-//   - chunk type 'task_update'     → one timeline row
-// The spike (#285 comment) confirmed: under `timeline` mode the FIRST chunk
-// must be a `task_update` row (markdown-first → streaming_mode_mismatch).
+// union); `task_update` is also the CHUNK `type` for a timeline row. So:
+//   - DisplayStyle 'task_update' → our internal opt-in name
+//   - chunk type 'task_update'   → one timeline row (renders as a task card)
+// turn.ts opens the stream WITHOUT `task_display_mode`, lazily on the first
+// emitted chunk: the #285 spike confirmed task_update chunks render as task
+// cards in plain text mode too, so a markdown-only turn streams with no leading
+// task row (no placeholder "Thinking…" chip) and tool turns open on the real
+// tool's row. (Under an explicit `task_display_mode: 'timeline'` the first
+// chunk MUST be a task_update row — which is exactly the chip we want to avoid.)
 
 import type { MarkdownTextChunk, TaskUpdateChunk } from '@slack/types';
 
@@ -23,11 +25,6 @@ import type { MarkdownTextChunk, TaskUpdateChunk } from '@slack/types';
 // markdown body is chunked separately (see MARKDOWN_CHUNK_MAX).
 export const TASK_FIELD_MAX = 256;
 export const MARKDOWN_CHUNK_MAX = 12_000;
-
-// The display-mode wire value for the timeline UI. Exported so turn.ts and
-// tests share one source of truth (and don't accidentally pass the chunk
-// type 'task_update' here, which Slack rejects with invalid_arguments).
-export const TASK_DISPLAY_MODE = 'timeline';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'complete' | 'error';
 
@@ -58,13 +55,6 @@ export function taskRow(args: {
   if (args.details !== undefined) row.details = truncateField(args.details);
   if (args.output !== undefined) row.output = truncateField(args.output);
   return row;
-}
-
-// The mandatory first chunk for a timeline stream: a single in_progress row.
-// The spike confirmed starting with markdown_text instead → streaming_mode_
-// mismatch. Default title is the universal "thinking" lead-in.
-export function initialRow(id: string, title: string = 'Thinking…'): TaskUpdateChunk {
-  return taskRow({ id, title, status: 'in_progress' });
 }
 
 // Map a tool call (label + optional args preview) to an in_progress row.
@@ -116,7 +106,10 @@ export function chunkMarkdown(text: string, max: number = MARKDOWN_CHUNK_MAX): s
 }
 
 // Map a chunked markdown body to markdown_text append chunks.
-export function markdownChunks(text: string, max: number = MARKDOWN_CHUNK_MAX): MarkdownTextChunk[] {
+export function markdownChunks(
+  text: string,
+  max: number = MARKDOWN_CHUNK_MAX,
+): MarkdownTextChunk[] {
   return chunkMarkdown(text, max).map((t) => ({ type: 'markdown_text', text: t }));
 }
 

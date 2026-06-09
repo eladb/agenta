@@ -14,9 +14,7 @@ import type { DisplayStyle } from './home-config';
 import { redact } from './redact';
 import {
   finalBlocks,
-  initialRow,
   markdownChunks,
-  TASK_DISPLAY_MODE,
   taskRow,
   toolEndRow,
   toolStartRow,
@@ -620,18 +618,22 @@ export async function runTurn(
 //
 // Renders a turn via Slack's streaming timeline API instead of the verbose/
 // pretty `chat.update` path:
-//   - startStream leads with an in_progress "Thinking…" task row (the spike
-//     confirmed a timeline stream MUST start with a task_update chunk, not
-//     markdown — markdown-first → streaming_mode_mismatch);
+//   - the stream starts LAZILY on the first chunk we actually emit, and we do
+//     NOT set task_display_mode. A conversation-only turn therefore opens in
+//     plain text mode (markdown body, no task-row chip); a tool turn opens
+//     directly on the real tool's row. task_update chunks render as task cards
+//     in text mode too (verified in the #285 spike), so we get the timeline
+//     rows without a placeholder "Thinking…" chip that would otherwise linger;
 //   - each tool call becomes one task row keyed by tool_call_id, flipping
 //     in_progress → complete/error; bash live output throttles into the row's
 //     `details`;
 //   - model reasoning + the final reply stream as markdown_text chunks;
 //   - stopStream finalizes with feedback buttons + an AI disclaimer.
 //
-// The 🤔 reaction stays the alive signal. On any failure we flip the active
-// row to error, stream a legible explanation, and ALWAYS stopStream so the
-// stream is never left open.
+// The 🤔 reaction is the alive signal during model latency (before the first
+// chunk opens the stream). On any failure we flip the active row to error,
+// stream a legible explanation, and ALWAYS stopStream so the stream is never
+// left open.
 async function runStreamingTurn(
   web: WebClient,
   callModel: CallModel,
@@ -642,57 +644,39 @@ async function runStreamingTurn(
 ): Promise<void> {
   const channel = input.channel;
   // The stream `ts`, held across the whole turn (the streaming analogue of
-  // `liveTs`). Started lazily on the first chunk we emit.
+  // `liveTs`). Started lazily on the FIRST chunk we emit — see `append`.
   let streamTs: string | undefined;
-  const INITIAL_ROW_ID = '__thinking__';
-  // Whether the initial "Thinking…" row is still the only row shown. We flip
-  // it to complete once real work starts so it doesn't linger.
-  let initialRowOpen = false;
   // The id of the row currently in_progress, so a failure can flip exactly
   // that row to error while leaving completed rows intact.
   let activeRowId: string | undefined;
   let stopped = false;
 
-  // Start the stream lazily, leading with the mandatory in_progress task row.
-  const ensureStream = async (): Promise<void> => {
-    if (streamTs) return;
-    const args: Record<string, unknown> = {
-      channel,
-      thread_ts: input.threadTs,
-      task_display_mode: TASK_DISPLAY_MODE,
-      chunks: [initialRow(INITIAL_ROW_ID)],
-    };
-    // recipient pair is REQUIRED on a channel-thread stream (#285 spike).
-    if (input.recipientTeamId) args.recipient_team_id = input.recipientTeamId;
-    if (input.recipientUserId) args.recipient_user_id = input.recipientUserId;
-    // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
-    const res = await (web.chat as any).startStream(args);
-    streamTs = res?.ts;
-    initialRowOpen = true;
-    activeRowId = INITIAL_ROW_ID;
-  };
-
+  // Append chunks, opening the stream on first use: the first append's chunks
+  // become the startStream payload (Slack requires a non-empty first chunk).
+  // We deliberately do NOT pass task_display_mode — task_update chunks render
+  // as task cards in plain text mode too, and omitting it lets a markdown-only
+  // turn stream without a mandatory leading task row (no "Thinking…" chip).
   // biome-ignore lint/suspicious/noExplicitAny: chunk union spans task_update + markdown_text + blocks
   const append = async (chunks: any[]): Promise<void> => {
     if (chunks.length === 0) return;
-    await ensureStream();
+    if (!streamTs) {
+      const args: Record<string, unknown> = { channel, thread_ts: input.threadTs, chunks };
+      // recipient pair is REQUIRED on a channel-thread stream (#285 spike).
+      if (input.recipientTeamId) args.recipient_team_id = input.recipientTeamId;
+      if (input.recipientUserId) args.recipient_user_id = input.recipientUserId;
+      // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
+      const res = await (web.chat as any).startStream(args);
+      streamTs = res?.ts;
+      return;
+    }
     // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
     await (web.chat as any).appendStream({ channel, ts: streamTs, chunks }).catch(() => {});
   };
 
-  // Flip the initial "Thinking…" row to complete the first time real work
-  // (a tool row or the final reply) is about to render, so it doesn't sit
-  // open under the rest of the timeline.
-  const closeInitialRow = async (): Promise<void> => {
-    if (!initialRowOpen) return;
-    initialRowOpen = false;
-    await append([taskRow({ id: INITIAL_ROW_ID, title: 'Thinking…', status: 'complete' })]);
-  };
-
   const finalize = async (blocks: ReturnType<typeof finalBlocks>): Promise<void> => {
-    if (stopped) return;
+    // Nothing to stop if the stream never opened (no chunk was ever emitted).
+    if (stopped || !streamTs) return;
     stopped = true;
-    await ensureStream();
     // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
     await (web.chat as any)
       .stopStream({ channel, ts: streamTs, chunks: [{ type: 'blocks', blocks }] })
@@ -726,9 +710,9 @@ async function runStreamingTurn(
       }
     }
 
-    // Open the stream + react before the first model call so the user sees
-    // the "Thinking…" row + 🤔 immediately.
-    await ensureStream();
+    // React before the first model call so the user sees 🤔 immediately. The
+    // stream itself opens lazily on the first emitted chunk (no placeholder
+    // chip) — the reaction is the alive signal during model latency.
     if (originatingTs) await reactOn(originatingTs, REACTION_THINKING);
 
     while (true) {
@@ -757,14 +741,12 @@ async function runStreamingTurn(
           // the model sees the new input.
           if (text.length > 0) {
             messages.push({ role: 'assistant', content: text });
-            await closeInitialRow();
             await append(markdownChunks(text));
           }
           continue;
         }
         // Truly final: stream the reply body, then finalize with the
         // feedback buttons + disclaimer.
-        await closeInitialRow();
         const reply = text.length > 0 ? text : '(empty reply)';
         await append(markdownChunks(reply));
         await finalize(finalBlocks());
@@ -774,7 +756,6 @@ async function runStreamingTurn(
 
       // Reasoning text for this round streams as markdown before its rows.
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
-      await closeInitialRow();
       if (text.length > 0) await append(markdownChunks(text));
 
       for (const tc of toolCalls) {

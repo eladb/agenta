@@ -4,10 +4,8 @@ import {
   chunkMarkdown,
   FEEDBACK_ACTION_ID,
   finalBlocks,
-  initialRow,
-  markdownChunks,
   MARKDOWN_CHUNK_MAX,
-  TASK_DISPLAY_MODE,
+  markdownChunks,
   TASK_FIELD_MAX,
   taskRow,
   toolEndRow,
@@ -60,22 +58,6 @@ describe('taskRow', () => {
     const row = taskRow({ id: 'c1', title: 't', status: 'pending' });
     expect(row.details).toBeUndefined();
     expect(row.output).toBeUndefined();
-  });
-});
-
-describe('initialRow (timeline start-with-a-row rule)', () => {
-  it('is a task_update chunk, not markdown', () => {
-    const row = initialRow('c1');
-    expect(row.type).toBe('task_update');
-    expect(row.status).toBe('in_progress');
-  });
-
-  it('defaults the title to a thinking lead-in', () => {
-    expect(initialRow('c1').title).toBe('Thinking…');
-  });
-
-  it('accepts a custom title', () => {
-    expect(initialRow('c1', 'Working').title).toBe('Working');
   });
 });
 
@@ -182,13 +164,5 @@ describe('finalBlocks', () => {
     const ctx = blocks.find((b) => b.type === 'context');
     expect(ctx).toBeDefined();
     expect(ctx.elements[0]).toEqual({ type: 'mrkdwn', text: AI_DISCLAIMER });
-  });
-});
-
-describe('constants', () => {
-  it('uses the timeline wire value (not the chunk type) for the display mode', () => {
-    // Spike correction: task_display_mode must be "timeline"; passing the
-    // chunk type "task_update" → invalid_arguments.
-    expect(TASK_DISPLAY_MODE).toBe('timeline');
   });
 });
