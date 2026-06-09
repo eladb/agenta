@@ -1,5 +1,6 @@
 import { log } from '../../shared/log';
 import { getPendingAskByTs } from '../runtime/asks';
+import { FEEDBACK_ACTION_ID } from '../runtime/stream-chunks';
 
 // Slack block_actions payload (subset we care about). Each action describes
 // one user interaction — clicking a button, picking from a select, etc.
@@ -33,6 +34,20 @@ export function handleInteractivePayload(raw: unknown): void {
   try {
     const payload = raw as Payload | undefined;
     if (!payload || payload.type !== 'block_actions') return;
+
+    // Turn-feedback buttons (#285): the final streamed message carries a
+    // feedback_buttons element with action_id `turn_feedback`. These are
+    // their own interaction — there's no pending ask to resolve. Just
+    // ack (already done at the HTTP boundary) and record the signal. On
+    // negative we only log for now (no modal — that's a later phase).
+    const fb = payload.actions?.find((a) => a.action_id === FEEDBACK_ACTION_ID);
+    if (fb) {
+      const sentiment = fb.value === 'up' ? 'positive' : 'negative';
+      const msgTs = payload.message?.ts ?? payload.container?.message_ts ?? '?';
+      log.info('interactive', `turn_feedback ${sentiment} on ${msgTs}`);
+      return;
+    }
+
     const messageTs = payload.message?.ts ?? payload.container?.message_ts;
     if (!messageTs) return;
     const ask = getPendingAskByTs(messageTs);
