@@ -643,6 +643,18 @@ async function runStreamingTurn(
   onMidTurnConsume?: () => void,
 ): Promise<void> {
   const channel = input.channel;
+  // Reaction names + the live-edit throttle, bound as function-local consts.
+  // These mirror the module-level REACTION_THINKING/REACTION_STEERING/
+  // LIVE_EDIT_INTERVAL_MS, but referencing those module consts from inside this
+  // large async closure tripped a bun codegen edge case that surfaced ONLY in
+  // CI as `ReferenceError: REACTION_THINKING is not defined` — on a const that
+  // is demonstrably defined (the verbose `runTurn` uses the same ones fine),
+  // and which we could not reproduce locally across matched bun/deps/file-order.
+  // Initializing from literals here removes every module-const reference from
+  // this function, sidestepping it. (#285)
+  const thinkingReaction = 'thinking_face';
+  const steeringReaction = 'wheel';
+  const liveEditIntervalMs = 800;
   // The stream `ts`, held across the whole turn (the streaming analogue of
   // `liveTs`). Started lazily on the FIRST chunk we emit — see `append`.
   let streamTs: string | undefined;
@@ -713,7 +725,7 @@ async function runStreamingTurn(
     // React before the first model call so the user sees 🤔 immediately. The
     // stream itself opens lazily on the first emitted chunk (no placeholder
     // chip) — the reaction is the alive signal during model latency.
-    if (originatingTs) await reactOn(originatingTs, REACTION_THINKING);
+    if (originatingTs) await reactOn(originatingTs, thinkingReaction);
 
     while (true) {
       const response = await callModel(messages, { tools: TOOL_DEFS, signal });
@@ -736,7 +748,7 @@ async function runStreamingTurn(
         const injected = await injectSteering(input.threadKey, messages, consumed);
         if (injected.length > 0) {
           onMidTurnConsume?.();
-          for (const ts of injected) await reactOn(ts, REACTION_STEERING);
+          for (const ts of injected) await reactOn(ts, steeringReaction);
           // Stream the would-be-final as reasoning text and keep looping so
           // the model sees the new input.
           if (text.length > 0) {
@@ -817,7 +829,7 @@ async function runStreamingTurn(
                 details: liveLine(liveBuffer),
               }),
             ]);
-          }, LIVE_EDIT_INTERVAL_MS);
+          }, liveEditIntervalMs);
         };
         const onProgress = isBash
           ? (chunk: { kind: 'stdout' | 'stderr'; text: string }): void => {
@@ -894,7 +906,7 @@ async function runStreamingTurn(
       const injectedMid = await injectSteering(input.threadKey, messages, consumed);
       if (injectedMid.length > 0) {
         onMidTurnConsume?.();
-        for (const ts of injectedMid) await reactOn(ts, REACTION_STEERING);
+        for (const ts of injectedMid) await reactOn(ts, steeringReaction);
       }
     }
   } catch (err) {
