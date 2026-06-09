@@ -397,31 +397,10 @@ describe('runTurn with tools', () => {
     expect(consumedSignals).toBeGreaterThan(0);
   });
 
-  test('reactions: thinking_face on the originating message, removed on turn end', async () => {
-    const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
-    // Pre-record the originating slack mention so the turn finds a
-    // message to react on.
-    await record({
-      event_id: newEventId(),
-      thread_key: 'k1',
-      source: 'slack',
-      type: 'message',
-      ts: nowIso(),
-      ingested_at: nowIso(),
-      payload: {
-        slack_event_id: 'Ev-orig',
-        slack_ts: '1.5',
-        user: 'U1',
-        text: 'hi',
-      },
-    });
-    const callModel: CallModel = async () => ({ role: 'assistant', content: 'hello' });
-
-    await runTurn(web, callModel, 'sys', input);
-
-    expect(reactionsAdded.some((r) => r.ts === '1.5' && r.name === 'thinking_face')).toBe(true);
-    expect(reactionsRemoved.some((r) => r.ts === '1.5' && r.name === 'thinking_face')).toBe(true);
-  });
+  // Note: the 🤔 thinking reaction is no longer added by runTurn — it moved
+  // to the handler / session level (#283). See session.test.ts for its
+  // add-on-kickoff / clear-on-idle / clear-on-throw coverage. runTurn now
+  // only owns the 🛞 steering reaction (tested below).
 
   test('reactions: steering wheel on injected mid-turn messages', async () => {
     const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
@@ -811,26 +790,27 @@ describe('runTurn with tools', () => {
 
   test('reactions are cleared on abort path', async () => {
     const { web, reactionsAdded, reactionsRemoved } = makeWebStub();
-    // Originating message so a thinking reaction lands.
-    await record({
-      event_id: newEventId(),
-      thread_key: 'k1',
-      source: 'slack',
-      type: 'message',
-      ts: nowIso(),
-      ingested_at: nowIso(),
-      payload: {
-        slack_event_id: 'Ev-orig',
-        slack_ts: '4.4',
-        user: 'U1',
-        text: 'long task please',
-      },
-    });
     const controller = new AbortController();
     let n = 0;
     const callModel: CallModel = async (_messages, opts) => {
       n++;
       if (n === 1) {
+        // Inject a mid-turn user message so a 🛞 steering reaction lands
+        // (the only reaction runTurn owns now that 🤔 moved to the handler).
+        await record({
+          event_id: newEventId(),
+          thread_key: 'k1',
+          source: 'slack',
+          type: 'message',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: {
+            slack_event_id: 'Ev-mid',
+            slack_ts: '4.4',
+            user: 'U2',
+            text: 'also do X',
+          },
+        });
         return {
           role: 'assistant',
           content: null,
@@ -857,9 +837,9 @@ describe('runTurn with tools', () => {
     controller.abort();
     await run;
 
-    // Thinking reaction was added on the originating message and then
-    // removed in the finally block, even though the turn was aborted.
-    expect(reactionsAdded.some((r) => r.ts === '4.4' && r.name === 'thinking_face')).toBe(true);
-    expect(reactionsRemoved.some((r) => r.ts === '4.4' && r.name === 'thinking_face')).toBe(true);
+    // The 🛞 steering reaction added mid-turn is removed in the finally
+    // block, even though the turn was aborted.
+    expect(reactionsAdded.some((r) => r.ts === '4.4' && r.name === 'wheel')).toBe(true);
+    expect(reactionsRemoved.some((r) => r.ts === '4.4' && r.name === 'wheel')).toBe(true);
   });
 });

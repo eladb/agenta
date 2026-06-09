@@ -21,7 +21,7 @@ import {
   resolveTransport,
 } from './home-config';
 import { refreshHomeMirror } from './home-refresh';
-import { signalStop, startOrQueue } from './session';
+import { clearThinking, markThinking, signalStop, startOrQueue } from './session';
 import { readSession, setDisplay, setGit, setHome, setModel } from './session-store';
 import { threadKey } from './thread';
 
@@ -153,7 +153,21 @@ async function handleMessage(
     return;
   }
 
-  await kickoffTurn(web, tk, e.channel, e.threadTs, e.user, ctx, callModelOverride);
+  // Fire the 🤔 reaction at the earliest point — right before we commit to a
+  // turn, fire-and-forget on the triggering message — so the user gets
+  // near-instant acknowledgement instead of waiting on the model/home resolve
+  // chain inside kickoffTurn (#283). Ownership is session-level: the reaction
+  // is removed in bulk when the thread goes idle (startOrQueue's finally).
+  markThinking(web, tk, e.channel, e.ts);
+  try {
+    await kickoffTurn(web, tk, e.channel, e.threadTs, e.user, ctx, callModelOverride);
+  } catch (err) {
+    // kickoffTurn threw before startOrQueue's finally could run (e.g. model/
+    // home resolution failed) — clear the 🤔 so we don't orphan it, then
+    // rethrow so the HTTP boundary still surfaces the error.
+    await clearThinking(web, tk).catch(() => {});
+    throw err;
+  }
 }
 
 // Shared seam: handler.handleMessage uses this after recording a mention;

@@ -46,10 +46,10 @@ const LIVE_EDIT_INTERVAL_MS = 800;
 // the round message is just the tool's rendering. No `thinking…` persists.
 //
 // Final replies (no tool_calls) post as a fresh plain message.
-// Slack emoji shortcodes for in-flight UX. Reactions are added to the
-// originating user message(s) so the user sees at a glance what the
-// bot is doing, and removed when the turn finishes.
-const REACTION_THINKING = 'thinking_face';
+// Slack emoji shortcodes for in-flight UX. The 🤔 "thinking" reaction is
+// added by the handler (session-level, see session.ts:markThinking) the
+// instant a mention commits to a turn; the 🛞 "steering" reaction is added
+// here on mid-turn injected messages and removed when the turn finishes.
 const REACTION_STEERING = 'wheel';
 
 // Humanized tool labels for pretty mode (#141). Pure lookup — the model's
@@ -254,10 +254,10 @@ export async function runTurn(
   };
 
   // No pre-model placeholder. The 🤔 reaction on the user's mention
-  // (added inside the try block below) is the "I'm working on it"
-  // signal; we only post a round message when we have concrete
-  // content (a model response that emits tool calls, or an
-  // intermediate steered text).
+  // (added by the handler the instant the mention commits to a turn —
+  // session.ts:markThinking) is the "I'm working on it" signal; we only
+  // post a round message when we have concrete content (a model response
+  // that emits tool calls, or an intermediate steered text).
 
   try {
     const messages: Message[] = await buildMessages(input.threadKey, systemPrompt);
@@ -265,25 +265,14 @@ export async function runTurn(
     // Initial set of slack.message event_ids that are already represented in
     // `messages` (via buildMessages). Anything that lands AFTER this is
     // unseen by the model until we inject it via injectSteering().
-    // While we're walking the events, also find the latest slack message
-    // (the one that triggered this turn) so we can react on it.
     const consumed = new Set<string>();
-    let originatingTs: string | undefined;
     {
       const initial = await readEvents<AgentaEvent>(input.threadKey);
       for (const e of initial) {
         if (e.source === 'slack' && e.type === 'message') {
           consumed.add(e.event_id);
-          const slackTs = e.payload.slack_ts;
-          if (typeof slackTs === 'string') originatingTs = slackTs;
         }
       }
-    }
-
-    // React 🤔 on the originating mention so the user sees the bot is
-    // working on it. Removed when the turn ends.
-    if (originatingTs) {
-      await reactOn(originatingTs, REACTION_THINKING);
     }
 
     while (true) {
