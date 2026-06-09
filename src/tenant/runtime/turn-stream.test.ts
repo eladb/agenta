@@ -281,8 +281,12 @@ describe('runTurn task_update streaming', () => {
     expect(askRows.some((r) => r.status === 'complete')).toBe(true);
   });
 
-  test('🤔 reaction added on the originating message and cleared at the end', async () => {
-    const { web, reactionsAdded, reactionsRemoved } = makeStreamWebStub();
+  test('does NOT self-add the 🤔 reaction — that is handler-owned (#284)', async () => {
+    // The 🤔 reaction is added by the handler (session.ts:markThinking) when a
+    // mention commits, for all display styles. The streaming turn must not add
+    // its own, or it would double up with the handler's. (Verbose/pretty does
+    // the same — see #284.)
+    const { web, reactionsAdded } = makeStreamWebStub();
     await record({
       event_id: newEventId(),
       thread_key: 'k1',
@@ -295,8 +299,7 @@ describe('runTurn task_update streaming', () => {
     const callModel: CallModel = async () => ({ role: 'assistant', content: 'hello' });
     await runTurn(web, callModel, 'sys', input, undefined, undefined, 'task_update');
 
-    expect(reactionsAdded.some((r) => r.ts === '1.5' && r.name === 'thinking_face')).toBe(true);
-    expect(reactionsRemoved.some((r) => r.ts === '1.5' && r.name === 'thinking_face')).toBe(true);
+    expect(reactionsAdded.some((r) => r.name === 'thinking_face')).toBe(false);
   });
 
   test('abort during the second model call still closes the stream', async () => {
