@@ -99,4 +99,32 @@ describe('handleInteractivePayload — block_actions dispatch', () => {
   test('non block_actions payloads are ignored', () => {
     expect(() => handleInteractivePayload({ type: 'view_submission' })).not.toThrow();
   });
+
+  // Turn-feedback buttons (#285): their own interaction — no pending ask to
+  // resolve. The handler just acks (already done upstream) and records.
+  test('turn_feedback click (positive) is handled without a pending ask, no throw', () => {
+    expect(() =>
+      handleInteractivePayload(
+        block_actions('streamTs', [{ action_id: 'turn_feedback', value: 'up' }]),
+      ),
+    ).not.toThrow();
+  });
+
+  test('turn_feedback negative click does not resolve an unrelated pending ask', async () => {
+    const promise = registerAsk({
+      messageTs: 'askTs',
+      threadKey: 'kf',
+      kind: 'text',
+      timeoutMs: 60_000,
+      onSettle: () => {},
+    });
+    // A feedback click on a DIFFERENT message must not touch the pending ask.
+    handleInteractivePayload(
+      block_actions('streamTs', [{ action_id: 'turn_feedback', value: 'down' }]),
+    );
+    expect(getPendingAskByTs('askTs')).toBeDefined();
+    // Clean up the still-pending ask so the test doesn't leak a timer.
+    getPendingAskByTs('askTs')?.reject('cleanup');
+    await promise;
+  });
 });

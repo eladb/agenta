@@ -35,12 +35,21 @@ export type ModelTriplet = {
   api_key_env: string;
 };
 
-// Per-channel UI mode (#141). `verbose` is the existing single-message-per-turn
-// debug surface (tool labels, provisioning lines, checklist). `pretty` is a
-// polished progress surface for end-user channels — model `content` as the
-// progress line, humanized fallback labels when content is null, footer
-// `_ran N tools_` on the final reply. Default is `verbose`.
-export type DisplayStyle = 'verbose' | 'pretty';
+// Per-channel UI mode (#141, #285). `verbose` is the existing
+// single-message-per-turn debug surface (tool labels, provisioning lines,
+// checklist). `pretty` is a polished progress surface for end-user channels —
+// model `content` as the progress line, humanized fallback labels when
+// content is null, footer `_ran N tools_` on the final reply. `task_update`
+// (#285) renders the turn via Slack's streaming timeline API
+// (`chat.startStream`/`appendStream`/`stopStream`) — one row per tool call
+// transitioning in_progress → complete/error, the reply streamed as markdown,
+// and a final message with feedback buttons + an AI disclaimer.
+//
+// Naming note: the user-facing STYLE here is `task_update`, but the Slack WIRE
+// display-mode value is `task_display_mode: 'timeline'` (and `task_update` is
+// the per-row CHUNK type). The mapping lives in `stream-chunks.ts`. Default is
+// `verbose`.
+export type DisplayStyle = 'verbose' | 'pretty' | 'task_update';
 export type DisplayConfig = {
   style: DisplayStyle;
 };

@@ -194,6 +194,8 @@ async function dispatch(
     {
       home,
       fallbackModel,
+      // The team id for the `task_update` streaming recipient pair (#285).
+      workspaceId: envelope.workspace_id,
     },
     callModelOverride,
   );

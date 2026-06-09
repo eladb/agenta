@@ -10,6 +10,12 @@ describe('parseCommand', () => {
     expect(parseCommand('/delete')).toBe('delete');
   });
 
+  it('parses /verbose, /pretty, /task_update display toggles', () => {
+    expect(parseCommand('/verbose')).toBe('verbose');
+    expect(parseCommand('/pretty')).toBe('pretty');
+    expect(parseCommand('/task_update')).toBe('task_update');
+  });
+
   it('tolerates surrounding whitespace', () => {
     expect(parseCommand('  /stop  ')).toBe('stop');
   });
