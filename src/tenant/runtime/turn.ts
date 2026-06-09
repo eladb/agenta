@@ -12,11 +12,26 @@ import { addReaction, editMessage, postInThread, removeReaction } from '../slack
 import { parseCommand } from './commands';
 import type { DisplayStyle } from './home-config';
 import { redact } from './redact';
+import {
+  finalBlocks,
+  initialRow,
+  markdownChunks,
+  TASK_DISPLAY_MODE,
+  taskRow,
+  toolEndRow,
+  toolStartRow,
+  truncateField,
+} from './stream-chunks';
 
 export type TurnInput = {
   channel: string;
   threadTs: string;
   threadKey: string;
+  // Recipient pair for the `task_update` streaming display style (#285).
+  // `chat.startStream` requires both on a channel-thread stream; unused by
+  // the verbose/pretty `chat.update` path. Optional so unit tests can omit.
+  recipientUserId?: string;
+  recipientTeamId?: string;
 };
 
 const ARGS_PREVIEW_LEN = 80;
@@ -152,6 +167,12 @@ export async function runTurn(
   onMidTurnConsume?: () => void,
   displayStyle: DisplayStyle = 'verbose',
 ): Promise<void> {
+  // `task_update` (#285) renders the turn via Slack's streaming timeline API
+  // instead of the verbose/pretty `chat.update` path. Fully separate render
+  // loop so verbose/pretty behavior is untouched.
+  if (displayStyle === 'task_update') {
+    return runStreamingTurn(web, callModel, systemPrompt, input, signal, onMidTurnConsume);
+  }
   const pretty = displayStyle === 'pretty';
   // Count tool calls executed across the whole turn — used for the pretty-
   // mode footer (`_ran N tools_`). Includes failures so the count matches
@@ -591,4 +612,353 @@ export async function runTurn(
     // error. Best-effort: Slack errors here don't propagate.
     await clearAllReactions();
   }
+}
+
+// ---------------------------------------------------------------------------
+// task_update streaming display style (#285)
+// ---------------------------------------------------------------------------
+//
+// Renders a turn via Slack's streaming timeline API instead of the verbose/
+// pretty `chat.update` path:
+//   - startStream leads with an in_progress "Thinking…" task row (the spike
+//     confirmed a timeline stream MUST start with a task_update chunk, not
+//     markdown — markdown-first → streaming_mode_mismatch);
+//   - each tool call becomes one task row keyed by tool_call_id, flipping
+//     in_progress → complete/error; bash live output throttles into the row's
+//     `details`;
+//   - model reasoning + the final reply stream as markdown_text chunks;
+//   - stopStream finalizes with feedback buttons + an AI disclaimer.
+//
+// The 🤔 reaction stays the alive signal. On any failure we flip the active
+// row to error, stream a legible explanation, and ALWAYS stopStream so the
+// stream is never left open.
+async function runStreamingTurn(
+  web: WebClient,
+  callModel: CallModel,
+  systemPrompt: string,
+  input: TurnInput,
+  signal?: AbortSignal,
+  onMidTurnConsume?: () => void,
+): Promise<void> {
+  const channel = input.channel;
+  // The stream `ts`, held across the whole turn (the streaming analogue of
+  // `liveTs`). Started lazily on the first chunk we emit.
+  let streamTs: string | undefined;
+  const INITIAL_ROW_ID = '__thinking__';
+  // Whether the initial "Thinking…" row is still the only row shown. We flip
+  // it to complete once real work starts so it doesn't linger.
+  let initialRowOpen = false;
+  // The id of the row currently in_progress, so a failure can flip exactly
+  // that row to error while leaving completed rows intact.
+  let activeRowId: string | undefined;
+  let stopped = false;
+
+  // Start the stream lazily, leading with the mandatory in_progress task row.
+  const ensureStream = async (): Promise<void> => {
+    if (streamTs) return;
+    const args: Record<string, unknown> = {
+      channel,
+      thread_ts: input.threadTs,
+      task_display_mode: TASK_DISPLAY_MODE,
+      chunks: [initialRow(INITIAL_ROW_ID)],
+    };
+    // recipient pair is REQUIRED on a channel-thread stream (#285 spike).
+    if (input.recipientTeamId) args.recipient_team_id = input.recipientTeamId;
+    if (input.recipientUserId) args.recipient_user_id = input.recipientUserId;
+    // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
+    const res = await (web.chat as any).startStream(args);
+    streamTs = res?.ts;
+    initialRowOpen = true;
+    activeRowId = INITIAL_ROW_ID;
+  };
+
+  // biome-ignore lint/suspicious/noExplicitAny: chunk union spans task_update + markdown_text + blocks
+  const append = async (chunks: any[]): Promise<void> => {
+    if (chunks.length === 0) return;
+    await ensureStream();
+    // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
+    await (web.chat as any).appendStream({ channel, ts: streamTs, chunks }).catch(() => {});
+  };
+
+  // Flip the initial "Thinking…" row to complete the first time real work
+  // (a tool row or the final reply) is about to render, so it doesn't sit
+  // open under the rest of the timeline.
+  const closeInitialRow = async (): Promise<void> => {
+    if (!initialRowOpen) return;
+    initialRowOpen = false;
+    await append([taskRow({ id: INITIAL_ROW_ID, title: 'Thinking…', status: 'complete' })]);
+  };
+
+  const finalize = async (blocks: ReturnType<typeof finalBlocks>): Promise<void> => {
+    if (stopped) return;
+    stopped = true;
+    await ensureStream();
+    // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
+    await (web.chat as any)
+      .stopStream({ channel, ts: streamTs, chunks: [{ type: 'blocks', blocks }] })
+      .catch(() => {});
+  };
+
+  // Reaction bookkeeping (identical to the verbose path).
+  const reactionsAdded: Array<{ ts: string; name: string }> = [];
+  const reactOn = async (ts: string, name: string): Promise<void> => {
+    await addReaction(web, channel, ts, name);
+    reactionsAdded.push({ ts, name });
+  };
+  const clearAllReactions = async (): Promise<void> => {
+    await Promise.all(reactionsAdded.map((r) => removeReaction(web, channel, r.ts, r.name)));
+    reactionsAdded.length = 0;
+  };
+
+  try {
+    const messages: Message[] = await buildMessages(input.threadKey, systemPrompt);
+
+    const consumed = new Set<string>();
+    let originatingTs: string | undefined;
+    {
+      const initial = await readEvents<AgentaEvent>(input.threadKey);
+      for (const e of initial) {
+        if (e.source === 'slack' && e.type === 'message') {
+          consumed.add(e.event_id);
+          const slackTs = e.payload.slack_ts;
+          if (typeof slackTs === 'string') originatingTs = slackTs;
+        }
+      }
+    }
+
+    // Open the stream + react before the first model call so the user sees
+    // the "Thinking…" row + 🤔 immediately.
+    await ensureStream();
+    if (originatingTs) await reactOn(originatingTs, REACTION_THINKING);
+
+    while (true) {
+      const response = await callModel(messages, { tools: TOOL_DEFS, signal });
+
+      const assistantEventId = newEventId();
+      const text = response.content ?? '';
+      const toolCalls = response.tool_calls ?? [];
+
+      await record({
+        event_id: assistantEventId,
+        thread_key: input.threadKey,
+        source: 'assistant',
+        type: 'message',
+        ts: nowIso(),
+        ingested_at: nowIso(),
+        payload: { slack_ts: streamTs ?? '', text },
+      });
+
+      if (toolCalls.length === 0) {
+        const injected = await injectSteering(input.threadKey, messages, consumed);
+        if (injected.length > 0) {
+          onMidTurnConsume?.();
+          for (const ts of injected) await reactOn(ts, REACTION_STEERING);
+          // Stream the would-be-final as reasoning text and keep looping so
+          // the model sees the new input.
+          if (text.length > 0) {
+            messages.push({ role: 'assistant', content: text });
+            await closeInitialRow();
+            await append(markdownChunks(text));
+          }
+          continue;
+        }
+        // Truly final: stream the reply body, then finalize with the
+        // feedback buttons + disclaimer.
+        await closeInitialRow();
+        const reply = text.length > 0 ? text : '(empty reply)';
+        await append(markdownChunks(reply));
+        await finalize(finalBlocks());
+        log.info('turn', `[${input.threadKey}] replied (${reply.length} chars, stream)`);
+        return;
+      }
+
+      // Reasoning text for this round streams as markdown before its rows.
+      messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
+      await closeInitialRow();
+      if (text.length > 0) await append(markdownChunks(text));
+
+      for (const tc of toolCalls) {
+        const tool = TOOLS[tc.function.name];
+        const isAsk = tc.function.name === 'ask_user';
+        const isBash = tc.function.name === 'bash';
+        // ask_user shows a generic "Asking…" row (its blocks post off-stream);
+        // every other tool shows its describe() label.
+        const rowTitle = isAsk ? 'Asking…' : toolLabel(tc);
+        const rowId = tc.id;
+        activeRowId = rowId;
+
+        // Provisioning (sandbox + git bootstrap + attachment sync). Mirrors
+        // the verbose path but surfaces status as the row's details.
+        let provisionError: string | undefined;
+        if (tool?.requiresSandbox && !isSandboxReady(input.threadKey)) {
+          await append([
+            toolStartRow({ id: rowId, label: rowTitle, argsPreview: 'waiting for workspace…' }),
+          ]);
+          try {
+            await ensureContainer(input.threadKey);
+          } catch (err) {
+            provisionError = (err as Error).message;
+          }
+        }
+        if (tool?.requiresSandbox && !provisionError) {
+          try {
+            await ensureRepoBootstrap(input.threadKey);
+          } catch (err) {
+            provisionError = (err as Error).message;
+          }
+        }
+        if (tool?.requiresSandbox && !provisionError) {
+          try {
+            const { synced } = await syncAttachmentsToSandbox(input.threadKey);
+            if (synced > 0) log.info('turn', `[${input.threadKey}] synced ${synced} attachment(s)`);
+          } catch (err) {
+            log.warn('turn', `[${input.threadKey}] attachment sync failed`, err);
+          }
+        }
+
+        // Open the tool's row (in_progress). args preview as details for
+        // non-ask tools.
+        const argsPreview = isAsk ? undefined : toolArgsPreview(tc);
+        await append([toolStartRow({ id: rowId, label: rowTitle, argsPreview })]);
+
+        // bash live preview → throttled `details` updates on the same row.
+        let liveBuffer = '';
+        let flushTimer: ReturnType<typeof setTimeout> | undefined;
+        const scheduleFlush = (): void => {
+          if (flushTimer || !isBash) return;
+          flushTimer = setTimeout(() => {
+            flushTimer = undefined;
+            void append([
+              taskRow({
+                id: rowId,
+                title: rowTitle,
+                status: 'in_progress',
+                details: liveLine(liveBuffer),
+              }),
+            ]);
+          }, LIVE_EDIT_INTERVAL_MS);
+        };
+        const onProgress = isBash
+          ? (chunk: { kind: 'stdout' | 'stderr'; text: string }): void => {
+              liveBuffer = (liveBuffer + chunk.text).slice(-1024);
+              scheduleFlush();
+            }
+          : undefined;
+
+        await record({
+          event_id: newEventId(),
+          thread_key: input.threadKey,
+          source: 'assistant',
+          type: 'tool_call',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: {
+            parent_event_id: assistantEventId,
+            tool_call_id: tc.id,
+            name: tc.function.name,
+            arguments_json: tc.function.arguments,
+          },
+        });
+
+        const result: { content: string; error: boolean } = provisionError
+          ? { content: `error: workspace not available: ${provisionError}`, error: true }
+          : await invokeTool(
+              tc.function.name,
+              tc.function.arguments,
+              {
+                threadKey: input.threadKey,
+                onProgress,
+                web,
+                channel,
+                threadTs: input.threadTs,
+                // No editable checklist in stream mode — ask_user posts its
+                // blocks as a separate thread message.
+                streamMode: true,
+                modelContent: text.length > 0 ? text : undefined,
+              },
+              signal,
+            );
+
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = undefined;
+        }
+
+        // Flip the row to its terminal state, reusing the same id so Slack
+        // rewrites the row in place.
+        await append([
+          toolEndRow({ id: rowId, label: rowTitle, output: result.content, error: result.error }),
+        ]);
+        activeRowId = undefined;
+
+        await record({
+          event_id: newEventId(),
+          thread_key: input.threadKey,
+          source: 'assistant',
+          type: 'tool_result',
+          ts: nowIso(),
+          ingested_at: nowIso(),
+          payload: {
+            tool_call_id: tc.id,
+            content: result.content,
+            ...(result.error ? { error: true } : {}),
+          },
+        });
+
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: result.content });
+      }
+
+      if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
+
+      const injectedMid = await injectSteering(input.threadKey, messages, consumed);
+      if (injectedMid.length > 0) {
+        onMidTurnConsume?.();
+        for (const ts of injectedMid) await reactOn(ts, REACTION_STEERING);
+      }
+    }
+  } catch (err) {
+    if (signal?.aborted) {
+      // Flip the active row to error, note the stop, and ALWAYS close the
+      // stream so it's never left open.
+      if (activeRowId) {
+        await append([
+          taskRow({ id: activeRowId, title: 'stopped', status: 'error', output: 'stopped' }),
+        ]).catch(() => {});
+      }
+      await append(markdownChunks('stopped')).catch(() => {});
+      await finalize(finalBlocks()).catch(() => {});
+      log.info('turn', `[${input.threadKey}] stopped (stream)`);
+      return;
+    }
+    const msg = redact((err as Error).message ?? String(err));
+    log.error('turn', `[${input.threadKey}] model call failed (stream)`, msg);
+    // Preserve completed rows; flip only the active one to error.
+    if (activeRowId) {
+      await append([
+        taskRow({
+          id: activeRowId,
+          title: 'error',
+          status: 'error',
+          output: truncateField(msg),
+        }),
+      ]).catch(() => {});
+    }
+    await append(markdownChunks(`error: ${msg}`)).catch(() => {});
+    await finalize(finalBlocks()).catch(() => {});
+  } finally {
+    // Defensive: if we somehow exited without finalizing (e.g. an early
+    // non-Error throw), still close the stream so it never dangles.
+    if (!stopped && streamTs) {
+      await finalize(finalBlocks()).catch(() => {});
+    }
+    await clearAllReactions();
+  }
+}
+
+// Short args preview for a tool row's `details` (mirrors the verbose path's
+// ARGS_PREVIEW_LEN). Returns undefined for empty/no args.
+function toolArgsPreview(tc: ToolCall): string | undefined {
+  const a = tc.function.arguments;
+  if (!a || a.length === 0) return undefined;
+  return a.length > ARGS_PREVIEW_LEN ? `${a.slice(0, ARGS_PREVIEW_LEN - 1)}…` : a;
 }

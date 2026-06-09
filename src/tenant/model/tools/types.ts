@@ -23,6 +23,13 @@ export type ToolContext = {
   // user keeps the model's reasoning/context visible alongside the
   // choices.
   modelContent?: string;
+  // True under the `task_update` streaming display style (#285). There is no
+  // editable checklist text message to render interactive blocks onto, and
+  // the spec forbids interactive blocks mid-stream — so ask_user posts its
+  // blocks as a SEPARATE thread message while the stream shows an "Asking…"
+  // task row. Unset (falsy) in verbose/pretty mode: ask_user keeps editing
+  // the checklist message in place.
+  streamMode?: boolean;
 };
 
 export type Tool = {

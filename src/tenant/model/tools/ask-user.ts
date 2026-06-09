@@ -1,6 +1,6 @@
 import { AskInUseError, type AskKind, getPendingAskByTs, registerAsk } from '../../runtime/asks';
 import { buildAskBlocks } from '../../slack/ask-blocks';
-import { editBlocksMessage } from '../../slack/post';
+import { editBlocksMessage, postBlocksInThread } from '../../slack/post';
 import { oneLine, strArg } from './helpers';
 import type { Tool } from './types';
 
@@ -67,32 +67,49 @@ export const askUser: Tool = {
     ) {
       throw new Error(`ask_user: kind=${kind} requires a non-empty options array`);
     }
-    if (!ctx.web || !ctx.channel || !ctx.threadTs || !ctx.checklistTs) {
-      throw new Error('ask_user: Slack/checklist context unavailable in this run');
+    if (!ctx.web || !ctx.channel || !ctx.threadTs) {
+      throw new Error('ask_user: Slack context unavailable in this run');
     }
     const web = ctx.web;
     const channel = ctx.channel;
-    const messageTs = ctx.checklistTs;
+    const threadTs = ctx.threadTs;
     const placeholder = typeof a.placeholder === 'string' ? a.placeholder : undefined;
     const question = a.question;
 
-    // Render the ask blocks onto the running checklist message instead of
-    // posting a new one. The blocks replace the checklist text while the
-    // ask is pending; once it settles, turn.ts's next updateChecklist call
-    // edits the message back to plain text (and editMessage clears the
-    // blocks so the buttons disappear).
-    //
-    // When the model emitted content text this iteration (ctx.modelContent),
-    // prepend it as a context block above the question so the user keeps
-    // the model's reasoning visible alongside the interactive controls.
+    // Build the interactive blocks. When the model emitted content text this
+    // iteration (ctx.modelContent), prepend it as a section above the
+    // question so the user keeps the model's reasoning visible alongside the
+    // interactive controls.
     const askBlocks = buildAskBlocks(kind as AskKind, question, options, placeholder);
     const blocks = ctx.modelContent
       ? [{ type: 'section', text: { type: 'mrkdwn', text: ctx.modelContent } }, ...askBlocks]
       : askBlocks;
-    try {
-      await editBlocksMessage(web, channel, messageTs, question, blocks);
-    } catch (err) {
-      throw new Error(`ask_user: could not render blocks: ${(err as Error).message}`);
+
+    // Where the buttons live, and what ts the ask registry is keyed by:
+    //   - stream mode (#285): the spec forbids interactive blocks mid-stream,
+    //     so POST a SEPARATE thread message carrying the blocks. The stream
+    //     shows an "Asking…" task row (managed by turn.ts) that flips to
+    //     complete when this resolves. Keyed by the new message's ts.
+    //   - verbose/pretty: render the blocks onto the running checklist
+    //     message in place (ctx.checklistTs). Once the ask settles, turn.ts's
+    //     next checklist edit clears the blocks.
+    let messageTs: string;
+    if (ctx.streamMode) {
+      try {
+        messageTs = await postBlocksInThread(web, channel, threadTs, question, blocks);
+      } catch (err) {
+        throw new Error(`ask_user: could not post blocks: ${(err as Error).message}`);
+      }
+    } else {
+      if (!ctx.checklistTs) {
+        throw new Error('ask_user: checklist context unavailable in this run');
+      }
+      messageTs = ctx.checklistTs;
+      try {
+        await editBlocksMessage(web, channel, messageTs, question, blocks);
+      } catch (err) {
+        throw new Error(`ask_user: could not render blocks: ${(err as Error).message}`);
+      }
     }
 
     let registered: Promise<string>;

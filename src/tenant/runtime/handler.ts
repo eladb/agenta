@@ -38,6 +38,12 @@ export type EnvelopeContext = {
   // Optional UX style override (defaults to 'verbose'). Until a per-deploy
   // env knob exists this is left undefined; the legacy default is preserved.
   display?: DisplayConfig;
+  // The Slack team/workspace id (envelope.workspace_id). Required by the
+  // `task_update` streaming display style: `chat.startStream` rejects a
+  // channel-thread stream without `recipient_team_id` (#285 spike). Carried
+  // here so the turn can mint the recipient pair without re-reading the
+  // envelope. Optional so unit tests that don't exercise streaming can omit it.
+  workspaceId?: string;
 };
 
 // `web` + `botToken` (the request-scoped xoxb) come from the envelope. The
@@ -125,7 +131,7 @@ async function handleMessage(
     return;
   }
 
-  if (cmd === 'verbose' || cmd === 'pretty') {
+  if (cmd === 'verbose' || cmd === 'pretty' || cmd === 'task_update') {
     await setDisplay(tk, { style: cmd });
     await postInThread(web, e.channel, e.threadTs, `switched to ${cmd} mode`).catch(() => {});
     log.info('handler', `[${tk}] /${cmd}`);
@@ -206,6 +212,12 @@ export async function kickoffTurn(
       channel,
       threadTs,
       threadKey: tk,
+      // Recipient pair for the `task_update` streaming style (#285).
+      // `chat.startStream` requires both on a channel-thread stream; the
+      // user id is the mentioning user, the team id rides in on the
+      // envelope. Harmlessly carried for verbose/pretty too (unused there).
+      recipientUserId: userId,
+      recipientTeamId: ctx.workspaceId,
     },
     display.style,
   );
