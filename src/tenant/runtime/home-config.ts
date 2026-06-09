@@ -22,6 +22,7 @@
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { log } from '../../shared/log';
 import type { HomeSpec } from '../../shared/types';
 
 // Per-channel model/provider triplet (#128). All three fields are required
@@ -53,6 +54,31 @@ export type DisplayStyle = 'verbose' | 'pretty' | 'task_update';
 export type DisplayConfig = {
   style: DisplayStyle;
 };
+
+const DISPLAY_STYLES: readonly DisplayStyle[] = ['verbose', 'pretty', 'task_update'];
+
+// Per-deploy default display style (#287). Reads the raw `AGENTA_DISPLAY_STYLE`
+// env value and turns it into a `DisplayConfig` to seed `EnvelopeContext.display`
+// for new threads. Validation rules:
+//   - unset / empty  → undefined (preserve today's behavior: handler defaults
+//     to `verbose` when ctx.display is absent).
+//   - valid style    → { style }.
+//   - invalid value  → warn + undefined (never crash boot).
+// Per-thread `/verbose|/pretty|/task_update` commands still override this, since
+// they freeze a display into session.json which the handler prefers over ctx.
+export function parseDisplayStyleEnv(value: string | undefined): DisplayConfig | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  if ((DISPLAY_STYLES as readonly string[]).includes(trimmed)) {
+    return { style: trimmed as DisplayStyle };
+  }
+  log.warn(
+    'home-config',
+    `ignoring invalid AGENTA_DISPLAY_STYLE ${JSON.stringify(value)} (expected one of ${DISPLAY_STYLES.join(', ')}); falling back to default`,
+  );
+  return undefined;
+}
 
 // The per-thread home snapshot frozen into `session.json` on first mention.
 // Same shape as `HomeSpec` from the bot↔tenant wire format (`{remote,
