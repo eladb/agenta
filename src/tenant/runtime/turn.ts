@@ -12,14 +12,7 @@ import { addReaction, editMessage, postInThread, removeReaction } from '../slack
 import { parseCommand } from './commands';
 import type { DisplayStyle } from './home-config';
 import { redact } from './redact';
-import {
-  finalBlocks,
-  markdownChunks,
-  taskRow,
-  toolEndRow,
-  toolStartRow,
-  truncateField,
-} from './stream-chunks';
+import { finalBlocks, markdownChunks, taskRow, toolStartRow, truncateField } from './stream-chunks';
 
 export type TurnInput = {
   channel: string;
@@ -601,27 +594,28 @@ export async function runTurn(
 }
 
 // ---------------------------------------------------------------------------
-// task_update streaming display style (#285)
+// task_update streaming display style (#285) — plan rendering
 // ---------------------------------------------------------------------------
 //
-// Renders a turn via Slack's streaming timeline API instead of the verbose/
-// pretty `chat.update` path:
-//   - the stream starts LAZILY on the first chunk we actually emit, and we do
-//     NOT set task_display_mode. A conversation-only turn therefore opens in
-//     plain text mode (markdown body, no task-row chip); a tool turn opens
-//     directly on the real tool's row. task_update chunks render as task cards
-//     in text mode too (verified in the #285 spike), so we get the timeline
-//     rows without a placeholder "Thinking…" chip that would otherwise linger;
-//   - each tool call becomes one task row keyed by tool_call_id, flipping
-//     in_progress → complete/error; bash live output throttles into the row's
-//     `details`;
-//   - model reasoning + the final reply stream as markdown_text chunks;
-//   - stopStream finalizes with feedback buttons + an AI disclaimer.
+// Renders a turn via Slack's streaming API instead of the verbose/pretty
+// `chat.update` path. The stream opens LAZILY on the first emitted content, in
+// one of two shapes:
+//   - PLAN mode (task_display_mode: 'plan') the first time a round has tool
+//     calls. A single rotating header (plan_update) shows the current activity
+//     ("Working…" → the running tool's label → "✅ Done — N steps"); each tool
+//     call becomes one task card NESTED in the plan, flipping in_progress →
+//     complete/error. The whole flow lives under one collapsible item instead
+//     of N rows accumulating in the thread. Bash live output throttles into the
+//     active card's `details`.
+//   - plain TEXT mode for a pure-conversation turn (no tools): just the
+//     streamed markdown answer — no plan header, no empty container.
+// Model reasoning + the final reply stream as markdown_text chunks (under the
+// plan when in plan mode). stopStream finalizes with feedback buttons + an AI
+// disclaimer.
 //
-// The 🤔 reaction is the alive signal during model latency (before the first
-// chunk opens the stream). On any failure we flip the active row to error,
-// stream a legible explanation, and ALWAYS stopStream so the stream is never
-// left open.
+// The 🤔 reaction is owned by the handler (session.ts:markThinking). On any
+// failure we flip the active card to error, set the header to a terminal state,
+// stream a legible explanation, and ALWAYS stopStream so it's never left open.
 async function runStreamingTurn(
   web: WebClient,
   callModel: CallModel,
@@ -631,19 +625,56 @@ async function runStreamingTurn(
   onMidTurnConsume?: () => void,
 ): Promise<void> {
   const channel = input.channel;
-  // The stream `ts`, held across the whole turn (the streaming analogue of
-  // `liveTs`). Started lazily on the FIRST chunk we emit — see `append`.
+  // The stream `ts`, opened lazily on the first emitted content. `planMode` is
+  // true once we've opened it as a plan (task_display_mode:'plan'); a pure-
+  // conversation turn opens in plain text mode instead. `toolsRan` counts the
+  // nested task cards for the final plan header.
   let streamTs: string | undefined;
+  let planMode = false;
+  let toolsRan = 0;
   // The id of the row currently in_progress, so a failure can flip exactly
   // that row to error while leaving completed rows intact.
   let activeRowId: string | undefined;
   let stopped = false;
 
-  // Append chunks, opening the stream on first use: the first append's chunks
-  // become the startStream payload (Slack requires a non-empty first chunk).
-  // We deliberately do NOT pass task_display_mode — task_update chunks render
-  // as task cards in plain text mode too, and omitting it lets a markdown-only
-  // turn stream without a mandatory leading task row (no "Thinking…" chip).
+  // Open the stream as a PLAN with an initial rotating header. Idempotent: only
+  // the first call (the first tool round) opens it; later calls are no-ops. A
+  // plan stream MUST lead with a plan_update chunk (the lane-setting first
+  // chunk); task cards + markdown then nest/stream under it.
+  const ensurePlan = async (title: string): Promise<void> => {
+    if (streamTs) return;
+    planMode = true;
+    const args: Record<string, unknown> = {
+      channel,
+      thread_ts: input.threadTs,
+      task_display_mode: 'plan',
+      chunks: [{ type: 'plan_update', title: truncateField(title) }],
+    };
+    // recipient pair is REQUIRED on a channel-thread stream (#285 spike).
+    if (input.recipientTeamId) args.recipient_team_id = input.recipientTeamId;
+    if (input.recipientUserId) args.recipient_user_id = input.recipientUserId;
+    // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
+    const res = await (web.chat as any).startStream(args);
+    streamTs = res?.ts;
+  };
+
+  // Update the rotating plan header. No-op outside plan mode / before open.
+  const setPlanTitle = async (title: string): Promise<void> => {
+    if (!planMode || !streamTs) return;
+    // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
+    await (web.chat as any)
+      .appendStream({
+        channel,
+        ts: streamTs,
+        chunks: [{ type: 'plan_update', title: truncateField(title) }],
+      })
+      .catch(() => {});
+  };
+
+  // Append chunks, opening the stream in plain TEXT mode on first use — the
+  // pure-conversation path (a tool turn opens via ensurePlan first, so streamTs
+  // is already set and we just append). The first chunk becomes the startStream
+  // payload (Slack requires a non-empty first chunk).
   // biome-ignore lint/suspicious/noExplicitAny: chunk union spans task_update + markdown_text + blocks
   const append = async (chunks: any[]): Promise<void> => {
     if (chunks.length === 0) return;
@@ -659,6 +690,30 @@ async function runStreamingTurn(
     }
     // biome-ignore lint/suspicious/noExplicitAny: web-api stream method shapes are loose at the call boundary
     await (web.chat as any).appendStream({ channel, ts: streamTs, chunks }).catch(() => {});
+  };
+
+  // Interim conversational/reasoning text the model emits mid-turn renders as a
+  // nested card in the plan (one step in the sequence) — NOT as a message-body
+  // edit — so expanding the plan shows reasoning + tool calls in one ordered
+  // flow. Outside plan mode (e.g. steering before any tool ran) it falls back
+  // to a markdown chunk. The final reply is handled separately and stays the
+  // readable message body.
+  let noteSeq = 0;
+  const emitReasoning = async (text: string): Promise<void> => {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    if (planMode) {
+      noteSeq += 1;
+      await append([
+        taskRow({
+          id: `note-${noteSeq}`,
+          title: `💬 ${trimmed.replace(/\s+/g, ' ')}`,
+          status: 'complete',
+        }),
+      ]);
+    } else {
+      await append(markdownChunks(trimmed));
+    }
   };
 
   const finalize = async (blocks: ReturnType<typeof finalBlocks>): Promise<void> => {
@@ -722,26 +777,33 @@ async function runStreamingTurn(
         if (injected.length > 0) {
           onMidTurnConsume?.();
           for (const ts of injected) await reactOn(ts, REACTION_STEERING);
-          // Stream the would-be-final as reasoning text and keep looping so
-          // the model sees the new input.
+          // Treat the would-be-final as interim reasoning and keep looping so
+          // the model sees the new input (a note card in plan mode).
           if (text.length > 0) {
             messages.push({ role: 'assistant', content: text });
-            await append(markdownChunks(text));
+            await emitReasoning(text);
           }
           continue;
         }
-        // Truly final: stream the reply body, then finalize with the
+        // Truly final: collapse the plan header to a Done state (if we ever
+        // opened a plan), stream the reply body, then finalize with the
         // feedback buttons + disclaimer.
         const reply = text.length > 0 ? text : '(empty reply)';
+        if (planMode) {
+          await setPlanTitle(`✅ Done — ${toolsRan} step${toolsRan === 1 ? '' : 's'}`);
+        }
         await append(markdownChunks(reply));
         await finalize(finalBlocks());
         log.info('turn', `[${input.threadKey}] replied (${reply.length} chars, stream)`);
         return;
       }
 
-      // Reasoning text for this round streams as markdown before its rows.
+      // The first tool round opens the PLAN (later rounds reuse it). Reasoning
+      // text for this round becomes a nested note card in the plan, in sequence
+      // before this round's tool cards.
       messages.push({ role: 'assistant', content: response.content, tool_calls: toolCalls });
-      if (text.length > 0) await append(markdownChunks(text));
+      await ensurePlan('Working…');
+      await emitReasoning(text);
 
       for (const tc of toolCalls) {
         const tool = TOOLS[tc.function.name];
@@ -752,6 +814,11 @@ async function runStreamingTurn(
         const rowTitle = isAsk ? 'Asking…' : toolLabel(tc);
         const rowId = tc.id;
         activeRowId = rowId;
+        toolsRan += 1;
+        // Rotate the plan header to the current activity while this tool runs.
+        await setPlanTitle(
+          isAsk ? 'Waiting for your answer…' : `${prettyToolLabel(tc.function.name)}…`,
+        );
 
         // Provisioning (sandbox + git bootstrap + attachment sync). Mirrors
         // the verbose path but surfaces status as the row's details.
@@ -782,10 +849,10 @@ async function runStreamingTurn(
           }
         }
 
-        // Open the tool's row (in_progress). args preview as details for
-        // non-ask tools.
-        const argsPreview = isAsk ? undefined : toolArgsPreview(tc);
-        await append([toolStartRow({ id: rowId, label: rowTitle, argsPreview })]);
+        // Open the tool's row (in_progress). The describe() title already
+        // conveys the call, so we don't show raw argument JSON — the body fills
+        // in with the result (or bash live output) when the tool completes.
+        await append([toolStartRow({ id: rowId, label: rowTitle })]);
 
         // bash live preview → throttled `details` updates on the same row.
         let liveBuffer = '';
@@ -851,9 +918,16 @@ async function runStreamingTurn(
         }
 
         // Flip the row to its terminal state, reusing the same id so Slack
-        // rewrites the row in place.
+        // rewrites the row in place. Clean, tool-aware body + status.
+        const card = toolCardFields(tc.function.name, result.content, result.error);
         await append([
-          toolEndRow({ id: rowId, label: rowTitle, output: result.content, error: result.error }),
+          taskRow({
+            id: rowId,
+            title: rowTitle,
+            status: result.error ? 'error' : 'complete',
+            ...(card.details !== undefined ? { details: card.details } : {}),
+            ...(card.output !== undefined ? { output: card.output } : {}),
+          }),
         ]);
         activeRowId = undefined;
 
@@ -876,6 +950,9 @@ async function runStreamingTurn(
 
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
 
+      // Next round is about to run the model — reset the header to neutral.
+      await setPlanTitle('Thinking…');
+
       const injectedMid = await injectSteering(input.threadKey, messages, consumed);
       if (injectedMid.length > 0) {
         onMidTurnConsume?.();
@@ -891,6 +968,7 @@ async function runStreamingTurn(
           taskRow({ id: activeRowId, title: 'stopped', status: 'error', output: 'stopped' }),
         ]).catch(() => {});
       }
+      await setPlanTitle('■ Stopped').catch(() => {});
       await append(markdownChunks('stopped')).catch(() => {});
       await finalize(finalBlocks()).catch(() => {});
       log.info('turn', `[${input.threadKey}] stopped (stream)`);
@@ -909,6 +987,7 @@ async function runStreamingTurn(
         }),
       ]).catch(() => {});
     }
+    await setPlanTitle('⚠️ Error').catch(() => {});
     await append(markdownChunks(`error: ${msg}`)).catch(() => {});
     await finalize(finalBlocks()).catch(() => {});
   } finally {
@@ -923,8 +1002,32 @@ async function runStreamingTurn(
 
 // Short args preview for a tool row's `details` (mirrors the verbose path's
 // ARGS_PREVIEW_LEN). Returns undefined for empty/no args.
-function toolArgsPreview(tc: ToolCall): string | undefined {
-  const a = tc.function.arguments;
-  if (!a || a.length === 0) return undefined;
-  return a.length > ARGS_PREVIEW_LEN ? `${a.slice(0, ARGS_PREVIEW_LEN - 1)}…` : a;
+// Render a finished tool call's result into clean, human-readable card fields
+// (shown inside the collapsible plan). The card TITLE is already the tool's
+// describe() label ("$ date -u", "read README.md:1-200"), so we never show raw
+// argument JSON. `details` is the readable body block; `output` is a short
+// status bullet. bash gets special handling: stdout/stderr in the body, the
+// exit code as the bullet (the model-oriented "--- stdout ---" markers are
+// stripped). Other tools' result content is already human-readable as-is.
+// taskRow truncates each field to the 256-char cap.
+function toolCardFields(
+  name: string,
+  content: string,
+  error: boolean,
+): { details?: string; output?: string } {
+  if (name === 'bash') {
+    const exit = content.match(/^exit: (-?\d+)/)?.[1];
+    const body = content
+      .replace(/^exit: -?\d+\n?/, '')
+      .replace(/--- stdout ---\n?/g, '')
+      .replace(/--- stderr ---\n?/g, '\n⚠ stderr:\n')
+      .trim();
+    return {
+      details: body.length > 0 ? body : undefined,
+      output: exit !== undefined ? `exit: ${exit}` : undefined,
+    };
+  }
+  // For everything else the result content is the readable body; a failure is
+  // surfaced via the card's error status (so no extra status bullet needed).
+  return { details: content.length > 0 ? content : error ? 'error' : undefined };
 }

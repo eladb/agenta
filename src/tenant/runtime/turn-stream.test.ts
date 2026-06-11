@@ -129,8 +129,8 @@ describe('runTurn task_update streaming', () => {
     expect(blocks.some((b) => b.type === 'context')).toBe(true);
   });
 
-  test('a tool turn with no reasoning opens on the real tool row (no placeholder)', async () => {
-    const { web, appends } = makeStreamWebStub();
+  test('a tool turn opens a PLAN, nests the tool card, and ends with a Done header', async () => {
+    const { web, starts, appends } = makeStreamWebStub();
     let n = 0;
     const callModel: CallModel = async () => {
       n++;
@@ -150,13 +150,64 @@ describe('runTurn task_update streaming', () => {
       return { role: 'assistant', content: 'done' };
     };
     await runTurn(web, callModel, 'sys', input, undefined, undefined, 'task_update');
-    // The very first chunk Slack ever sees is the tool's OWN row — there is no
-    // synthetic placeholder "Thinking…" row preceding it.
+
+    // Opened in plan mode, leading with a plan_update header chunk.
+    expect(starts[0]?.task_display_mode).toBe('plan');
     const first = firstChunkOf(appends);
-    expect(first?.type).toBe('task_update');
-    expect(first?.id).toBe('call_t');
-    expect(first?.status).toBe('in_progress');
-    expect(appends.some((c) => c.id === '__thinking__')).toBe(false);
+    expect(first?.type).toBe('plan_update');
+    // The tool renders as a task card nested in the plan (task_update chunk).
+    expect(appends.some((c) => c.type === 'task_update' && c.id === 'call_t')).toBe(true);
+    // The header rotates and lands on a Done state at the end.
+    const planTitles = appends.filter((c) => c.type === 'plan_update').map((c) => c.title);
+    expect(planTitles.some((t) => typeof t === 'string' && /Done — 1 step\b/.test(t))).toBe(true);
+  });
+
+  test('interim reasoning becomes a nested note card in the plan, not a body edit', async () => {
+    const { web, appends } = makeStreamWebStub();
+    let n = 0;
+    const callModel: CallModel = async () => {
+      n++;
+      if (n === 1) {
+        return {
+          role: 'assistant',
+          content: 'Let me check the time first.',
+          tool_calls: [
+            {
+              id: 'call_r',
+              type: 'function',
+              function: { name: 'get_current_time', arguments: '{}' },
+            },
+          ],
+        };
+      }
+      return { role: 'assistant', content: 'the final answer' };
+    };
+    await runTurn(web, callModel, 'sys', input, undefined, undefined, 'task_update');
+
+    // The interim reasoning is a task_update note card (id note-1), NOT markdown.
+    const note = appends.find((c) => c.type === 'task_update' && c.id === 'note-1');
+    expect(note).toBeDefined();
+    expect(String(note?.title)).toContain('Let me check the time first.');
+    expect(
+      appends.some((c) => c.type === 'markdown_text' && c.text === 'Let me check the time first.'),
+    ).toBe(false);
+    // The FINAL answer stays a readable markdown body (not a card).
+    expect(appends.some((c) => c.type === 'markdown_text' && c.text === 'the final answer')).toBe(
+      true,
+    );
+  });
+
+  test('a pure-conversation turn opens in plain text mode (no plan)', async () => {
+    const { web, starts, appends } = makeStreamWebStub();
+    const callModel: CallModel = async () => ({ role: 'assistant', content: 'just an answer' });
+    await runTurn(web, callModel, 'sys', input, undefined, undefined, 'task_update');
+
+    // No plan: text mode, no plan_update / task_update chunks anywhere.
+    expect(starts[0]?.task_display_mode).toBeUndefined();
+    expect(appends.some((c) => c.type === 'plan_update' || c.type === 'task_update')).toBe(false);
+    expect(appends.some((c) => c.type === 'markdown_text' && c.text === 'just an answer')).toBe(
+      true,
+    );
   });
 
   test('a tool call becomes one row keyed by tool_call_id: in_progress → complete', async () => {
