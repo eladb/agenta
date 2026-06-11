@@ -12,7 +12,6 @@ import { githubPrComment } from './github-pr-comment';
 import { githubUpdatePr } from './github-update-pr';
 import { glob } from './glob';
 import { grep } from './grep';
-import { listDirTool } from './list-dir';
 import { readFileTool } from './read-file';
 import { readPage } from './read-page';
 import { shareFile } from './share-file';
@@ -37,7 +36,6 @@ export const TOOLS: Record<string, Tool> = {
   edit_file: editFileTool,
   grep,
   glob,
-  list_dir: listDirTool,
   ask_user: askUser,
   share_file: shareFile,
   web_search: webSearch,
