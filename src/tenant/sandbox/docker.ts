@@ -257,8 +257,13 @@ async function ensureContainer(threadKey: string): Promise<void> {
       );
       await clearSandbox(threadKey);
     } else if (persisted.container_name === name && (await verifyAlive(name))) {
+      const hostPort = await readHostPort(name);
+      await waitForHealth(hostPort);
       tokens.set(threadKey, persisted.token);
-      log.info('sandbox', `re-hydrated container ${name} from session.json`);
+      log.info(
+        'sandbox',
+        `re-hydrated container ${name} from session.json (healthy on :${hostPort})`,
+      );
       return;
     } else if (persisted.volume_name && (await volumeExists(persisted.volume_name))) {
       // Dead container, live volume. Create a fresh container attached to

@@ -191,15 +191,15 @@ export async function startTunnel(opts: StartTunnelOpts): Promise<TunnelHandle> 
   }
 
   connect();
-  // Wait up to 5s for the first open before returning. Reconnect loop
+  // Wait up to 15s for the first open before returning. Reconnect loop
   // keeps trying in the background after that.
   let openTimer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
     ready,
     new Promise<void>((_resolve, reject) => {
       openTimer = setTimeout(
-        () => reject(new Error(`tunnel to ${opts.sandboxBaseUrl} did not open within 5s`)),
-        5000,
+        () => reject(new Error(`tunnel to ${opts.sandboxBaseUrl} did not open within 15s`)),
+        15000,
       );
     }),
   ])
