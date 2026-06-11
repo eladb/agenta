@@ -221,9 +221,10 @@ async function openSocketWithRetry(
 ): Promise<Awaited<ReturnType<typeof openSocketMode>>> {
   const attemptMs = 20_000;
   for (let attempt = 1; attempt <= 2; attempt++) {
+    const pending = openSocketMode(appToken, onEvent);
     try {
       return await Promise.race([
-        openSocketMode(appToken, onEvent),
+        pending,
         new Promise<never>((_, reject) =>
           setTimeout(
             () =>
@@ -233,6 +234,11 @@ async function openSocketWithRetry(
         ),
       ]);
     } catch (err) {
+      // The connect may still succeed in the background → an orphaned Socket
+      // Mode client. Disconnect it once it settles so two connections never
+      // coexist on one app token (Slack churns them → split-brain → dropped
+      // events → flaky e2e).
+      void pending.then((h) => h.socket.disconnect()).catch(() => {});
       if (attempt === 2) throw err;
       // Brief backoff before retry so Slack has a moment to recover.
       await new Promise((r) => setTimeout(r, 1_000));
