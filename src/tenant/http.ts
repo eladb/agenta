@@ -62,7 +62,12 @@ export function startHttp(opts: HttpOptions): ReturnType<typeof Bun.serve> {
   const expectedSecret = Buffer.from(opts.tenantSecret);
 
   const fetch = async (req: Request): Promise<Response> => {
-    const url = new URL(req.url);
+    let url: URL;
+    try {
+      url = new URL(req.url);
+    } catch {
+      return new Response('Bad Request', { status: 400 });
+    }
     if (req.method === 'GET' && url.pathname === '/health') {
       const ok = opts.readyRef.value;
       return new Response(JSON.stringify({ ok, ready: opts.readyRef.value }), {
@@ -146,6 +151,10 @@ export function startHttp(opts: HttpOptions): ReturnType<typeof Bun.serve> {
     port: opts.port,
     hostname: opts.hostname ?? '0.0.0.0',
     fetch,
+    error(err) {
+      log.error('http', `request handler error: ${(err as Error).message}`);
+      return new Response('Internal Server Error', { status: 500 });
+    },
   });
   log.info('http', `tenant /events listening on ${opts.hostname ?? '0.0.0.0'}:${server.port}`);
   return server;

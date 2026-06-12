@@ -9,6 +9,7 @@
 // without requiring a live Slack.
 
 import { describe, expect, test } from 'bun:test';
+import { connect } from 'node:net';
 import { startHttp } from './http';
 
 const SECRET = 'test-secret';
@@ -25,9 +26,34 @@ function startServer(opts?: { ready?: boolean }) {
   });
   return {
     base: `http://127.0.0.1:${server.port}`,
+    port: server.port,
     readyRef,
     stop: () => server.stop(),
   };
+}
+
+// Send a raw request line over a TCP socket (the standard fetch client
+// normalizes URLs, so it can't reproduce the authority-form `req.url` a
+// CONNECT / port-scan probe sends). Returns the first response line.
+function sendRawRequest(port: number, requestLine: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const sock = connect(port, '127.0.0.1', () => {
+      sock.write(`${requestLine}\r\nHost: 127.0.0.1\r\n\r\n`);
+    });
+    let buf = '';
+    sock.on('data', (d) => {
+      buf += d.toString('utf8');
+      if (buf.includes('\r\n')) {
+        sock.destroy();
+        resolve(buf.split('\r\n')[0] ?? '');
+      }
+    });
+    sock.on('error', reject);
+    sock.setTimeout(5000, () => {
+      sock.destroy();
+      reject(new Error('timeout'));
+    });
+  });
 }
 
 // Read an SSE stream until it closes; return the list of event names seen.
@@ -209,6 +235,24 @@ describe('POST /events envelope validation', () => {
         }),
       });
       expect(res.status).toBe(400);
+    } finally {
+      stop();
+    }
+  });
+});
+
+describe('malformed request hardening (#297)', () => {
+  // A CONNECT (or otherwise authority-form) request makes `new URL(req.url)`
+  // throw; without the guard the handler threw and crashed the process.
+  // Expect a clean 400 and a still-live server.
+  test('authority-form request line returns 400, server stays up', async () => {
+    const { base, port, stop } = startServer();
+    try {
+      const status = await sendRawRequest(port, 'CONNECT 185.65.245.10:7227 HTTP/1.1');
+      expect(status).toContain('400');
+      // Server is still alive: a normal /health request succeeds afterward.
+      const res = await fetch(`${base}/health`);
+      expect(res.status).toBe(200);
     } finally {
       stop();
     }
