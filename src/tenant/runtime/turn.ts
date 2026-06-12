@@ -56,8 +56,6 @@ const PRETTY_TOOL_LABELS: Record<string, string> = {
   read_file: 'Reading file',
   write_file: 'Writing file',
   edit_file: 'Editing file',
-  grep: 'Searching code',
-  glob: 'Listing files',
   get_current_time: 'Checking time',
   fetch_url: 'Fetching URL',
   share_file: 'Sharing file',

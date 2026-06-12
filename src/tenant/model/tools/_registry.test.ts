@@ -22,8 +22,6 @@ describe('TOOL_DEFS', () => {
       'read_file',
       'write_file',
       'edit_file',
-      'grep',
-      'glob',
       'ask_user',
       'github_create_pr',
       'github_update_pr',
