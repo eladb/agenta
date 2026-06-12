@@ -450,8 +450,13 @@ Bun.serve({
   port: PORT,
   hostname: '0.0.0.0',
   async fetch(req, server): Promise<Response | undefined> {
+    let url: URL;
     try {
-      const url = new URL(req.url);
+      url = new URL(req.url);
+    } catch {
+      return new Response('bad request', { status: 400 });
+    }
+    try {
       if (url.pathname === '/health') return new Response('ok');
       if (!authorized(req)) return new Response('unauthorized', { status: 401 });
       if (url.pathname === '/tunnel') {
@@ -488,6 +493,10 @@ Bun.serve({
       console.error('handler error:', err);
       return new Response((err as Error).message ?? 'internal error', { status: 500 });
     }
+  },
+  error(err) {
+    console.error('request handler error:', err);
+    return new Response('Internal Server Error', { status: 500 });
   },
   websocket: {
     open(ws) {

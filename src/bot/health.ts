@@ -22,7 +22,12 @@ export function startHealth(port: number, isConnected: () => boolean): HealthSer
     port,
     hostname: '0.0.0.0',
     fetch(req) {
-      const url = new URL(req.url);
+      let url: URL;
+      try {
+        url = new URL(req.url);
+      } catch {
+        return new Response('Bad Request', { status: 400 });
+      }
       if (url.pathname !== '/health') {
         return new Response('Not Found', { status: 404 });
       }
@@ -31,6 +36,10 @@ export function startHealth(port: number, isConnected: () => boolean): HealthSer
         status: ok ? 200 : 503,
         headers: { 'Content-Type': 'application/json' },
       });
+    },
+    error(err) {
+      log.error('bot/health', `request handler error: ${(err as Error).message}`);
+      return new Response('Internal Server Error', { status: 500 });
     },
   });
   log.info('bot/health', `health on http://0.0.0.0:${server.port}/health`);
