@@ -108,8 +108,13 @@ export async function startGitServer(opts: StartGitServerOpts): Promise<GitServe
     port: 0,
     hostname: '127.0.0.1',
     async fetch(req): Promise<Response> {
+      let url: URL;
       try {
-        const url = new URL(req.url);
+        url = new URL(req.url);
+      } catch {
+        return new Response('bad request', { status: 400 });
+      }
+      try {
         if (req.method !== 'GET' && req.method !== 'POST') {
           return new Response('method not allowed', { status: 405 });
         }
@@ -168,6 +173,10 @@ export async function startGitServer(opts: StartGitServerOpts): Promise<GitServe
         log.warn('git-server', `handler error: ${(err as Error).message}`);
         return new Response((err as Error).message, { status: 500 });
       }
+    },
+    error(err) {
+      log.error('git-server', `request handler error: ${(err as Error).message}`);
+      return new Response('Internal Server Error', { status: 500 });
     },
   });
 
