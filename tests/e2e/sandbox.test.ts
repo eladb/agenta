@@ -174,7 +174,7 @@ test.if(HAS_DOCKER)(
 );
 
 test.if(HAS_DOCKER)(
-  'coding-agent toolchain: write_file -> grep -> edit_file -> read_file roundtrip',
+  'coding-agent toolchain: write_file -> bash(grep) -> edit_file -> read_file roundtrip',
   async () => {
     script.length = 0;
     calls.length = 0;
@@ -202,8 +202,10 @@ test.if(HAS_DOCKER)(
           id: 'call_grep',
           type: 'function',
           function: {
-            name: 'grep',
-            arguments: JSON.stringify({ pattern: 'TODO', glob: '*.py' }),
+            // grep/glob tools were removed (#300); the agent greps via bash now.
+            // `-Hn` forces the filename so the assertions below still see app.py.
+            name: 'bash',
+            arguments: JSON.stringify({ command: 'grep -Hn TODO *.py' }),
           },
         },
       ],
