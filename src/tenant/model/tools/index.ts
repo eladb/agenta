@@ -10,8 +10,6 @@ import { getCurrentTime } from './get-current-time';
 import { githubCreatePr } from './github-create-pr';
 import { githubPrComment } from './github-pr-comment';
 import { githubUpdatePr } from './github-update-pr';
-import { glob } from './glob';
-import { grep } from './grep';
 import { readFileTool } from './read-file';
 import { readPage } from './read-page';
 import { shareFile } from './share-file';
@@ -34,8 +32,6 @@ export const TOOLS: Record<string, Tool> = {
   read_file: readFileTool,
   write_file: writeFileTool,
   edit_file: editFileTool,
-  grep,
-  glob,
   ask_user: askUser,
   share_file: shareFile,
   web_search: webSearch,
