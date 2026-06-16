@@ -112,6 +112,15 @@ export type SessionState = {
   // so mid-thread config swaps don't change the UX mid-conversation.
   // Missing = `verbose` (default).
   display?: DisplayConfig;
+  // The Claude Agent SDK session id for this thread (#303). Captured from the
+  // SDK `query()` stream's first frame on the first SDK-harness turn and
+  // persisted so subsequent turns resume the same SDK session
+  // (`options.resume`). Only populated under `HARNESS=sdk`; absent for the
+  // bespoke harness. `/delete` removes it (with the whole thread dir + a
+  // best-effort SDK `deleteSession`). Must be preserved across the status
+  // flips + clearSession like every other routing field — see
+  // `session-preservation-invariant` memory (#135).
+  sdk_session_id?: string;
 };
 
 const RUNTIME_FILENAME = 'session.json';
@@ -211,6 +220,7 @@ export function preservedFields(prev: SessionState | undefined): Partial<Session
     ...(prev.home !== undefined ? { home: prev.home } : {}),
     ...(prev.model !== undefined ? { model: prev.model } : {}),
     ...(prev.display !== undefined ? { display: prev.display } : {}),
+    ...(prev.sdk_session_id !== undefined ? { sdk_session_id: prev.sdk_session_id } : {}),
   };
 }
 
@@ -317,6 +327,27 @@ export async function setDisplay(
     const next: SessionState = { ...existing };
     if (display !== undefined) next.display = display;
     else delete next.display;
+    return next;
+  });
+}
+
+// Atomic read-modify-write of the `sdk_session_id` (#303). Symmetric with
+// setModel/setDisplay. Called by `runSdkTurn` the first time the SDK emits a
+// session id for this thread so later turns resume it. `undefined` clears the
+// field (used on /delete-adjacent cleanup, though /delete removes the whole
+// dir). No-op on the disk side when there's no session.json yet.
+export async function setSdkSessionId(
+  threadKey: string,
+  sessionId: string | undefined,
+): Promise<void> {
+  await updateSession(threadKey, (existing) => {
+    if (!existing) {
+      if (sessionId === undefined) return undefined;
+      return { status: 'idle', updated_at: '', sdk_session_id: sessionId };
+    }
+    const next: SessionState = { ...existing };
+    if (sessionId !== undefined) next.sdk_session_id = sessionId;
+    else delete next.sdk_session_id;
     return next;
   });
 }
