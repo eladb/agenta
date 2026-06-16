@@ -1,6 +1,7 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../../../shared/log';
 import { ensureRepoBootstrap } from '../../git/bootstrap';
+import { readSession } from '../../runtime/session-store';
 import { ensureContainer, isSandboxReady, syncAttachmentsToSandbox } from '../../sandbox';
 import { TOOLS } from '../tools';
 import type { ToolContext } from '../tools/types';
@@ -47,7 +48,13 @@ export function buildAgentaMcpServer(
         if (t.requiresSandbox) {
           try {
             if (!isSandboxReady(ctx.threadKey)) await ensureContainer(ctx.threadKey);
-            await ensureRepoBootstrap(ctx.threadKey);
+            // Bootstrap the git-backed agent home only when one is frozen on the
+            // session. Production always freezes a home on first mention (#87),
+            // so this runs; a home-less thread (e.g. an isolated tool-chain test)
+            // still gets a working sandbox for bash/fs without a clone.
+            if ((await readSession(ctx.threadKey))?.home) {
+              await ensureRepoBootstrap(ctx.threadKey);
+            }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             return {
