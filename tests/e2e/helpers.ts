@@ -488,11 +488,12 @@ export async function waitForReply(
   predicate: (text: string) => boolean,
   opts: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<string> {
-  // 90s default (raised from 45s): docker-in-CI is slower and more contended
-  // than the dev-box / Fly environment these waits were tuned for, so 45s
-  // flaked across the suite once CD moved e2e to the docker provider (#276).
-  // Callers can still pass an explicit timeoutMs for known-slow/-fast steps.
-  const timeoutMs = opts.timeoutMs ?? 90000;
+  // 120s default (raised from 90s, was 45s): docker-in-CI is slower and more
+  // contended than the dev-box / Fly environment these waits were tuned for.
+  // 90s still flaked — inbound-attachments landed at ~91.7s, sandbox restart at
+  // ~65s (#310) — once CD moved e2e to the docker provider (#276). Callers can
+  // still pass an explicit timeoutMs for known-slow/-fast steps.
+  const timeoutMs = opts.timeoutMs ?? 120000;
   const intervalMs = opts.intervalMs ?? 500;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -591,8 +592,8 @@ export async function waitFor(
   check: () => boolean,
   opts: { timeoutMs?: number; intervalMs?: number; what?: string } = {},
 ): Promise<void> {
-  // 90s default — see waitForReply: 45s was too tight under docker-in-CI.
-  const timeoutMs = opts.timeoutMs ?? 90000;
+  // 120s default — see waitForReply: 90s still flaked under docker-in-CI (#310).
+  const timeoutMs = opts.timeoutMs ?? 120000;
   const intervalMs = opts.intervalMs ?? 200;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
