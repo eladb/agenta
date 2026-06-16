@@ -105,10 +105,10 @@ try {
     const code: number = await new Promise((resolve) => {
       // 180s per-test timeout: covers docker sandbox cold starts on a
       // contended CI runner plus the connectWithRetry path in startAgent
-      // (~42s if the first attempt stalls). Raised from 60s alongside the
-      // 90s helpers waitFor/waitForReply defaults (#276 docker-in-CI move) —
-      // a 60s cap would kill a test before its 90s wait could resolve.
-      const child = spawn('bun', ['test', '--timeout', '180000', relPath], {
+      // (~42s if the first attempt stalls). Raised to 240s alongside the 120s
+      // helpers waitFor/waitForReply defaults (#276 docker-in-CI move, #310) —
+      // a tighter cap would kill a test before its 120s wait could resolve.
+      const child = spawn('bun', ['test', '--timeout', '240000', relPath], {
         stdio: 'inherit',
         env: { ...process.env, TEST_CHANNEL_ID: channelId },
       });

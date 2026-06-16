@@ -110,7 +110,7 @@ test.if(HAS_DOCKER)(
     const tk = threadKey(channel, threadTs);
 
     await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'marker written', {
-      timeoutMs: 60_000,
+      timeoutMs: 90_000,
     });
     await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
 
