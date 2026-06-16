@@ -124,8 +124,11 @@ test.if(HAS_DOCKER)(
     createdThreads.push(threadTs);
     const tk = threadKey(channel, threadTs);
 
+    // Cold fresh-container provisioning on the docker-CD sandbox runs ~65s
+    // (slower than the old Fly provider, #276); the old 60s floor flaked (#310).
+    // 90s matches the helper default and stays well under the 240s per-test cap.
     await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'marker written', {
-      timeoutMs: 60_000,
+      timeoutMs: 90_000,
     });
     await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
 
@@ -181,8 +184,9 @@ test.if(HAS_DOCKER)(
     scriptReply({ role: 'assistant', content: 'marker read' });
 
     await mention(tester, agent.botUserId, channel, threadTs, 'check marker');
+    // Same docker-CD slowness on the restart-reuse turn (#310).
     await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'marker read', {
-      timeoutMs: 60_000,
+      timeoutMs: 90_000,
     });
     await waitFor(() => calls.length === 4, { what: 'four model calls', timeoutMs: 30_000 });
 
