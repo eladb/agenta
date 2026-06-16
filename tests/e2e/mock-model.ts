@@ -85,14 +85,46 @@ function streamTurn(controller: SseController, turn: MockTurn): void {
   sse(controller, 'message_stop', { type: 'message_stop' });
 }
 
-export async function startMockModel(turns: MockTurn[]): Promise<{
+// A live handle to a running mock-model server. `startMockModel()` returns this.
+//
+// `setTurns` / `reset` make the server long-lived + per-test re-scriptable: the
+// e2e bot+tenant boot once in `beforeAll`, but each test owns its own script.
+// `gateNextTurn` arms a one-shot hold so the NEXT real turn stays open until the
+// test releases it — the seam `/stop`-style tests need to send `/stop` while a
+// turn is in flight.
+export type MockModelHandle = {
   baseUrl: string;
-  stop: () => Promise<void>;
+  // Replace the active turn script. Turn selection still keys off conversation
+  // progress (count of prior assistant messages), so a fresh thread / SDK
+  // session re-walks the new turns from index 0.
+  setTurns: (turns: MockTurn[]) => void;
+  // Clear the recorded requests + the turn script (drop back to a single empty
+  // text turn). Call between tests that share one server.
+  reset: () => void;
+  // Arm a one-shot gate: the next POST that would stream a real turn blocks
+  // until `release()` is called. Lets a test catch a turn mid-flight (e.g. to
+  // send `/stop`). Releasing streams the turn normally; if the SDK aborts the
+  // request first the release is a harmless no-op. Only one gate may be armed
+  // at a time.
+  gateNextTurn: () => { release: () => void };
   // biome-ignore lint/suspicious/noExplicitAny: recorded raw request bodies for assertions
   requests: any[];
-}> {
+  stop: () => Promise<void>;
+};
+
+// `turns` is optional: omit it for the long-lived per-test-settable mode (script
+// via `setTurns`); pass it for the original one-shot signature (back-compat for
+// sdk-turn.test.ts / mock-model.test.ts).
+export async function startMockModel(turns: MockTurn[] = []): Promise<MockModelHandle> {
+  // Mutable script + recorded requests. Held in closure so `setTurns`/`reset`
+  // re-point them without restarting the server.
+  let script: MockTurn[] = turns;
   // biome-ignore lint/suspicious/noExplicitAny: recorded raw request bodies for assertions
   const requests: any[] = [];
+
+  // One-shot gate. When armed, the next request that maps to a real turn awaits
+  // `gate.promise` before streaming. `release()` resolves it and disarms.
+  let gate: { promise: Promise<void>; release: () => void } | undefined;
 
   const server = Bun.serve({
     port: 0,
@@ -121,7 +153,15 @@ export async function startMockModel(turns: MockTurn[]): Promise<{
         const messages = Array.isArray((body as any)?.messages) ? (body as any).messages : [];
         // biome-ignore lint/suspicious/noExplicitAny: message entries are untyped JSON
         const priorTurns = messages.filter((m: any) => m?.role === 'assistant').length;
-        const turn = turns[priorTurns] ?? turns[turns.length - 1] ?? { text: '' };
+        const turn = script[priorTurns] ?? script[script.length - 1] ?? { text: '' };
+
+        // Gate: if armed, hold this response open until the test releases it.
+        // Consume the gate (one-shot) so a follow-up request streams normally.
+        if (gate) {
+          const pending = gate;
+          gate = undefined;
+          await pending.promise;
+        }
 
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
@@ -147,6 +187,26 @@ export async function startMockModel(turns: MockTurn[]): Promise<{
   return {
     baseUrl,
     requests,
+    setTurns: (next: MockTurn[]) => {
+      script = next;
+    },
+    reset: () => {
+      script = [];
+      requests.length = 0;
+      // Release a still-armed gate so a leaked hold can't wedge the next test.
+      if (gate) {
+        gate.release();
+        gate = undefined;
+      }
+    },
+    gateNextTurn: () => {
+      let release: () => void = () => {};
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      gate = { promise, release };
+      return { release };
+    },
     stop: async () => {
       await server.stop(true);
     },

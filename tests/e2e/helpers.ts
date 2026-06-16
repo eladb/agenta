@@ -18,6 +18,7 @@ import { withGolden } from '../../src/tenant/model/golden';
 import type { ModelTriplet } from '../../src/tenant/runtime/home-config';
 import { threadKey as makeThreadKey } from '../../src/tenant/runtime/thread';
 import { removeContainer } from '../../src/tenant/sandbox';
+import { type MockModelHandle, startMockModel } from './mock-model';
 
 // True iff `docker` is installed AND the sandbox layer is configured to
 // use it. Docker-specific assertions (egress block via iptables,
@@ -95,6 +96,14 @@ export type Agent = {
   // The tenant HTTP server. Stopped on shutdown so its port is released
   // and the bot's in-flight forwarders unblock.
   tenant: { port: number; stop: () => void };
+  // SDK-mode only (#315 Phase A): the long-lived mock-model server driving the
+  // SDK subprocess via ANTHROPIC_BASE_URL. Undefined in the default bespoke
+  // mode. Tests script it (`mock.setTurns`) + assert on `mock.requests`.
+  mock?: MockModelHandle;
+  // SDK-mode only: restores the process env this boot mutated (HARNESS,
+  // ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK). Invoked by
+  // shutdown/safeShutdown. No-op in bespoke mode.
+  restoreEnv?: () => void;
 };
 
 export type Tester = {
@@ -264,9 +273,53 @@ async function openSocketWithRetry(
 // `connect()` + `listen()` from `src/tenant/slack/*`, both removed under
 // #253. The returned shape keeps the same fields so test call sites
 // don't churn — see `Agent` for the per-field rationale.
-export async function startBotAndTenant(callModel: CallModel = stubCallModel): Promise<Agent> {
+// SDK-mode boot options (#315 Phase A). When `harness: 'sdk'` the tenant runs
+// the Claude Agent SDK turn (`runSdkTurn`) instead of the bespoke loop: we flip
+// `process.env.HARNESS=sdk`, start a mock-model server, and point
+// `ANTHROPIC_BASE_URL` at it so the SDK subprocess talks only to the mock.
+// The injected `callModel` is irrelevant in SDK mode (runSdkTurn ignores it),
+// but we still pass `stubCallModel` so the bespoke gateway is never constructed.
+export type StartOptions = { harness?: 'bespoke' | 'sdk' };
+
+export async function startBotAndTenant(
+  callModel: CallModel = stubCallModel,
+  opts: StartOptions = {},
+): Promise<Agent> {
+  const sdkMode = opts.harness === 'sdk';
   const appToken = requireEnv('SLACK_APP_TOKEN');
   const botToken = requireEnv('SLACK_BOT_TOKEN');
+
+  // --- SDK mode: process-env wiring + the mock-model server. ----------------
+  // One e2e process per test file (run-e2e.ts spawns one bun per file), so
+  // mutating process.env here is file-scoped + isolated; we still snapshot +
+  // restore on shutdown so a `bun test <file>` run that boots twice is clean.
+  let mock: MockModelHandle | undefined;
+  let restoreEnv: (() => void) | undefined;
+  if (sdkMode) {
+    const saved = {
+      harness: process.env.HARNESS,
+      baseUrl: process.env.ANTHROPIC_BASE_URL,
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      bedrock: process.env.CLAUDE_CODE_USE_BEDROCK,
+    };
+    restoreEnv = () => {
+      const restore = (k: string, v: string | undefined): void => {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      };
+      restore('HARNESS', saved.harness);
+      restore('ANTHROPIC_BASE_URL', saved.baseUrl);
+      restore('ANTHROPIC_API_KEY', saved.apiKey);
+      restore('CLAUDE_CODE_USE_BEDROCK', saved.bedrock);
+    };
+    mock = await startMockModel();
+    process.env.HARNESS = 'sdk';
+    process.env.ANTHROPIC_BASE_URL = mock.baseUrl;
+    // Bedrock OFF — the mock is reached via ANTHROPIC_BASE_URL — and a dummy
+    // key so the SDK subprocess has something to send (the mock ignores it).
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    process.env.ANTHROPIC_API_KEY = 'sdk-e2e-key-not-used';
+  }
 
   // Hold the SAME 'bot' + 'agent' lockfiles the production processes
   // take. Production `bun run start:bot` calls `acquire('bot')`; the
@@ -404,6 +457,8 @@ export async function startBotAndTenant(callModel: CallModel = stubCallModel): P
       lock,
       agentLock,
       tenant: tenantHandle,
+      ...(mock ? { mock } : {}),
+      ...(restoreEnv ? { restoreEnv } : {}),
     };
   } catch (err) {
     // Tear down in reverse acquisition order so a partial setup leaves
@@ -418,6 +473,14 @@ export async function startBotAndTenant(callModel: CallModel = stubCallModel): P
       agentLock?.release();
     } catch {}
     lock.release();
+    // SDK mode: stop the mock server + restore the env we mutated so a failed
+    // boot doesn't leak ANTHROPIC_BASE_URL/HARNESS into the next test file.
+    try {
+      await mock?.stop();
+    } catch {}
+    try {
+      restoreEnv?.();
+    } catch {}
     throw err;
   }
 }
@@ -560,6 +623,13 @@ export async function shutdown(agent: Agent, tester: Tester): Promise<void> {
   agent.lock.release();
   agent.agentLock.release();
   tester.lock.release();
+  // SDK mode: stop the mock-model server + restore the mutated process env.
+  try {
+    await agent.mock?.stop();
+  } catch {}
+  try {
+    agent.restoreEnv?.();
+  } catch {}
 }
 
 // Tolerant variant for `afterAll`: handles partial setup (one or both of
@@ -585,6 +655,12 @@ export async function safeShutdown(
   } catch {}
   try {
     tester?.lock.release();
+  } catch {}
+  try {
+    await agent?.mock?.stop();
+  } catch {}
+  try {
+    agent?.restoreEnv?.();
   } catch {}
 }
 
