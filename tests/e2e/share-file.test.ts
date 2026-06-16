@@ -1,8 +1,15 @@
+// Migrated to the SDK harness + mock-model (#315 Phase A). The product behavior
+// asserted is unchanged — the model writes a file in the sandbox, calls
+// share_file, the bot uploads it to the thread and persists the assistant
+// message event + a local copy of the bytes — but the model is now driven by the
+// mock-model server (ANTHROPIC_BASE_URL) scripted with MockTurn[] instead of the
+// bespoke `scriptedCallModel`/`script` queue, and the share_file tool_result
+// assertion ("shared note.txt …" / "file_id=") moves from the recorded
+// `Message[]` to the mock's recorded request bodies (Anthropic shape).
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
@@ -34,26 +41,16 @@ let tester: Tester;
 let channel: string;
 const createdThreads: string[] = [];
 
-type Scripted = { kind: 'reply'; message: AssistantMessage };
-const script: Scripted[] = [];
-const calls: Message[][] = [];
-
-const scriptedCallModel: CallModel = async (messages) => {
-  calls.push(messages);
-  const next = script.shift();
-  if (!next) return { role: 'assistant', content: 'unscripted' };
-  return next.message;
-};
-
-function scriptReply(message: AssistantMessage): void {
-  script.push({ kind: 'reply', message });
-}
-
 beforeAll(async () => {
   if (!HAS_DOCKER) return;
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
+  // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
+  // server (returned as `agent.mock`); the callModel arg is unused.
+  [agent, tester] = await Promise.all([
+    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startTester(),
+  ]);
 }, 120_000);
 
 afterAll(async () => {
@@ -68,42 +65,35 @@ afterAll(async () => {
 test.if(HAS_DOCKER)(
   'share_file: writes a file in the sandbox, shares it to the thread, persists JSONL + local copy',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
     const content = `sandbox file payload ${Date.now()}`;
 
-    // Turn 1: write a small file inside the sandbox.
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_write',
-          type: 'function',
-          function: {
-            name: 'write_file',
-            arguments: JSON.stringify({ path: 'note.txt', content }),
+    mock.setTurns([
+      // Turn 1: write a small file inside the sandbox.
+      {
+        toolUses: [
+          {
+            id: 'call_write',
+            name: 'mcp__agenta__write_file',
+            input: { path: 'note.txt', content },
           },
-        },
-      ],
-    });
-    // Turn 2: share it.
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_share',
-          type: 'function',
-          function: {
-            name: 'share_file',
-            arguments: JSON.stringify({ path: 'note.txt' }),
+        ],
+      },
+      // Turn 2: share it.
+      {
+        toolUses: [
+          {
+            id: 'call_share',
+            name: 'mcp__agenta__share_file',
+            input: { path: 'note.txt' },
           },
-        },
-      ],
-    });
-    // Turn 3: confirm.
-    scriptReply({ role: 'assistant', content: 'file shared' });
+        ],
+      },
+      // Turn 3: confirm.
+      { text: 'file shared' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -115,22 +105,31 @@ test.if(HAS_DOCKER)(
     createdThreads.push(threadTs);
 
     // 100s timeouts: this test does three model turns inside a brand-new
-    // sandbox. On the Fly provider the first turn pays a 20–40s cold
-    // start for the per-thread machine, then write_file / share_file /
-    // reply each round-trip through the sandbox HTTP server. 60s was
-    // observed too tight in CD 2026-05-19. Test wall clock is 120s.
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'file shared', {
+    // sandbox. On the docker provider the first turn pays the container cold
+    // start for the per-thread sandbox, then write_file / share_file / reply
+    // each round-trip through the sandbox HTTP server. 60s was observed too
+    // tight in CD 2026-05-19. Test wall clock is 150s.
+    await waitForReply(
+      tester,
+      channel,
+      threadTs,
+      agent.botUserId,
+      (t) => t.includes('file shared'),
+      { timeoutMs: 100_000 },
+    );
+    await waitFor(() => mock.requests.length >= 3, {
+      what: 'three model calls',
       timeoutMs: 100_000,
     });
-    await waitFor(() => calls.length === 3, { what: 'three model calls', timeoutMs: 100_000 });
 
-    // share_file's tool_result should land in the third model call as "shared note.txt …".
-    const third = calls[2];
-    if (!third) throw new Error('expected third model call');
-    const shareTool = third.find((m) => m.role === 'tool' && m.tool_call_id === 'call_share');
-    if (shareTool?.role !== 'tool') throw new Error('expected share tool msg');
-    expect(shareTool.content).toMatch(/^shared note\.txt/);
-    expect(shareTool.content).toContain('file_id=');
+    // share_file's tool_result should land in a continuation request body as
+    // "shared note.txt … file_id=…" (the bespoke version asserted this on the
+    // third model call's `tool` message; here it's in the recorded request body).
+    const flat = JSON.stringify(mock.requests);
+    expect(flat).toContain('call_share');
+    expect(flat).toContain('tool_result');
+    expect(flat).toContain('shared note.txt');
+    expect(flat).toContain('file_id=');
 
     // The Slack thread now contains a message with an attached file.
     // Slack's files.uploadV2 has eventual consistency vs conversations.replies —

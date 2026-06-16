@@ -33,13 +33,14 @@ import { log } from '../../shared/log';
 import { buildAgentaMcpServer } from '../model/sdk/mcp-tools';
 import { ASK_TIMEOUT_MS } from '../model/tools/ask-user';
 import type { ToolContext } from '../model/tools/types';
-import type { AgentaEvent } from '../persistence/events';
+import type { AgentaEvent, AttachmentRef } from '../persistence/events';
 import { newEventId, nowIso, record } from '../persistence/events';
 import { dataRoot, readEvents } from '../persistence/store';
 import { postInThread } from '../slack/post';
 import { parseCommand } from './commands';
 import type { DisplayStyle, ModelTriplet } from './home-config';
 import { redact } from './redact';
+import { buildUserContent } from './sdk-attachments';
 import {
   consumeSdkStream,
   makeWebStreamDriver,
@@ -60,44 +61,49 @@ export function stripBedrockScheme(model: string): string {
   return model.replace(/^bedrock:\/\//, '');
 }
 
-// Collect the user prompt for this turn from JSONL: the trailing run of slack
+// Collect the user input for this turn from JSONL: the trailing run of slack
 // `message` events (skipping slash-commands), i.e. everything the user said
-// since the last assistant/tool activity. On a fresh thread that's the
-// triggering mention (+ any backfilled context); on a resumed thread it's the
-// new input. Phase 3 will seed a cold-started SDK session from full JSONL; for
-// v1 resume carries prior context inside the SDK session itself.
-export async function collectUserPrompt(threadKey: string): Promise<string> {
+// since the last assistant/tool activity, plus any files attached to those
+// messages. On a fresh thread that's the triggering mention (+ any backfilled
+// context); on a resumed thread it's the new input. Resume carries prior
+// context inside the SDK session itself.
+export async function collectUserTurn(
+  threadKey: string,
+): Promise<{ text: string; files: AttachmentRef[] }> {
   const events = await readEvents<AgentaEvent>(threadKey);
   // Walk backwards; collect contiguous trailing slack user messages until we
-  // hit an assistant message / tool event.
+  // hit an assistant message / tool event. A message counts toward the turn if
+  // it carries non-command text OR files (an attachment-only upload has text:'').
   const texts: string[] = [];
+  const files: AttachmentRef[] = [];
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (!e) continue;
     if (e.source === 'assistant') break;
     if (e.source === 'slack' && e.type === 'message') {
       const text = e.payload.text;
-      if (typeof text === 'string' && text.length > 0 && parseCommand(text) === null) {
-        texts.unshift(text);
-      }
+      const msgFiles = e.payload.files ?? [];
+      const hasText = typeof text === 'string' && text.length > 0 && parseCommand(text) === null;
+      if (hasText) texts.unshift(text);
+      if (msgFiles.length > 0) files.unshift(...msgFiles);
     }
   }
-  // Fallback: if nothing trailing (e.g. all prior msgs already consumed in a
-  // resumed session but the new mention text was a command), use the very last
+  if (texts.length > 0 || files.length > 0) {
+    return { text: texts.join('\n\n'), files };
+  }
+  // Fallback: nothing trailing (e.g. all prior msgs already consumed in a
+  // resumed session but the new mention text was a command). Use the very last
   // non-command user message so the SDK always gets a non-empty prompt.
-  if (texts.length === 0) {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i];
-      if (e?.source === 'slack' && e.type === 'message') {
-        const text = e.payload.text;
-        if (typeof text === 'string' && text.length > 0 && parseCommand(text) === null) {
-          return text;
-        }
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e?.source === 'slack' && e.type === 'message') {
+      const text = e.payload.text;
+      if (typeof text === 'string' && text.length > 0 && parseCommand(text) === null) {
+        return { text, files: e.payload.files ?? [] };
       }
     }
-    return '(no user message)';
   }
-  return texts.join('\n\n');
+  return { text: '(no user message)', files: [] };
 }
 
 // The SDK's default stream-close timeout is 60s (sdk.d.ts:483) — if an
@@ -149,7 +155,10 @@ export async function runSdkTurn(
     driver?: SlackStreamDriver;
     recorder?: SdkStreamRecorder;
     // biome-ignore lint/suspicious/noExplicitAny: query() return type is the SDK Query (async-iterable + control methods)
-    runQuery?: (params: { prompt: string; options: Record<string, unknown> }) => any;
+    runQuery?: (params: {
+      prompt: string | AsyncIterable<unknown>;
+      options: Record<string, unknown>;
+    }) => any;
   },
 ): Promise<void> {
   const channel = input.channel;
@@ -194,7 +203,24 @@ export async function runSdkTurn(
   const existing = await readSession(input.threadKey);
   const resume = existing?.sdk_session_id;
 
-  const prompt = await collectUserPrompt(input.threadKey);
+  // Build the turn's user input. Text-only turns use the SDK string-prompt fast
+  // path; turns with attachments switch to streaming-input mode (an async
+  // iterable yielding one native multimodal user message — images/PDFs inline as
+  // base64 blocks, text files inline, all with a `[attached:]` sandbox path
+  // hint). Streaming input composes with `resume` (only `continue` is mutually
+  // exclusive with it).
+  const { text: userText, files: userFiles } = await collectUserTurn(input.threadKey);
+  const userContent = await buildUserContent(input.threadKey, userText, userFiles);
+  const prompt: string | AsyncIterable<unknown> =
+    typeof userContent === 'string'
+      ? userContent
+      : (async function* () {
+          yield {
+            type: 'user' as const,
+            message: { role: 'user' as const, content: userContent },
+            parent_tool_use_id: null,
+          };
+        })();
 
   // Track the assistant event id for tool_call parent linkage (mirrors
   // runStreamingTurn, which links each tool_call to the assistant message it
@@ -293,7 +319,7 @@ export async function runSdkTurn(
 
   const runQuery =
     overrides?.runQuery ??
-    ((params: { prompt: string; options: Record<string, unknown> }) =>
+    ((params: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }) =>
       // biome-ignore lint/suspicious/noExplicitAny: query() Options is wider than our Record; the SDK validates at runtime
       query(params as any));
 

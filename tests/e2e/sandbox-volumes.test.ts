@@ -1,6 +1,12 @@
+// Migrated to the SDK harness + mock-model (#315 Phase A). The product behavior
+// asserted is unchanged — the model emits a bash tool_call, the bot runs it in
+// the per-thread sandbox (creating the named volume), and a `/delete` tears down
+// both the container and the volume — but the model is now driven by the
+// mock-model server (ANTHROPIC_BASE_URL) scripted with MockTurn[] instead of the
+// bespoke `scriptedCallModel`/`script` queue. The "model called N times" gate
+// moves from the recorded `Message[]` to the mock's recorded request bodies.
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import { containerName } from '../../src/tenant/sandbox';
 import { ensureImage, volumeName } from '../../src/tenant/sandbox/docker';
@@ -33,21 +39,6 @@ let tester: Tester;
 let agent: Agent;
 const createdThreads: string[] = [];
 
-type Scripted = { kind: 'reply'; message: AssistantMessage };
-const script: Scripted[] = [];
-const calls: Message[][] = [];
-
-const scriptedCallModel: CallModel = async (messages) => {
-  calls.push(messages);
-  const next = script.shift();
-  if (!next) return { role: 'assistant', content: 'unscripted' };
-  return next.message;
-};
-
-function scriptReply(message: AssistantMessage): void {
-  script.push({ kind: 'reply', message });
-}
-
 function volumeExists(name: string): boolean {
   return spawnSync('docker', ['volume', 'inspect', name]).status === 0;
 }
@@ -62,7 +53,12 @@ beforeAll(async () => {
   channel = requireEnv('TEST_CHANNEL_ID');
   process.env.SANDBOX_EXEC_TIMEOUT_MS = '8000';
   await ensureImage();
-  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
+  // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
+  // server (returned as `agent.mock`); the callModel arg is unused.
+  [agent, tester] = await Promise.all([
+    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startTester(),
+  ]);
 }, 120_000);
 
 afterAll(async () => {
@@ -77,27 +73,26 @@ afterAll(async () => {
 test.if(HAS_DOCKER)(
   '/delete tears down both the container and the per-thread volume',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
 
     // Turn 1: write a file to the workspace. Forces sandbox provisioning,
     // which creates the named volume; without a sandbox-touching tool the
-    // bot's lazy-provisioning path never builds the container.
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_write',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({ command: 'echo persisted > ~/marker' }),
+    // bot's lazy-provisioning path never builds the container. Turn 2 is the
+    // text continuation after the tool result.
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_write',
+            name: 'mcp__agenta__bash',
+            input: { command: 'echo persisted > ~/marker' },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'marker written' });
+        ],
+      },
+      { text: 'marker written' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -109,10 +104,19 @@ test.if(HAS_DOCKER)(
     createdThreads.push(threadTs);
     const tk = threadKey(channel, threadTs);
 
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'marker written', {
-      timeoutMs: 90_000,
+    await waitForReply(
+      tester,
+      channel,
+      threadTs,
+      agent.botUserId,
+      (t) => t.includes('marker written'),
+      { timeoutMs: 90_000 },
+    );
+    // Model was invoked twice: once to emit tool_call, once after the tool result.
+    await waitFor(() => mock.requests.length >= 2, {
+      what: 'two model calls',
+      timeoutMs: 30_000,
     });
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
 
     const cname = containerName(tk);
     const vname = volumeName(tk);
