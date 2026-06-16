@@ -1,4 +1,7 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
+import { log } from '../../../shared/log';
+import { ensureRepoBootstrap } from '../../git/bootstrap';
+import { ensureContainer, isSandboxReady, syncAttachmentsToSandbox } from '../../sandbox';
 import { TOOLS } from '../tools';
 import type { ToolContext } from '../tools/types';
 import { jsonSchemaToZodShape } from './json-schema-to-zod';
@@ -31,8 +34,39 @@ export function buildAgentaMcpServer(
       const name = t.def.function.name;
       const shape = jsonSchemaToZodShape(t.def.function.parameters);
       return tool(name, t.def.function.description, shape, async (args: unknown) => {
+        const ctx = ctxFactory();
+        // Sandbox preamble (mirrors turn.ts's per-tool-call dispatch in the
+        // bespoke harness): before a tool that touches the sandbox runs, await
+        // the in-flight provisioning, bootstrap the git-backed agent home, and
+        // lazily sync inbound attachments into the sandbox. Without this the SDK
+        // path raced the background warmup (getEndpoint throws "sandbox not
+        // initialized"), never cloned the home (git push tools failed), and
+        // never surfaced attachments to tools. A hard failure (provision /
+        // bootstrap) becomes an error tool_result so the model can recover —
+        // same contract as the bespoke synthetic tool_result.
+        if (t.requiresSandbox) {
+          try {
+            if (!isSandboxReady(ctx.threadKey)) await ensureContainer(ctx.threadKey);
+            await ensureRepoBootstrap(ctx.threadKey);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+              content: [{ type: 'text' as const, text: `error: ${message}` }],
+              isError: true,
+            };
+          }
+          // Attachment sync is best-effort: a failure here just means a later
+          // file read surfaces a real error, not that the whole tool fails.
+          try {
+            const { synced } = await syncAttachmentsToSandbox(ctx.threadKey);
+            if (synced > 0)
+              log.info('mcp-tools', `[${ctx.threadKey}] synced ${synced} attachment(s)`);
+          } catch (err) {
+            log.warn('mcp-tools', `[${ctx.threadKey}] attachment sync failed`, err);
+          }
+        }
         try {
-          const text = await t.invoke(args, ctxFactory(), signal);
+          const text = await t.invoke(args, ctx, signal);
           return { content: [{ type: 'text' as const, text }] };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
