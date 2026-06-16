@@ -18,7 +18,7 @@
 //      (DOCKER_PROVIDER_ACTIVE), since those tools need the per-thread sandbox.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
@@ -30,7 +30,7 @@ import { _resetAsks, getPendingAskByThread } from '../../src/tenant/runtime/asks
 import type { ModelTriplet } from '../../src/tenant/runtime/home-config';
 import type { SlackStreamDriver } from '../../src/tenant/runtime/sdk-stream';
 import { runSdkTurn } from '../../src/tenant/runtime/sdk-turn';
-import { readSession } from '../../src/tenant/runtime/session-store';
+import { readSession, setSdkSessionId } from '../../src/tenant/runtime/session-store';
 import { ensureContainer, removeContainer } from '../../src/tenant/sandbox';
 import { DOCKER_PROVIDER_ACTIVE } from './helpers';
 import { type MockTurn, startMockModel } from './mock-model';
@@ -225,6 +225,69 @@ describe('runSdkTurn via mock model — multi-turn resume', () => {
     }
 
     expect(capturedResume).toBe(firstSession);
+  }, 120_000);
+});
+
+describe('runSdkTurn via mock model — session persistence (#308)', () => {
+  test('SDK sessions are written under <AGENTA_DATA_DIR>/.claude (survives restart)', async () => {
+    const tk = 'sdk-e2e-persist';
+    const mock = await startMockModel([{ text: 'persisted answer' }]);
+    process.env.ANTHROPIC_BASE_URL = mock.baseUrl;
+    const { driver } = makeDriverStub();
+    try {
+      await seedMention(tk, 'remember this');
+      await runSdkTurn(
+        NO_WEB,
+        'sys',
+        { ...input, threadKey: tk },
+        undefined,
+        'task_update',
+        MODEL,
+        {
+          driver,
+        },
+      );
+    } finally {
+      await mock.stop();
+    }
+    // The SDK persisted its session JSONL on the DATA VOLUME, not ephemeral
+    // ~/.claude — so a fresh tenant process can resume it after a restart.
+    expect(existsSync(join(dataDir, '.claude'))).toBe(true);
+    const session = await readSession(tk);
+    expect(typeof session?.sdk_session_id).toBe('string');
+  }, 120_000);
+
+  test('a stale resume id (session file gone) starts fresh instead of crashing', async () => {
+    const tk = 'sdk-e2e-stale-resume';
+    // Pre-seed a session id that has NO backing file (simulates a swept /
+    // volume-reset session after a restart).
+    await seedMention(tk, 'pretend prior context');
+    await setSdkSessionId(tk, 'bogus-session-does-not-exist-00000000');
+
+    const mock = await startMockModel([{ text: 'fresh answer after stale resume' }]);
+    process.env.ANTHROPIC_BASE_URL = mock.baseUrl;
+    const { driver, finals } = makeDriverStub();
+    try {
+      // Must NOT throw — the turn falls back to a fresh session.
+      await runSdkTurn(
+        NO_WEB,
+        'sys',
+        { ...input, threadKey: tk },
+        undefined,
+        'task_update',
+        MODEL,
+        {
+          driver,
+        },
+      );
+    } finally {
+      await mock.stop();
+    }
+    // The turn completed (finalized once) and captured a real session id,
+    // replacing the bogus one.
+    expect(finals).toHaveLength(1);
+    const session = await readSession(tk);
+    expect(session?.sdk_session_id).not.toBe('bogus-session-does-not-exist-00000000');
   }, 120_000);
 });
 
