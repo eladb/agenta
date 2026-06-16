@@ -93,7 +93,6 @@ export async function startMockModel(turns: MockTurn[]): Promise<{
 }> {
   // biome-ignore lint/suspicious/noExplicitAny: recorded raw request bodies for assertions
   const requests: any[] = [];
-  let cursor = 0;
 
   const server = Bun.serve({
     port: 0,
@@ -108,8 +107,21 @@ export async function startMockModel(turns: MockTurn[]): Promise<{
         }
         requests.push(body);
 
-        const turn = turns[cursor] ?? turns[turns.length - 1] ?? { text: '' };
-        cursor++;
+        // Pick the turn by CONVERSATION PROGRESS, not a request counter. The
+        // Messages API is stateless — every request carries the full `messages`
+        // history — so the number of assistant messages already present is
+        // exactly the number of model turns taken so far. The SDK subprocess
+        // may issue extra/retried requests (warmup, transient retries) under CI
+        // load; keying off a naive `cursor++` would let one of those shift every
+        // turn (the original CI flake: a spurious request consumed turn 0, so the
+        // real first turn got a text-only turn → no tool card → markdown at [0]).
+        // Counting prior assistant turns is idempotent: a duplicated first
+        // request (messages=[user]) maps to turn 0 again, never misaligning.
+        // biome-ignore lint/suspicious/noExplicitAny: request body is untyped JSON
+        const messages = Array.isArray((body as any)?.messages) ? (body as any).messages : [];
+        // biome-ignore lint/suspicious/noExplicitAny: message entries are untyped JSON
+        const priorTurns = messages.filter((m: any) => m?.role === 'assistant').length;
+        const turn = turns[priorTurns] ?? turns[turns.length - 1] ?? { text: '' };
 
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
