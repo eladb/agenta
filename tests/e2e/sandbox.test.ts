@@ -412,16 +412,20 @@ test.if(HAS_DOCKER)(
     );
     createdThreads.push(threadTs);
 
+    // 90s (not 45s): this turn waits through cold per-thread container
+    // provisioning + the 8s exec-timeout kill, and docker-in-CI provisioning
+    // runs slow (#310/#312 raised the shared floor for the same reason). The
+    // explicit 45s undercut the helper's 90s default and flaked in CD.
     await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('slept'), {
-      timeoutMs: 45_000,
+      timeoutMs: 90_000,
     });
-    await waitFor(() => mock.requests.length >= 2, { what: 'two model calls', timeoutMs: 45_000 });
+    await waitFor(() => mock.requests.length >= 2, { what: 'two model calls', timeoutMs: 90_000 });
 
     const flat = JSON.stringify(mock.requests);
     expect(flat).toContain('call_sleep');
     expect(flat).toContain('timed out');
   },
-  120_000,
+  180_000,
 );
 
 test.if(EGRESS_ENFORCEABLE)(
