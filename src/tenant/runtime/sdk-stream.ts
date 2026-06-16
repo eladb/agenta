@@ -102,6 +102,10 @@ export function toolCardTitle(bareName: string, input: unknown): string {
       const u = typeof args.url === 'string' ? args.url : '';
       return truncateField(`fetch ${u}`);
     }
+    case 'ask_user': {
+      const q = typeof args.question === 'string' ? args.question : '';
+      return truncateField(`❓ Asking: ${q}`);
+    }
     default:
       return prettyToolLabel(bareName);
   }

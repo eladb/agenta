@@ -26,6 +26,7 @@ import type { WebClient } from '@slack/web-api';
 import type { AgentaEvent } from '../../src/tenant/persistence/events';
 import { newEventId, nowIso, record } from '../../src/tenant/persistence/events';
 import { readEvents } from '../../src/tenant/persistence/store';
+import { _resetAsks, getPendingAskByThread } from '../../src/tenant/runtime/asks';
 import type { ModelTriplet } from '../../src/tenant/runtime/home-config';
 import type { SlackStreamDriver } from '../../src/tenant/runtime/sdk-stream';
 import { runSdkTurn } from '../../src/tenant/runtime/sdk-turn';
@@ -224,6 +225,194 @@ describe('runSdkTurn via mock model — multi-turn resume', () => {
     }
 
     expect(capturedResume).toBe(firstSession);
+  }, 120_000);
+});
+
+// A minimal stub WebClient for ask_user: it only needs chat.postMessage (to
+// post the interactive blocks in stream/task_update mode) to return a ts and
+// record the posted blocks. Everything else ask_user touches in this path is
+// the in-process asks registry.
+function makeWebStub(): {
+  web: WebClient;
+  posted: { text: string; blocks: unknown }[];
+} {
+  const posted: { text: string; blocks: unknown }[] = [];
+  let n = 0;
+  const web = {
+    chat: {
+      postMessage: async (args: { text?: string; blocks?: unknown }) => {
+        n += 1;
+        posted.push({ text: args.text ?? '', blocks: args.blocks });
+        return { ok: true, ts: `ask-ts-${n}` };
+      },
+    },
+  } as unknown as WebClient;
+  return { web, posted };
+}
+
+async function waitForPendingAsk(
+  threadKey: string,
+  timeoutMs = 30_000,
+): Promise<NonNullable<ReturnType<typeof getPendingAskByThread>>> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const ask = getPendingAskByThread(threadKey);
+    if (ask) return ask;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`no pending ask for ${threadKey} after ${timeoutMs}ms`);
+}
+
+describe('runSdkTurn via mock model — ask_user (#305)', () => {
+  afterEach(() => {
+    _resetAsks();
+  });
+
+  test('asks a buttons question, an out-of-band resolve feeds the answer back as the tool_result', async () => {
+    const tk = 'sdk-e2e-ask';
+    const askInput = { ...input, threadKey: tk };
+    const turns: MockTurn[] = [
+      {
+        text: 'I need to know which color you prefer.',
+        toolUses: [
+          {
+            id: 'tu_ask',
+            name: 'mcp__agenta__ask_user',
+            input: {
+              question: 'Which color?',
+              kind: 'buttons',
+              options: ['red', 'green', 'blue'],
+            },
+          },
+        ],
+      },
+      { text: 'Great, going with green.' },
+    ];
+    const mock = await startMockModel(turns);
+    process.env.ANTHROPIC_BASE_URL = mock.baseUrl;
+
+    const { driver, appended, finals } = makeDriverStub();
+    const { web, posted } = makeWebStub();
+
+    try {
+      await seedMention(tk, 'pick a color');
+      // ask_user BLOCKS inside the MCP handler, so don't await the turn yet —
+      // resolve the pending ask out of band, then await completion.
+      const turnDone = runSdkTurn(
+        web,
+        'you are a test agent',
+        askInput,
+        undefined,
+        'task_update',
+        MODEL,
+        {
+          driver,
+        },
+      );
+      const ask = await waitForPendingAsk(tk);
+      ask.resolve('green');
+      await turnDone;
+    } finally {
+      await mock.stop();
+    }
+
+    // The interactive blocks were posted as a separate thread message (#285
+    // stream-mode contract).
+    expect(posted.length).toBeGreaterThanOrEqual(1);
+    expect(posted[0]?.text).toBe('Which color?');
+
+    // modelContent threading: the model's reasoning text from this iteration is
+    // prepended as a section above the question/controls (#305 part-4), so the
+    // user keeps the reasoning visible alongside the choices.
+    const blocks = (posted[0]?.blocks ?? []) as { text?: { text?: string } }[];
+    expect(blocks[0]?.text?.text).toBe('I need to know which color you prefer.');
+
+    // The chosen answer reached the model as the tool_result for tu_ask.
+    const events = await readEvents<AgentaEvent>(tk);
+    const askCall = events.find(
+      (e) =>
+        e.source === 'assistant' && e.type === 'tool_call' && e.payload.tool_call_id === 'tu_ask',
+    );
+    expect(askCall).toBeDefined();
+    if (askCall && askCall.type === 'tool_call') {
+      expect(askCall.payload.name).toBe('ask_user');
+    }
+    const askResult = events.find(
+      (e) =>
+        e.source === 'assistant' && e.type === 'tool_result' && e.payload.tool_call_id === 'tu_ask',
+    );
+    expect(askResult).toBeDefined();
+    if (askResult && askResult.type === 'tool_result') {
+      expect(askResult.payload.content).toBe('green');
+    }
+
+    // The mock saw the tool_result content as a user message on the continuation.
+    const flat = JSON.stringify(mock.requests);
+    expect(flat).toContain('green');
+
+    // The ❓ card rendered (in_progress) and completed (the answer as detail).
+    const askRows = appended.filter((c) => c.type === 'task_update' && c.id === 'tu_ask');
+    expect(askRows.some((r) => String(r.title ?? '').includes('❓ Asking: Which color?'))).toBe(
+      true,
+    );
+    expect(askRows.some((r) => r.status === 'in_progress')).toBe(true);
+    const done = askRows.find((r) => r.status === 'complete');
+    expect(done).toBeDefined();
+    expect(String(done?.details ?? '')).toContain('green');
+
+    // The turn completed (final markdown + finalize).
+    expect(
+      appended.some((c) => c.type === 'markdown_text' && String(c.text).includes('green')),
+    ).toBe(true);
+    expect(finals).toHaveLength(1);
+  }, 120_000);
+
+  test('/stop while an ask is pending rejects the ask so the turn unwinds', async () => {
+    const tk = 'sdk-e2e-ask-stop';
+    const askInput = { ...input, threadKey: tk };
+    const turns: MockTurn[] = [
+      {
+        text: 'Asking before stop.',
+        toolUses: [
+          {
+            id: 'tu_ask2',
+            name: 'mcp__agenta__ask_user',
+            input: { question: 'Proceed?', kind: 'buttons', options: ['yes', 'no'] },
+          },
+        ],
+      },
+      { text: 'unused' },
+    ];
+    const mock = await startMockModel(turns);
+    process.env.ANTHROPIC_BASE_URL = mock.baseUrl;
+
+    const { driver } = makeDriverStub();
+    const { web } = makeWebStub();
+    const ac = new AbortController();
+
+    try {
+      await seedMention(tk, 'proceed?');
+      const turnDone = runSdkTurn(web, 'sys', askInput, ac.signal, 'task_update', MODEL, {
+        driver,
+      });
+      await waitForPendingAsk(tk);
+      // Simulate /stop: aborting the turn signal must reject the pending ask
+      // (ask_user's onAbort) so the handler unblocks and the turn returns.
+      ac.abort();
+      await turnDone; // must not hang
+    } finally {
+      await mock.stop();
+    }
+
+    // The ask was settled (registry cleared) — no leak, the handler unblocked.
+    // (ask_user's onAbort calls reject('cancelled') the instant the signal
+    // fires; the await on `turnDone` above returning at all proves the MCP
+    // handler stopped blocking. Under abort the SDK tears the MCP stream down,
+    // so the tool_result the SDK ultimately records for this call may be its
+    // own "stream closed" message rather than our 'cancelled' string — the
+    // contract here is "the turn unwinds and the registry is clean", not the
+    // exact tool_result text.)
+    expect(getPendingAskByThread(tk)).toBeUndefined();
   }, 120_000);
 });
 
