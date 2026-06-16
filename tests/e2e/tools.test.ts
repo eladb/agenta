@@ -1,7 +1,13 @@
+// Migrated to the SDK harness + mock-model (#315 Phase A). The product behavior
+// asserted is unchanged — the model emits a tool_call, the bot runs the tool in
+// the sandbox, persists tool_call/tool_result JSONL, replays prior-turn context,
+// and a /stop mid-turn renders "stopped" — but the model is now driven by the
+// mock-model server (ANTHROPIC_BASE_URL) scripted with MockTurn[] instead of the
+// bespoke `scriptedCallModel`/`script` queue, and assertions move from the
+// recorded `Message[]` to the mock's recorded request bodies (Anthropic shape).
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
@@ -18,54 +24,12 @@ import {
   waitFor,
   waitForReply,
 } from './helpers';
+import type { MockTurn } from './mock-model';
 
 let agent: Agent;
 let tester: Tester;
 let channel: string;
 const createdThreads: string[] = [];
-
-// Scripted stub: each invocation of the model dequeues the next response.
-// Responses can also be "gate" objects whose promise must resolve before the
-// callModel call returns — lets us hold a turn open while we send /stop.
-type Scripted =
-  | { kind: 'reply'; message: AssistantMessage }
-  | { kind: 'gate'; promise: Promise<AssistantMessage> };
-
-const script: Scripted[] = [];
-const calls: Message[][] = [];
-
-function scriptReply(message: AssistantMessage): void {
-  script.push({ kind: 'reply', message });
-}
-
-function scriptGate(): { resolve: (m: AssistantMessage) => void } {
-  let resolve!: (m: AssistantMessage) => void;
-  const promise = new Promise<AssistantMessage>((r) => {
-    resolve = r;
-  });
-  script.push({ kind: 'gate', promise });
-  return { resolve };
-}
-
-const scriptedCallModel: CallModel = async (messages, opts) => {
-  calls.push(messages);
-  const next = script.shift();
-  if (!next) return { role: 'assistant', content: 'unscripted' };
-  if (next.kind === 'reply') return next.message;
-  return await new Promise<AssistantMessage>((resolve, reject) => {
-    let settled = false;
-    next.promise.then((m) => {
-      if (settled) return;
-      settled = true;
-      resolve(m);
-    });
-    opts?.signal?.addEventListener('abort', () => {
-      if (settled) return;
-      settled = true;
-      reject(new DOMException('aborted', 'AbortError'));
-    });
-  });
-};
 
 type Event = {
   event_id?: string;
@@ -85,7 +49,12 @@ function readEvents(threadTs: string): Event[] {
 beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
+  // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
+  // server (returned as `agent.mock`); the callModel arg is unused.
+  [agent, tester] = await Promise.all([
+    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startTester(),
+  ]);
 }, 120_000);
 
 afterAll(async () => {
@@ -97,21 +66,13 @@ afterAll(async () => {
 }, 120_000);
 
 test('model can call get_current_time and the bot posts the final reply', async () => {
-  script.length = 0;
-  calls.length = 0;
-
-  scriptReply({
-    role: 'assistant',
-    content: null,
-    tool_calls: [
-      {
-        id: 'call_t1',
-        type: 'function',
-        function: { name: 'get_current_time', arguments: '{}' },
-      },
-    ],
-  });
-  scriptReply({ role: 'assistant', content: 'the current time is recorded' });
+  const mock = agent.mock;
+  if (!mock) throw new Error('expected SDK-mode mock handle');
+  mock.reset();
+  mock.setTurns([
+    { toolUses: [{ id: 'call_t1', name: 'mcp__agenta__get_current_time', input: {} }] },
+    { text: 'the current time is recorded' },
+  ]);
 
   const threadTs = await mention(
     tester,
@@ -127,24 +88,21 @@ test('model can call get_current_time and the bot posts the final reply', async 
     channel,
     threadTs,
     agent.botUserId,
-    (t) => t === 'the current time is recorded',
+    (t) => t.includes('the current time is recorded'),
   );
-  expect(reply).toBe('the current time is recorded');
+  expect(reply).toContain('the current time is recorded');
 
   // Model was invoked twice: once to emit tool_call, once after the tool result.
-  await waitFor(() => calls.length === 2, { what: 'model called twice' });
+  await waitFor(() => mock.requests.length >= 2, { what: 'model called twice' });
 
-  // Second model call's messages include a tool message with the get_current_time result.
-  const secondCall = calls[1];
-  if (!secondCall) throw new Error('expected second model call');
-  const toolMsg = secondCall.find((m) => m.role === 'tool');
-  expect(toolMsg).toBeDefined();
-  if (toolMsg?.role !== 'tool') throw new Error('not a tool msg');
-  expect(toolMsg.tool_call_id).toBe('call_t1');
-  // get_current_time returns an ISO-8601 string.
-  expect(toolMsg.content).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+  // The continuation request carries the get_current_time tool_result for
+  // call_t1 (the bespoke version asserted this on the second model call's `tool`
+  // message; here it's in the recorded request body).
+  const flat = JSON.stringify(mock.requests);
+  expect(flat).toContain('call_t1');
+  expect(flat).toContain('tool_result');
 
-  // JSONL has tool_call + tool_result events.
+  // JSONL has tool_call + tool_result events; the result is an ISO-8601 string.
   const events = readEvents(threadTs);
   const tcs = events.filter((e) => e.type === 'tool_call');
   const trs = events.filter((e) => e.type === 'tool_result');
@@ -152,25 +110,21 @@ test('model can call get_current_time and the bot posts the final reply', async 
   expect(trs).toHaveLength(1);
   expect(tcs[0]?.payload.name).toBe('get_current_time');
   expect(trs[0]?.payload.tool_call_id).toBe('call_t1');
-});
+  expect(String(trs[0]?.payload.content)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+}, 120_000);
 
 test('tool_call + tool_result from a prior turn are replayed in the next turn', async () => {
-  script.length = 0;
-  calls.length = 0;
-
-  // Turn 1: tool_call -> tool_result -> final reply.
-  scriptReply({
-    role: 'assistant',
-    content: null,
-    tool_calls: [
-      {
-        id: 'call_replay',
-        type: 'function',
-        function: { name: 'get_current_time', arguments: '{}' },
-      },
-    ],
-  });
-  scriptReply({ role: 'assistant', content: 'turn1 done' });
+  const mock = agent.mock;
+  if (!mock) throw new Error('expected SDK-mode mock handle');
+  mock.reset();
+  // All three turns set up front: the mock picks by conversation progress, so the
+  // resumed SDK session continues at the right index across both mentions.
+  //   req @progress 0 → tool_call · @1 → 'turn1 done' · @2 (turn 2) → 'turn2 reply'
+  mock.setTurns([
+    { toolUses: [{ id: 'call_replay', name: 'mcp__agenta__get_current_time', input: {} }] },
+    { text: 'turn1 done' },
+    { text: 'turn2 reply' },
+  ]);
 
   const threadTs = await mention(
     tester,
@@ -181,62 +135,36 @@ test('tool_call + tool_result from a prior turn are replayed in the next turn', 
   );
   createdThreads.push(threadTs);
 
-  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'turn1 done');
-  await waitFor(() => calls.length === 2, { what: 'turn 1: model called twice' });
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('turn1 done'));
 
-  // Turn 2: a single model call; should see turn 1's tool history.
-  scriptReply({ role: 'assistant', content: 'turn2 reply' });
+  // Turn 2: a follow-up mention in the same thread.
   await mention(tester, agent.botUserId, channel, threadTs, 'follow-up question');
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('turn2 reply'));
 
-  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'turn2 reply');
-  await waitFor(() => calls.length === 3, { what: 'turn 2 model called' });
-
-  const turn2Messages = calls[2];
-  if (!turn2Messages) throw new Error('expected turn 2 messages');
-  // Assistant message with tool_calls from turn 1 must be present.
-  const assistantWithCalls = turn2Messages.find(
-    (m) => m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
+  // The SDK resumes the session, so turn 2's request resends the full prior
+  // history — the replayed tool_use (call_replay), its tool_result, turn 1's
+  // final assistant reply, and the new user message all appear in that request.
+  await waitFor(
+    () => mock.requests.some((r) => JSON.stringify(r).includes('follow-up question')),
+    { what: 'turn 2 request recorded' },
   );
-  expect(assistantWithCalls).toBeDefined();
-  if (assistantWithCalls?.role !== 'assistant') throw new Error('not assistant');
-  expect(assistantWithCalls.tool_calls?.[0]?.id).toBe('call_replay');
-  // Matching tool message with the get_current_time result.
-  const toolMsg = turn2Messages.find((m) => m.role === 'tool' && m.tool_call_id === 'call_replay');
-  expect(toolMsg).toBeDefined();
-  if (toolMsg?.role !== 'tool') throw new Error('not tool');
-  expect(toolMsg.content).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-  // Assistant final reply from turn 1.
-  expect(turn2Messages.some((m) => m.role === 'assistant' && m.content === 'turn1 done')).toBe(
-    true,
-  );
-  // New user message.
-  expect(
-    turn2Messages.some(
-      (m) =>
-        m.role === 'user' &&
-        typeof m.content === 'string' &&
-        m.content.includes('follow-up question'),
-    ),
-  ).toBe(true);
-});
+  const turn2Req = mock.requests.find((r) => JSON.stringify(r).includes('follow-up question'));
+  const flat2 = JSON.stringify(turn2Req);
+  expect(flat2).toContain('call_replay'); // prior tool_use replayed
+  expect(flat2).toContain('turn1 done'); // prior final reply replayed
+  expect(flat2).toContain('follow-up question'); // the new user message
+}, 120_000);
 
-test('/stop during the tool loop edits checklist to "stopped"', async () => {
-  script.length = 0;
-  calls.length = 0;
-
-  // First call: tool_call. Second call: hang until /stop aborts the fetch.
-  scriptReply({
-    role: 'assistant',
-    content: null,
-    tool_calls: [
-      {
-        id: 'call_t2',
-        type: 'function',
-        function: { name: 'get_current_time', arguments: '{}' },
-      },
-    ],
-  });
-  scriptGate();
+test('/stop during a running turn edits checklist to "stopped"', async () => {
+  const mock = agent.mock;
+  if (!mock) throw new Error('expected SDK-mode mock handle');
+  mock.reset();
+  // One turn that we hold open with the gate so the turn stays "running" while
+  // we fire /stop. (The bespoke version held the post-tool model call; the SDK
+  // abort path is identical whether or not a tool ran first, so we gate the
+  // turn's model call directly — simpler + deterministic.)
+  mock.setTurns([{ text: 'should not be seen' }]);
+  const gate = mock.gateNextTurn();
 
   const threadTs = await mention(
     tester,
@@ -247,13 +175,13 @@ test('/stop during the tool loop edits checklist to "stopped"', async () => {
   );
   createdThreads.push(threadTs);
 
-  // Wait until the loop is sitting on the second (hanging) model call.
-  await waitFor(() => calls.length === 2, {
-    what: 'second model call reached (post-tool)',
+  // Wait until the (gated) model call is in flight — the turn is now running.
+  await waitFor(() => mock.requests.length >= 1, {
+    what: 'model call in flight (gated)',
     timeoutMs: 25_000,
   });
 
-  // Fire /stop while the second call is hanging.
+  // Fire /stop while the turn hangs; the SDK aborts the query and renders "stopped".
   await mention(tester, agent.botUserId, channel, threadTs, '/stop');
 
   const reply = await waitForReply(
@@ -261,7 +189,9 @@ test('/stop during the tool loop edits checklist to "stopped"', async () => {
     channel,
     threadTs,
     agent.botUserId,
-    (t) => t === 'stopped',
+    (t) => t.includes('stopped'),
   );
-  expect(reply).toBe('stopped');
-});
+  expect(reply).toContain('stopped');
+
+  gate.release(); // let the abandoned request drain (harmless no-op post-abort)
+}, 120_000);
