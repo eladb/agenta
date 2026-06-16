@@ -25,6 +25,8 @@
 // `bedrock://` from the triplet's model id and always set
 // `DISABLE_PROMPT_CACHING=1` in the SDK process env.
 
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { WebClient } from '@slack/web-api';
 import { log } from '../../shared/log';
@@ -33,7 +35,7 @@ import { ASK_TIMEOUT_MS } from '../model/tools/ask-user';
 import type { ToolContext } from '../model/tools/types';
 import type { AgentaEvent } from '../persistence/events';
 import { newEventId, nowIso, record } from '../persistence/events';
-import { readEvents } from '../persistence/store';
+import { dataRoot, readEvents } from '../persistence/store';
 import { postInThread } from '../slack/post';
 import { parseCommand } from './commands';
 import type { DisplayStyle, ModelTriplet } from './home-config';
@@ -105,6 +107,19 @@ export async function collectUserPrompt(threadKey: string): Promise<string> {
 // SDK's *_TIMEOUT env vars are ms; the doc's "60s" default = 60000ms).
 const STREAM_CLOSE_TIMEOUT_MS = ASK_TIMEOUT_MS + 60_000;
 
+// Where the SDK persists each session's transcript JSONL (#308). The SDK reads
+// `query({resume})` from a file under CLAUDE_CONFIG_DIR/projects/<cwd>/<id>.jsonl;
+// its default is the ephemeral ~/.claude, lost when the tenant container is
+// replaced. Pinning it under the tenant's persistent data volume makes
+// `resume: sdk_session_id` survive a tenant restart — the SDK session IS the
+// model-context store for the SDK harness (our JSONL stays canonical for
+// display/audit). Created eagerly so the SDK never races on a missing dir.
+function sdkConfigDir(): string {
+  const dir = join(dataRoot(), '.claude');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 // Build the SDK process env: inherit process.env (so PATH/HOME/AWS creds +
 // CLAUDE_CODE_USE_BEDROCK / ANTHROPIC_BASE_URL pass through) and force
 // DISABLE_PROMPT_CACHING. The `env` option REPLACES the subprocess env when
@@ -115,6 +130,8 @@ function buildSdkEnv(): Record<string, string | undefined> {
     DISABLE_PROMPT_CACHING: '1',
     // Keep the stream open while ask_user blocks on a human (see above).
     CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: String(STREAM_CLOSE_TIMEOUT_MS),
+    // Persist SDK sessions on the data volume so resume survives a restart.
+    CLAUDE_CONFIG_DIR: sdkConfigDir(),
   };
 }
 
