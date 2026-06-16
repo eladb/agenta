@@ -175,7 +175,13 @@ export async function runSdkTurn(
     web,
     channel,
     threadTs,
-    streamMode: displayStyle === 'task_update',
+    // Always true for the SDK harness: ask_user is the only consumer of
+    // streamMode, and the SDK path never maintains an inline checklist message
+    // for it to render onto (sdk-stream.ts has no checklistTs in any display
+    // mode). So ask_user must always post its controls as a SEPARATE thread
+    // message — the streamMode path — not just in task_update. (Verbose/pretty
+    // ask_user was unexercised until the Phase-A e2e migration surfaced it.)
+    streamMode: true,
     ...(latestAssistantText.length > 0 ? { modelContent: latestAssistantText } : {}),
     // onProgress (bash live output) is optional for v1 — the SDK streams
     // tool_result frames atomically, so we render the final card body. Wiring
