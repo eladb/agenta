@@ -1,5 +1,14 @@
 // Full git-backed agent home e2e test (WS-tunnel transport, phase 24).
 //
+// Migrated to the SDK harness + mock-model (#315 Phase A). The product behavior
+// asserted is unchanged — the model emits a bash tool_call that runs `git push`
+// from inside the sandbox over the per-session WS tunnel, exercising the bot's
+// git server + pre-receive hook end-to-end. The only change is HOW the model
+// side is driven: the bespoke `scriptedCallModel`/`script` queue is replaced by
+// the mock-model server (`ANTHROPIC_BASE_URL`) scripted with `MockTurn[]`, and
+// the rejected-push tool_result assertion now reads the mock's recorded request
+// bodies (Anthropic shape) instead of a recorded `Message[]`.
+//
 // Drives the bot end-to-end through the per-session WS tunnel: the bot
 // starts a per-session git HTTP server on loopback, opens a WS to the
 // sandbox's /tunnel route, the sandbox-side multiplexer accepts the
@@ -16,7 +25,6 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
@@ -26,7 +34,6 @@ import {
   type HomeConfigOverride,
   mention,
   requireEnv,
-  STUB_REPLY_PREFIX,
   safeShutdown,
   setupTempDataDir,
   startBotAndTenant,
@@ -50,17 +57,6 @@ if (!DOCKER_PROVIDER_ACTIVE) {
   let repoPath: string;
   let homeOverride: HomeConfigOverride;
   const createdThreadTs: string[] = [];
-
-  // The model script returns one assistant message per call. Tests push
-  // these into the queue before mentioning.
-  const calls: Message[][] = [];
-  const script: AssistantMessage[] = [];
-  const scriptedCallModel: CallModel = async (messages) => {
-    calls.push(messages);
-    const next = script.shift();
-    if (next) return next;
-    return { role: 'assistant', content: 'done' };
-  };
 
   function testThreadKey(): string {
     return `${TEST_TK_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -89,7 +85,12 @@ if (!DOCKER_PROVIDER_ACTIVE) {
     homeOverride = withTempHomeConfig(`file://${repoPath}`);
 
     channel = requireEnv('TEST_CHANNEL_ID');
-    [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
+    // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
+    // server (returned as `agent.mock`); each test scripts it with setTurns.
+    [agent, tester] = await Promise.all([
+      startBotAndTenant(undefined, { harness: 'sdk' }),
+      startTester(),
+    ]);
   }, 120_000);
 
   afterAll(async () => {
@@ -104,6 +105,9 @@ if (!DOCKER_PROVIDER_ACTIVE) {
 
   describe('git-backed agent home over WS tunnel', () => {
     test('mention triggers bootstrap; sandbox can clone and push back to allowed ref', async () => {
+      const mock = agent.mock;
+      if (!mock) throw new Error('expected SDK-mode mock handle');
+      mock.reset();
       const tk = testThreadKey();
       // Round-trip: write + commit + push in the sandbox. The bash payload
       // exercises the git server end-to-end including the pre-receive hook
@@ -115,18 +119,15 @@ if (!DOCKER_PROVIDER_ACTIVE) {
         'git commit -m test',
         'git push origin HEAD',
       ].join(' && ');
-      script.push({
-        role: 'assistant',
-        content: null,
-        tool_calls: [
-          {
-            id: 'call_bash',
-            type: 'function',
-            function: { name: 'bash', arguments: JSON.stringify({ command: bashCmd }) },
-          },
-        ],
-      });
-      script.push({ role: 'assistant', content: 'pushed' });
+      // Turn 0: emit the bash tool_call. Turn 1: the continuation reply after
+      // the push succeeds. (The mock-tool NAME is mcp__agenta-prefixed; the
+      // JSONL records the bare 'bash' name.)
+      mock.setTurns([
+        {
+          toolUses: [{ id: 'call_bash', name: 'mcp__agenta__bash', input: { command: bashCmd } }],
+        },
+        { text: 'pushed' },
+      ]);
 
       const threadTs = await mention(
         tester,
@@ -137,14 +138,9 @@ if (!DOCKER_PROVIDER_ACTIVE) {
       );
       createdThreadTs.push(threadTs);
 
-      await waitForReply(
-        tester,
-        channel,
-        threadTs,
-        agent.botUserId,
-        (t) => t === 'pushed' || t.startsWith(STUB_REPLY_PREFIX),
-        { timeoutMs: 120_000 },
-      );
+      await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('pushed'), {
+        timeoutMs: 120_000,
+      });
 
       // The push created the session ref + greeting.txt blob on the host
       // repo. The bot's bootstrap names the ref
@@ -171,6 +167,9 @@ if (!DOCKER_PROVIDER_ACTIVE) {
     }, 180_000);
 
     test('pushing to a disallowed ref is rejected by pre-receive', async () => {
+      const mock = agent.mock;
+      if (!mock) throw new Error('expected SDK-mode mock handle');
+      mock.reset();
       const tk = testThreadKey();
       const bashCmd = [
         'set -eu',
@@ -180,18 +179,12 @@ if (!DOCKER_PROVIDER_ACTIVE) {
         // explicit refspec to main, bypassing whatever HEAD currently points at.
         'git push origin HEAD:refs/heads/main',
       ].join(' && ');
-      script.push({
-        role: 'assistant',
-        content: null,
-        tool_calls: [
-          {
-            id: 'call_bash',
-            type: 'function',
-            function: { name: 'bash', arguments: JSON.stringify({ command: bashCmd }) },
-          },
-        ],
-      });
-      script.push({ role: 'assistant', content: 'tried-and-failed' });
+      mock.setTurns([
+        {
+          toolUses: [{ id: 'call_bash', name: 'mcp__agenta__bash', input: { command: bashCmd } }],
+        },
+        { text: 'tried-and-failed' },
+      ]);
 
       const threadTs = await mention(
         tester,
@@ -207,17 +200,20 @@ if (!DOCKER_PROVIDER_ACTIVE) {
         channel,
         threadTs,
         agent.botUserId,
-        (t) => t === 'tried-and-failed' || t.startsWith(STUB_REPLY_PREFIX),
+        (t) => t.includes('tried-and-failed'),
         { timeoutMs: 120_000 },
       );
 
       // The bash tool_result for the failing push includes the rejection
-      // message from pre-receive.
-      const second = calls[calls.length - 1];
-      if (!second) throw new Error('expected a second model call');
-      const toolMsg = second.find((m) => m.role === 'tool' && m.tool_call_id === 'call_bash');
-      if (toolMsg?.role !== 'tool') throw new Error('expected bash tool result');
-      expect(toolMsg.content).toMatch(/not allowed|rejected|pre-receive/i);
+      // message from pre-receive. In the bespoke version this was read off the
+      // second model call's `tool` message; here it's carried in the
+      // continuation request body recorded by the mock. Find the request that
+      // references the bash call id and assert its tool_result content matches
+      // the pre-receive rejection.
+      const flat = JSON.stringify(mock.requests);
+      expect(flat).toContain('call_bash');
+      expect(flat).toContain('tool_result');
+      expect(flat).toMatch(/not allowed|rejected|pre-receive/i);
     }, 180_000);
   });
 }

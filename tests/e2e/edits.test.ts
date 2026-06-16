@@ -1,3 +1,9 @@
+// Migrated to the SDK harness + mock-model (#315 Phase A). The product behavior
+// asserted is unchanged — a non-mention thread reply is ingested, then an edit /
+// delete of it is recorded as the corresponding slack edit / delete JSONL event.
+// The model is now driven by the mock-model server (ANTHROPIC_BASE_URL) scripted
+// with a single 'ack' text turn instead of the bespoke STUB_REPLY_PREFIX stub;
+// the edit/delete JSONL assertions are harness-independent and unchanged.
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,7 +15,6 @@ import {
   getDataDir,
   mention,
   requireEnv,
-  STUB_REPLY_PREFIX,
   safeShutdown,
   setupTempDataDir,
   startBotAndTenant,
@@ -27,7 +32,17 @@ const createdThreads: string[] = [];
 beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startBotAndTenant(), startTester()]);
+  // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
+  // server (returned as `agent.mock`); the callModel arg is unused.
+  [agent, tester] = await Promise.all([
+    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startTester(),
+  ]);
+  const mock = agent.mock;
+  if (!mock) throw new Error('expected SDK-mode mock handle');
+  // Single text turn — every mention just gets an 'ack' reply; this file only
+  // cares that the bot replies (to materialize the thread), not what it says.
+  mock.setTurns([{ text: 'ack' }]);
 }, 120_000);
 
 afterAll(async () => {
@@ -60,7 +75,7 @@ async function createThread(seed: string): Promise<string> {
     channel,
     threadTs,
     agent.botUserId,
-    (t) => t.startsWith(STUB_REPLY_PREFIX),
+    (t) => t.includes('ack'),
     // 90s (vs the 45s default): docker-in-CI cold start makes the first reply
     // slow; the default flaked under the #276 CD shakedown.
     { timeoutMs: 90_000 },

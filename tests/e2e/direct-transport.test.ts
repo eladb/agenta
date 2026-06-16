@@ -1,5 +1,14 @@
 // Direct SSH transport e2e test (#88).
 //
+// Migrated to the SDK harness + mock-model (#315 Phase A). The product behavior
+// asserted is unchanged — the model emits a bash tool_call that runs `git push`
+// over the direct SSH transport, and we verify the session branch lands on the
+// configured GitHub repo — but the model is now driven by the mock-model server
+// (ANTHROPIC_BASE_URL) scripted with MockTurn[] instead of the bespoke
+// `scriptedCallModel`/`script` queue. The direct-mode home setup
+// (withTempHomeConfig + deploy-key wiring) and the host-side git verification are
+// harness-independent and stay verbatim.
+//
 // Gated on `AGENTA_DIRECT_TEST_DEPLOY_KEY` — a PEM-formatted SSH private
 // key that has read+write on whatever GitHub repo
 // `AGENTA_DIRECT_TEST_REPO` points at. When the env vars aren't set the
@@ -22,7 +31,6 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import {
   type Agent,
@@ -32,7 +40,6 @@ import {
   type HomeConfigOverride,
   mention,
   requireEnv,
-  STUB_REPLY_PREFIX,
   safeShutdown,
   setupTempDataDir,
   startBotAndTenant,
@@ -69,15 +76,6 @@ if (!SHOULD_RUN) {
   const createdThreadTs: string[] = [];
   const sessionRefsToDelete: string[] = [];
 
-  const calls: Message[][] = [];
-  const script: AssistantMessage[] = [];
-  const scriptedCallModel: CallModel = async (messages) => {
-    calls.push(messages);
-    const next = script.shift();
-    if (next) return next;
-    return { role: 'assistant', content: 'done' };
-  };
-
   function testThreadKey(): string {
     return `${TEST_TK_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   }
@@ -106,7 +104,6 @@ if (!SHOULD_RUN) {
     const tmp = mkdtempSync(join(tmpdir(), 'agenta-e2e-direct-'));
     keyFile = join(tmp, 'id_ed25519');
     writeFileSync(keyFile, DEPLOY_KEY ?? '', { mode: 0o600 });
-    cloneDir = join(tmp, 'verify-clone');
 
     // Set the env var the home config references.
     process.env[AUTH_ENV] = DEPLOY_KEY;
@@ -115,7 +112,12 @@ if (!SHOULD_RUN) {
     homeOverride = withTempHomeConfig(REMOTE ?? '', AUTH_ENV);
 
     channel = requireEnv('TEST_CHANNEL_ID');
-    [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
+    // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
+    // server (returned as `agent.mock`); the callModel arg is unused.
+    [agent, tester] = await Promise.all([
+      startBotAndTenant(undefined, { harness: 'sdk' }),
+      startTester(),
+    ]);
 
     // Make sure we start from a known-good remote state (the README must
     // exist for the agent's prompt builder, which clones the mirror on
@@ -150,6 +152,10 @@ if (!SHOULD_RUN) {
 
   describe('direct SSH transport', () => {
     test('mention triggers direct bootstrap; sandbox commits + pushes session branch to GitHub', async () => {
+      const mock = agent.mock;
+      if (!mock) throw new Error('expected SDK-mode mock handle');
+      mock.reset();
+
       const tk = testThreadKey();
       const bashCmd = [
         'set -eu',
@@ -158,18 +164,14 @@ if (!SHOULD_RUN) {
         'git commit -m e2e-direct',
         'git push origin HEAD',
       ].join(' && ');
-      script.push({
-        role: 'assistant',
-        content: null,
-        tool_calls: [
-          {
-            id: 'call_bash',
-            type: 'function',
-            function: { name: 'bash', arguments: JSON.stringify({ command: bashCmd }) },
-          },
-        ],
-      });
-      script.push({ role: 'assistant', content: 'pushed' });
+      // Turn 0: emit the bash tool_call that pushes over SSH. Turn 1: the
+      // continuation reply after the tool result.
+      mock.setTurns([
+        {
+          toolUses: [{ id: 'call_bash', name: 'mcp__agenta__bash', input: { command: bashCmd } }],
+        },
+        { text: 'pushed' },
+      ]);
 
       const threadTs = await mention(
         tester,
@@ -180,14 +182,9 @@ if (!SHOULD_RUN) {
       );
       createdThreadTs.push(threadTs);
 
-      await waitForReply(
-        tester,
-        channel,
-        threadTs,
-        agent.botUserId,
-        (t) => t === 'pushed' || t.startsWith(STUB_REPLY_PREFIX),
-        { timeoutMs: 180_000 },
-      );
+      await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('pushed'), {
+        timeoutMs: 180_000,
+      });
 
       // Verify the session ref appears on GitHub via ls-remote.
       const sessionTk = threadKey(channel, threadTs);
