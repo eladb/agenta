@@ -29,6 +29,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { WebClient } from '@slack/web-api';
 import { log } from '../../shared/log';
 import { buildAgentaMcpServer } from '../model/sdk/mcp-tools';
+import { ASK_TIMEOUT_MS } from '../model/tools/ask-user';
 import type { ToolContext } from '../model/tools/types';
 import type { AgentaEvent } from '../persistence/events';
 import { newEventId, nowIso, record } from '../persistence/events';
@@ -97,6 +98,13 @@ export async function collectUserPrompt(threadKey: string): Promise<string> {
   return texts.join('\n\n');
 }
 
+// The SDK's default stream-close timeout is 60s (sdk.d.ts:483) — if an
+// in-process MCP call runs longer the SDK tears the stream down. ask_user
+// blocks for *human* time (up to ASK_TIMEOUT_MS = 10min), so we raise the
+// stream-close timeout comfortably above it. Value is in milliseconds (the
+// SDK's *_TIMEOUT env vars are ms; the doc's "60s" default = 60000ms).
+const STREAM_CLOSE_TIMEOUT_MS = ASK_TIMEOUT_MS + 60_000;
+
 // Build the SDK process env: inherit process.env (so PATH/HOME/AWS creds +
 // CLAUDE_CODE_USE_BEDROCK / ANTHROPIC_BASE_URL pass through) and force
 // DISABLE_PROMPT_CACHING. The `env` option REPLACES the subprocess env when
@@ -105,6 +113,8 @@ function buildSdkEnv(): Record<string, string | undefined> {
   return {
     ...process.env,
     DISABLE_PROMPT_CACHING: '1',
+    // Keep the stream open while ask_user blocks on a human (see above).
+    CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: String(STREAM_CLOSE_TIMEOUT_MS),
   };
 }
 
@@ -133,6 +143,13 @@ export async function runSdkTurn(
   // mid-turn steering injection, so there are no reactions to add/clear beyond
   // what the handler owns. Kept minimal.
 
+  // Latest assistant text seen this turn, threaded into ask_user's ctx.modelContent
+  // so the question message keeps the model's reasoning above the controls (as
+  // the bespoke harness does). Best-effort: the recorder's onAssistantText
+  // updates it; ctxFactory reads it. If the model emits no text before calling
+  // ask_user it stays empty and ask_user renders the bare controls.
+  let latestAssistantText = '';
+
   // Per-invocation ToolContext factory. Each tool call gets a fresh context
   // threading the turn's Slack handles + streamMode + the abort signal (the
   // signal is forwarded by buildAgentaMcpServer to every tool invoke).
@@ -142,6 +159,7 @@ export async function runSdkTurn(
     channel,
     threadTs,
     streamMode: displayStyle === 'task_update',
+    ...(latestAssistantText.length > 0 ? { modelContent: latestAssistantText } : {}),
     // onProgress (bash live output) is optional for v1 — the SDK streams
     // tool_result frames atomically, so we render the final card body. Wiring
     // incremental bash output would require a side channel; deferred.
@@ -169,6 +187,7 @@ export async function runSdkTurn(
 
   const recorder: SdkStreamRecorder = overrides?.recorder ?? {
     onAssistantText: async (text) => {
+      latestAssistantText = text;
       assistantEventId = newEventId();
       assistantRecorded = true;
       await record({

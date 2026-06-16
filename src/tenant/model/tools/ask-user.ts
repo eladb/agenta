@@ -4,7 +4,11 @@ import { editBlocksMessage, postBlocksInThread } from '../../slack/post';
 import { oneLine, strArg } from './helpers';
 import type { Tool } from './types';
 
-const TIMEOUT_MS = 10 * 60_000;
+// How long an ask blocks before auto-resolving to "timeout". Exported so the
+// SDK harness can size CLAUDE_CODE_STREAM_CLOSE_TIMEOUT comfortably above it
+// (the SDK's default 60s stream-close would otherwise drop the in-flight MCP
+// call while a human is still deciding — #305).
+export const ASK_TIMEOUT_MS = 10 * 60_000;
 
 export const askUser: Tool = {
   def: {
@@ -118,7 +122,7 @@ export const askUser: Tool = {
         messageTs,
         threadKey: ctx.threadKey,
         kind: kind as AskKind,
-        timeoutMs: TIMEOUT_MS,
+        timeoutMs: ASK_TIMEOUT_MS,
         // No Slack-side settle handler needed: turn.ts will rewrite the
         // checklist on its next updateChecklist call, which clears the
         // blocks. The resolved answer is appended to the ask bullet in

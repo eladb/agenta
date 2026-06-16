@@ -3,10 +3,13 @@ import { TOOLS } from '../tools';
 import type { ToolContext } from '../tools/types';
 import { jsonSchemaToZodShape } from './json-schema-to-zod';
 
-// Tools NOT exposed through the SDK harness yet. ask_user is Phase 2 (#303 scope
-// note): it needs the interactive-block / asks-registry plumbing the SDK turn
-// doesn't wire up here.
-const EXCLUDED = new Set(['ask_user']);
+// All TOOLS-registry tools are exposed through the SDK harness, including
+// ask_user (#305, Phase 2): its invoke is self-contained (posts interactive
+// blocks, registers a ≤1-per-thread ask, blocks until a click / same-thread
+// text reply / timeout / abort resolves it) and needs no extra wiring here —
+// runSdkTurn raises CLAUDE_CODE_STREAM_CLOSE_TIMEOUT so its human-time blocking
+// doesn't drop the in-flight MCP call.
+const EXCLUDED = new Set<string>([]);
 
 // Build an in-process SDK MCP server ("agenta") wrapping every tool in the TOOLS
 // registry except the excluded set. Each registry Tool becomes one SDK tool():
