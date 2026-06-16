@@ -1,3 +1,4 @@
+import { deleteSession } from '@anthropic-ai/claude-agent-sdk';
 import type { WebClient } from '@slack/web-api';
 import { log } from '../../shared/log';
 import { refFor, teardownSession } from '../git/bootstrap';
@@ -148,6 +149,16 @@ async function handleMessage(
     await teardownSession(tk).catch((err) => {
       log.warn('handler', `[${tk}] teardownSession failed: ${(err as Error).message}`);
     });
+    // Best-effort: drop the SDK session if this thread ran on the SDK harness
+    // (#303). Read the id BEFORE deleteThreadData removes session.json. No-op
+    // for bespoke-harness threads (no sdk_session_id) and tolerant of SDK
+    // errors so /delete never fails on the SDK side.
+    const sdkSessionId = (await readSession(tk))?.sdk_session_id;
+    if (sdkSessionId) {
+      await deleteSession(sdkSessionId).catch((err) => {
+        log.warn('handler', `[${tk}] SDK deleteSession failed: ${(err as Error).message}`);
+      });
+    }
     await Promise.all([deleteThreadData(tk), removeContainer(tk)]);
     log.info('handler', `[${tk}] /delete done`);
     return;
@@ -218,6 +229,13 @@ export async function kickoffTurn(
   // on the common case.
   kickoffEnsureContainer(tk);
 
+  // Harness selection (#303). `HARNESS=sdk` routes the turn through the
+  // Claude Agent SDK (runSdkTurn) with the frozen model triplet; the bespoke
+  // `runTurn` loop stays the default (unset/any other value). The session
+  // state machine (running/stopping/queue/🤔) is shared either way — only the
+  // inner turn fn differs (see startOrQueue's sdkConfig branch).
+  const sdkConfig = process.env.HARNESS === 'sdk' ? { model } : undefined;
+
   await startOrQueue(
     web,
     callModel,
@@ -234,6 +252,7 @@ export async function kickoffTurn(
       recipientTeamId: ctx.workspaceId,
     },
     display.style,
+    sdkConfig,
   );
 }
 
