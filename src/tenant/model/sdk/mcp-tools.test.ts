@@ -18,7 +18,7 @@ async function connect(server: ReturnType<typeof buildAgentaMcpServer>): Promise
 const noopCtx = (): ToolContext => ({ threadKey: 't1' });
 
 describe('buildAgentaMcpServer — tool surface', () => {
-  test('exposes the expected tool set and excludes ask_user', async () => {
+  test('exposes the expected tool set including ask_user', async () => {
     const server = buildAgentaMcpServer(noopCtx);
     const client = await connect(server);
     const { tools } = await client.listTools();
@@ -32,11 +32,12 @@ describe('buildAgentaMcpServer — tool surface', () => {
       'share_file',
       'fetch_url',
       'get_current_time',
+      // ask_user is now exposed (#305, Phase 2). The model sees it as
+      // mcp__agenta__ask_user; the registry/SDK name is the bare 'ask_user'.
+      'ask_user',
     ]) {
       expect(names.has(expected)).toBe(true);
     }
-    // ask_user is excluded (Phase 2)
-    expect(names.has('ask_user')).toBe(false);
     await client.close();
   });
 });
