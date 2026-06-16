@@ -2,9 +2,16 @@ import type { WebClient } from '@slack/web-api';
 import { log } from '../../shared/log';
 import type { CallModel } from '../model/gateway';
 import { addReaction, postInThread, removeReaction } from '../slack/post';
-import type { DisplayStyle } from './home-config';
+import type { DisplayStyle, ModelTriplet } from './home-config';
+import { runSdkTurn } from './sdk-turn';
 import { clearSession, preservedFields, updateSession } from './session-store';
 import { runTurn, type TurnInput } from './turn';
+
+// When set, this turn runs on the Claude Agent SDK harness (#303) instead of
+// the bespoke loop. Carries the frozen per-thread model triplet runSdkTurn
+// needs (the bespoke path uses `callModel` instead). Selected by the handler
+// from `process.env.HARNESS === 'sdk'`.
+export type SdkConfig = { model: ModelTriplet };
 
 type Status = 'idle' | 'running' | 'stopping';
 
@@ -77,6 +84,10 @@ export async function startOrQueue(
   systemPrompt: string,
   input: TurnInput,
   displayStyle: DisplayStyle = 'verbose',
+  // When provided, the turn runs on the SDK harness (#303). The session state
+  // machine (running/stopping/abort/queue/🤔 cleanup) is shared with the
+  // bespoke path; only the inner turn fn differs.
+  sdkConfig?: SdkConfig,
 ): Promise<void> {
   const s = getSession(input.threadKey);
   if (s.status !== 'idle') {
@@ -103,15 +114,26 @@ export async function startOrQueue(
   try {
     while (true) {
       s.abort = new AbortController();
-      await runTurn(
-        web,
-        callModel,
-        systemPrompt,
-        input,
-        s.abort.signal,
-        onMidTurnConsume,
-        displayStyle,
-      );
+      if (sdkConfig) {
+        await runSdkTurn(
+          web,
+          systemPrompt,
+          input,
+          s.abort.signal,
+          displayStyle,
+          sdkConfig.model,
+        );
+      } else {
+        await runTurn(
+          web,
+          callModel,
+          systemPrompt,
+          input,
+          s.abort.signal,
+          onMidTurnConsume,
+          displayStyle,
+        );
+      }
       if (!s.pending) break;
       s.pending = false;
       // If /stop fired during the turn we are now in 'stopping'; flip back
