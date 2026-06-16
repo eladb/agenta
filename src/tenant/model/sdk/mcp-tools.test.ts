@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { registerExtraTools, TOOLS } from '../tools';
+import { rebuildToolDefs, registerExtraTools, TOOLS } from '../tools';
 import type { Tool, ToolContext } from '../tools/types';
 import { buildAgentaMcpServer } from './mcp-tools';
 
@@ -139,7 +139,10 @@ describe('buildAgentaMcpServer — AGENTA_EXTRA_TOOLS overlay (Phase 5 / #282)',
   let savedEnv: string | undefined;
 
   afterEach(() => {
+    // registerExtraTools mutates BOTH TOOLS and the module-level TOOL_DEFS;
+    // restore both so the overlay tool can't leak into a later test's view.
     delete TOOLS[OVERLAY];
+    rebuildToolDefs();
     if (savedEnv === undefined) delete process.env.AGENTA_EXTRA_TOOLS;
     else process.env.AGENTA_EXTRA_TOOLS = savedEnv;
     if (tmp) rmSync(tmp, { recursive: true, force: true });
