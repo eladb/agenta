@@ -173,19 +173,24 @@ test.if(HAS_DOCKER)(
 
     const flat = JSON.stringify(mock.requests);
 
-    // 1) The user message carries the `[attached: ...]` path hint.
+    // 1) The user message carries the `[attached: ...]` path hint, and the
+    //    continuation request round-trips the bash tool_result for call_cat.
     expect(flat).toContain(`[attached: ${expectedPath}]`);
-
-    // 2) The continuation request carries the bash tool_result for call_cat,
-    //    with exit 0 and the file's exact contents (synced into the sandbox by
-    //    the MCP tool preamble before the bash ran).
     expect(flat).toContain('call_cat');
     expect(flat).toContain('tool_result');
-    expect(flat).toContain('exit: 0');
-    expect(flat).toContain(fileContents.trim());
+
+    // 2) The bash tool actually read the synced file: assert on the raw JSONL
+    //    tool_result event (not the JSON-escaped request body — newlines there
+    //    are `\n`, not real newlines). The MCP tool preamble synced the
+    //    attachment into the sandbox before the bash ran.
+    const events = readJsonl(threadTs);
+    const toolResult = events.find((e) => (e as { type?: string }).type === 'tool_result') as
+      | { payload?: { content?: string } }
+      | undefined;
+    expect(toolResult?.payload?.content).toContain('exit: 0');
+    expect(toolResult?.payload?.content).toContain(fileContents.trim());
 
     // 3) JSONL has the slack message event with files[].local_path under attachments/.
-    const events = readJsonl(threadTs);
     const fileEvent = events.find(
       (e) =>
         (e as { source?: string }).source === 'slack' &&

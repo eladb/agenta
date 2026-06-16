@@ -164,12 +164,19 @@ test.if(HAS_DOCKER)(
     if (!mock2) throw new Error('expected SDK-mode mock handle after reboot');
     mock2.reset();
 
-    // Turn 0 (agent B): read the marker. If the sandbox was re-provisioned and
-    // the volume was wiped, the read would fail. Per-thread persistent volumes
-    // mean the workspace state survives both bot restarts and container
-    // replacement. Turn 1: the continuation reply. (Fresh mock server, so the
-    // resumed SDK session re-walks from index 0 here.)
+    // The mock selects a turn by CONVERSATION PROGRESS (count of prior assistant
+    // messages in the request). Even though mock2 is a brand-new server with an
+    // empty request log, the SDK RESUMES the thread's session — so its first
+    // post-reboot request already carries agent A's two assistant turns (the
+    // marker-write tool_use + the 'marker written' reply). Progress is therefore
+    // 2, not 0. We script the CUMULATIVE conversation so the read lands at the
+    // right index: slots 0–1 stand in for agent A's already-served turns (mock2
+    // never actually serves them), slot 2 is agent B's marker read, slot 3 its
+    // continuation. If the sandbox was re-provisioned + the volume wiped, the
+    // read would fail; per-thread persistent volumes mean it survives.
     mock2.setTurns([
+      { text: 'marker written (replayed)' },
+      { text: 'marker written (replayed)' },
       {
         toolUses: [
           { id: 'call_read', name: 'mcp__agenta__bash', input: { command: 'cat ~/marker' } },

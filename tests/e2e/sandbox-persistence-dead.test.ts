@@ -171,11 +171,17 @@ test.if(HAS_DOCKER)(
     if (!mock2) throw new Error('expected SDK-mode mock handle after reboot');
     mock2.reset();
 
-    // Turn 0 (agent B): read the marker. The new container is attached to the
-    // existing volume, so `cat ~/marker` should still return `first-boot`.
-    // Turn 1: the continuation reply. (Fresh mock server, so the resumed SDK
-    // session re-walks from index 0 here.)
+    // The mock selects a turn by CONVERSATION PROGRESS (count of prior assistant
+    // messages). mock2 is a fresh server, but the SDK RESUMES the thread's
+    // session — its first post-reboot request already carries agent A's two
+    // assistant turns (the marker-set tool_use + the 'marker set' reply), so
+    // progress is 2, not 0. Script the CUMULATIVE conversation: slots 0–1 stand
+    // in for agent A's already-served turns, slot 2 is agent B's marker read
+    // (the new container attaches to the existing volume, so `cat ~/marker`
+    // still returns `first-boot`), slot 3 its continuation.
     mock2.setTurns([
+      { text: 'marker set (replayed)' },
+      { text: 'marker set (replayed)' },
       {
         toolUses: [
           { id: 'call_read', name: 'mcp__agenta__bash', input: { command: 'cat ~/marker' } },
