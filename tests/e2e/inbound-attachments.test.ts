@@ -1,7 +1,16 @@
+// Migrated to the SDK harness + mock-model (#315 Phase A). An inbound Slack
+// attachment is (1) inlined into the model request with a `[attached:
+// attachments/<id>-<name>]` path hint and (2) synced into the sandbox so a bash
+// tool can read it. On the SDK path the sync runs in the MCP tool preamble
+// (mcp-tools.ts) before any requiresSandbox tool, and the path hint rides the
+// streaming-input user message. The model is driven by the mock-model server
+// (mock.setTurns) and the model-internal assertions read mock.requests; the real
+// effects (file on disk under attachments/, the bash tool reading it) are
+// asserted unchanged.
+
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import { ensureImage } from '../../src/tenant/sandbox/docker';
 import {
@@ -27,24 +36,16 @@ let tester: Tester;
 let channel: string;
 const createdThreads: string[] = [];
 
-type Scripted = { kind: 'reply'; message: AssistantMessage };
-const script: Scripted[] = [];
-const calls: Message[][] = [];
-
-const scriptedCallModel: CallModel = async (messages) => {
-  calls.push(messages);
-  const next = script.shift();
-  if (!next) return { role: 'assistant', content: 'unscripted' };
-  return next.message;
-};
-
 beforeAll(async () => {
   if (!HAS_DOCKER) return;
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
   // Pre-build the sandbox image so the first turn doesn't time out building it.
   await ensureImage();
-  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([
+    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startTester(),
+  ]);
 }, 120_000);
 
 afterAll(async () => {
@@ -75,10 +76,10 @@ function readJsonl(threadTs: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l));
 }
 
-// The test discovers threadTs by scanning the e2e data dir for a JSONL
-// entry that references the uploaded file_id. Slack creates the parent
-// message of an upload asynchronously, so we can't capture it up front
-// from files.uploadV2's response — we wait for the agent to ingest it.
+// The test discovers threadTs by scanning the e2e data dir for a JSONL entry
+// that references the uploaded file_id. Slack creates the parent message of an
+// upload asynchronously, so we can't capture it up front from files.uploadV2's
+// response — we wait for the agent to ingest it.
 function dataDirThreads(): string[] {
   const root = getDataDir();
   if (!existsSync(root)) return [];
@@ -89,43 +90,34 @@ function dataDirThreads(): string[] {
   }
 }
 
-function scriptReply(message: AssistantMessage): void {
-  script.push({ kind: 'reply', message });
-}
-
 test.if(HAS_DOCKER)(
-  'inbound attachment is synced to ~/attachments and read_file sees it',
+  'inbound attachment is synced to ~/attachments and a bash tool reads it',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
 
     const fileContents = `inbound-attach-test ${Date.now()}\nline two\n`;
     const filename = 'inbound.txt';
 
-    // 1) Pre-script the replies BEFORE upload. files.uploadV2 fires the
-    //    mention immediately and the bot's runTurn calls the model before
-    //    the test can push scripts otherwise (race: `scriptedCallModel`
-    //    returns "unscripted" → test times out waiting for "done").
-    //    The bash command uses a glob since fileId isn't known yet —
-    //    attachments/<fileId>-<filename> is the only file in the dir.
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_cat',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({ command: `cat attachments/*-${filename}` }),
+    // Script the turns BEFORE upload: files.uploadV2 fires the mention
+    // immediately. Turn 0 calls bash to cat the synced attachment (glob since
+    // fileId isn't known yet — it's the only file in attachments/); turn 1 is
+    // the final reply.
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_cat',
+            name: 'mcp__agenta__bash',
+            input: { command: `cat attachments/*-${filename}` },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'done' });
+        ],
+      },
+      { text: 'done' },
+    ]);
 
-    // 2) Upload the file as the root of a new thread, with a mention.
-    //    files.uploadV2 with no thread_ts creates a new top-level message.
+    // Upload the file as the root of a new thread, with a mention.
     const upload = await tester.web.files.uploadV2({
       channel_id: channel,
       filename,
@@ -143,9 +135,6 @@ test.if(HAS_DOCKER)(
     await waitFor(
       () => {
         for (const tk of dataDirThreads()) {
-          // tk is the on-disk thread key; we don't have the threadTs to
-          // build it ourselves, but the JSONL is keyed by the same name so
-          // we can read each thread dir directly.
           const file = join(getDataDir(), tk, 'messages.jsonl');
           if (!existsSync(file)) continue;
           const events = readFileSync(file, 'utf8')
@@ -170,40 +159,32 @@ test.if(HAS_DOCKER)(
     if (!threadTs) throw new Error('threadTs not resolved');
     createdThreads.push(threadTs);
 
-    // 3) Compute the path the bot will inject into the user message and
-    //    use it in the assertion below. This is the same shape used by
-    //    `attachments.ts` host-side.
+    // The path the bot injects into the user message + syncs into the sandbox.
     const expectedPath = `attachments/${fileId}-${filename}`;
 
-    // 4) Wait for final reply + the two model calls (initial + post-tool).
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'done', {
+    // Wait for the final reply.
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('done'), {
       timeoutMs: 90_000,
     });
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
+    await waitFor(() => mock.requests.length >= 2, {
+      what: 'two model requests (tool call + continuation)',
+      timeoutMs: 30_000,
+    });
 
-    // 4a) First call's messages: user message text includes the hint suffix.
-    const first = calls[0];
-    if (!first) throw new Error('expected first call');
-    const lastUser = [...first].reverse().find((m) => m.role === 'user');
-    if (lastUser?.role !== 'user') throw new Error('expected last user message');
-    let userText: string;
-    if (typeof lastUser.content === 'string') {
-      userText = lastUser.content;
-    } else {
-      const textParts = lastUser.content.filter((p) => p.type === 'text');
-      userText = textParts.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
-    }
-    expect(userText).toContain(`[attached: ${expectedPath}]`);
+    const flat = JSON.stringify(mock.requests);
 
-    // 4b) Second call's tool_result has the file's exact contents.
-    const second = calls[1];
-    if (!second) throw new Error('expected second call');
-    const toolMsg = second.find((m) => m.role === 'tool' && m.tool_call_id === 'call_cat');
-    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
-    expect(toolMsg.content).toContain('exit: 0');
-    expect(toolMsg.content).toContain(fileContents.trim());
+    // 1) The user message carries the `[attached: ...]` path hint.
+    expect(flat).toContain(`[attached: ${expectedPath}]`);
 
-    // 4c) JSONL has the slack message event with files[].local_path under attachments/.
+    // 2) The continuation request carries the bash tool_result for call_cat,
+    //    with exit 0 and the file's exact contents (synced into the sandbox by
+    //    the MCP tool preamble before the bash ran).
+    expect(flat).toContain('call_cat');
+    expect(flat).toContain('tool_result');
+    expect(flat).toContain('exit: 0');
+    expect(flat).toContain(fileContents.trim());
+
+    // 3) JSONL has the slack message event with files[].local_path under attachments/.
     const events = readJsonl(threadTs);
     const fileEvent = events.find(
       (e) =>

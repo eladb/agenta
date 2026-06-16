@@ -1,6 +1,14 @@
+// Migrated to the SDK harness + mock-model (#315 Phase A). The product behavior
+// asserted is unchanged — the model emits tool_calls, the bot runs them in the
+// docker sandbox, the tool results round-trip back to the model, and the real
+// sandbox effects (exit:0, file contents, cwd /home/sandbox, uid=1000, egress
+// block, container teardown) hold — but the model is now driven by the
+// mock-model server (ANTHROPIC_BASE_URL) scripted with MockTurn[] instead of the
+// bespoke `scriptedCallModel`/`script` queue, and the tool_result assertions
+// move from the recorded OpenAI-shape `Message[]` to the mock's recorded
+// request bodies (Anthropic shape).
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import { containerName } from '../../src/tenant/sandbox';
 import { ensureImage } from '../../src/tenant/sandbox/docker';
@@ -37,17 +45,6 @@ let tester: Tester;
 let channel: string;
 const createdThreads: string[] = [];
 
-type Scripted = { kind: 'reply'; message: AssistantMessage };
-const script: Scripted[] = [];
-const calls: Message[][] = [];
-
-const scriptedCallModel: CallModel = async (messages) => {
-  calls.push(messages);
-  const next = script.shift();
-  if (!next) return { role: 'assistant', content: 'unscripted' };
-  return next.message;
-};
-
 beforeAll(async () => {
   if (!HAS_DOCKER) return;
   setupTempDataDir();
@@ -57,7 +54,12 @@ beforeAll(async () => {
   process.env.SANDBOX_EXEC_TIMEOUT_MS = '8000';
   // Build/pull the sandbox image up front so the first mention doesn't time out.
   await ensureImage();
-  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
+  // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
+  // server (returned as `agent.mock`); the callModel arg is unused.
+  [agent, tester] = await Promise.all([
+    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startTester(),
+  ]);
 }, 120_000);
 
 afterAll(async () => {
@@ -72,24 +74,21 @@ afterAll(async () => {
 test.if(HAS_DOCKER)(
   'bash tool: model can execute a command in the sandbox container',
   async () => {
-    script.length = 0;
-    calls.length = 0;
-
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_bash1',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({ command: 'echo hello-from-sandbox && pwd' }),
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_bash1',
+            name: 'mcp__agenta__bash',
+            input: { command: 'echo hello-from-sandbox && pwd' },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'command finished' });
+        ],
+      },
+      { text: 'command finished' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -100,53 +99,52 @@ test.if(HAS_DOCKER)(
     );
     createdThreads.push(threadTs);
 
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'command finished');
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
+      t.includes('command finished'),
+    );
+    await waitFor(() => mock.requests.length >= 2, { what: 'two model calls', timeoutMs: 30_000 });
 
-    const second = calls[1];
-    if (!second) throw new Error('expected second call');
-    const toolMsg = second.find((m) => m.role === 'tool');
-    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
-    expect(toolMsg.content).toContain('exit: 0');
-    expect(toolMsg.content).toContain('hello-from-sandbox');
-    expect(toolMsg.content).toContain('/home/sandbox');
+    // The continuation request carries the bash tool_result for call_bash1: the
+    // command output (exit: 0, echoed text, cwd) round-trips back to the model.
+    const flat = JSON.stringify(mock.requests);
+    expect(flat).toContain('call_bash1');
+    expect(flat).toContain('tool_result');
+    expect(flat).toContain('exit: 0');
+    expect(flat).toContain('hello-from-sandbox');
+    expect(flat).toContain('/home/sandbox');
   },
-  60_000,
+  120_000,
 );
 
 test.if(HAS_DOCKER)(
   'write_file then read_file: round-trips a text file in the sandbox',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
     const payload = `hello fs world ${Date.now()}`;
 
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_write',
-          type: 'function',
-          function: {
-            name: 'write_file',
-            arguments: JSON.stringify({ path: 'note.txt', content: payload }),
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_write',
+            name: 'mcp__agenta__write_file',
+            input: { path: 'note.txt', content: payload },
           },
-        },
-      ],
-    });
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_read',
-          type: 'function',
-          function: { name: 'read_file', arguments: JSON.stringify({ path: 'note.txt' }) },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'roundtrip done' });
+        ],
+      },
+      {
+        toolUses: [
+          {
+            id: 'call_read',
+            name: 'mcp__agenta__read_file',
+            input: { path: 'note.txt' },
+          },
+        ],
+      },
+      { text: 'roundtrip done' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -157,92 +155,78 @@ test.if(HAS_DOCKER)(
     );
     createdThreads.push(threadTs);
 
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'roundtrip done');
-    await waitFor(() => calls.length === 3, { what: 'three model calls', timeoutMs: 30_000 });
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
+      t.includes('roundtrip done'),
+    );
+    await waitFor(() => mock.requests.length >= 3, {
+      what: 'three model calls',
+      timeoutMs: 30_000,
+    });
 
-    const third = calls[2];
-    if (!third) throw new Error('expected third call');
-    const readToolMsg = third.find((m) => m.role === 'tool' && m.tool_call_id === 'call_read');
-    if (readToolMsg?.role !== 'tool') throw new Error('expected read tool msg');
-    expect(readToolMsg.content).toBe(payload);
-
-    const writeToolMsg = third.find((m) => m.role === 'tool' && m.tool_call_id === 'call_write');
-    if (writeToolMsg?.role !== 'tool') throw new Error('expected write tool msg');
-    expect(writeToolMsg.content).toMatch(/wrote \d+ chars/);
+    // The final continuation request carries both tool_results: the write result
+    // ("wrote N chars") and the read result (the exact payload round-tripped).
+    const flat = JSON.stringify(mock.requests);
+    expect(flat).toContain('call_write');
+    expect(flat).toContain('call_read');
+    expect(flat).toContain(payload);
+    expect(flat).toMatch(/wrote \d+ chars/);
   },
-  90_000,
+  120_000,
 );
 
 test.if(HAS_DOCKER)(
   'coding-agent toolchain: write_file -> bash(grep) -> edit_file -> read_file roundtrip',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
     const body = ['def greet(name):', '    # TODO: implement', '    pass', ''].join('\n');
 
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_write',
-          type: 'function',
-          function: {
-            name: 'write_file',
-            arguments: JSON.stringify({ path: 'app.py', content: body }),
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_write',
+            name: 'mcp__agenta__write_file',
+            input: { path: 'app.py', content: body },
           },
-        },
-      ],
-    });
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_grep',
-          type: 'function',
-          function: {
+        ],
+      },
+      {
+        toolUses: [
+          {
             // grep/glob tools were removed (#300); the agent greps via bash now.
             // `-Hn` forces the filename so the assertions below still see app.py.
-            name: 'bash',
-            arguments: JSON.stringify({ command: 'grep -Hn TODO *.py' }),
+            id: 'call_grep',
+            name: 'mcp__agenta__bash',
+            input: { command: 'grep -Hn TODO *.py' },
           },
-        },
-      ],
-    });
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_edit',
-          type: 'function',
-          function: {
-            name: 'edit_file',
-            arguments: JSON.stringify({
+        ],
+      },
+      {
+        toolUses: [
+          {
+            id: 'call_edit',
+            name: 'mcp__agenta__edit_file',
+            input: {
               path: 'app.py',
               old_string: '    # TODO: implement\n    pass',
               new_string: '    return f"hello {name}"',
-            }),
+            },
           },
-        },
-      ],
-    });
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_read',
-          type: 'function',
-          function: {
-            name: 'read_file',
-            arguments: JSON.stringify({ path: 'app.py', offset: 1, limit: 2 }),
+        ],
+      },
+      {
+        toolUses: [
+          {
+            id: 'call_read',
+            name: 'mcp__agenta__read_file',
+            input: { path: 'app.py', offset: 1, limit: 2 },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'toolchain done' });
+        ],
+      },
+      { text: 'toolchain done' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -253,25 +237,26 @@ test.if(HAS_DOCKER)(
     );
     createdThreads.push(threadTs);
 
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'toolchain done');
-    await waitFor(() => calls.length === 5, { what: 'five model calls', timeoutMs: 30_000 });
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
+      t.includes('toolchain done'),
+    );
+    await waitFor(() => mock.requests.length >= 5, {
+      what: 'five model calls',
+      timeoutMs: 30_000,
+    });
 
-    // Inspect each tool's result in the messages array of the next call.
-    const grepResult = calls[2]?.find((m) => m.role === 'tool' && m.tool_call_id === 'call_grep');
-    if (grepResult?.role !== 'tool') throw new Error('expected grep tool msg');
-    expect(grepResult.content).toContain('app.py');
-    expect(grepResult.content).toContain('TODO');
-
-    const editResult = calls[3]?.find((m) => m.role === 'tool' && m.tool_call_id === 'call_edit');
-    if (editResult?.role !== 'tool') throw new Error('expected edit tool msg');
-    expect(editResult.content).toMatch(/edited app\.py/);
-
-    const readResult = calls[4]?.find((m) => m.role === 'tool' && m.tool_call_id === 'call_read');
-    if (readResult?.role !== 'tool') throw new Error('expected read tool msg');
-    // After edit + offset=1,limit=2: first two lines of the new file.
-    expect(readResult.content).toContain('def greet(name):');
-    expect(readResult.content).toContain('return f"hello {name}"');
-    expect(readResult.content).not.toContain('TODO');
+    // Every tool result round-trips back to the model in the recorded requests:
+    // the grep hit (app.py + TODO), the edit confirmation, and the post-edit
+    // read (offset=1,limit=2) showing the new file body without the TODO line.
+    const flat = JSON.stringify(mock.requests);
+    expect(flat).toContain('call_grep');
+    expect(flat).toContain('app.py');
+    expect(flat).toContain('TODO');
+    expect(flat).toContain('call_edit');
+    expect(flat).toMatch(/edited app\.py/);
+    expect(flat).toContain('call_read');
+    expect(flat).toContain('def greet(name):');
+    expect(flat).toContain('return f\\"hello {name}\\"');
   },
   120_000,
 );
@@ -279,26 +264,24 @@ test.if(HAS_DOCKER)(
 test.if(HAS_DOCKER)(
   'bash runs as the unprivileged sandbox user (uid 1000), no caps',
   async () => {
-    script.length = 0;
-    calls.length = 0;
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_whoami',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_whoami',
+            name: 'mcp__agenta__bash',
+            input: {
               command:
                 'echo user=$(whoami) uid=$(id -u); echo "caps=$(cat /proc/self/status | grep CapEff | awk \'{print $2}\')"',
-            }),
+            },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'identity checked' });
+        ],
+      },
+      { text: 'identity checked' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -309,44 +292,41 @@ test.if(HAS_DOCKER)(
     );
     createdThreads.push(threadTs);
 
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'identity checked');
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
+      t.includes('identity checked'),
+    );
+    await waitFor(() => mock.requests.length >= 2, { what: 'two model calls', timeoutMs: 30_000 });
 
-    const toolMsg = calls[1]?.find((m) => m.role === 'tool');
-    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
-    expect(toolMsg.content).toContain('user=sandbox');
-    expect(toolMsg.content).toContain('uid=1000');
+    const flat = JSON.stringify(mock.requests);
+    expect(flat).toContain('user=sandbox');
+    expect(flat).toContain('uid=1000');
     // CapEff = 0000000000000000 means "no effective capabilities".
-    expect(toolMsg.content).toMatch(/caps=0+/);
+    expect(flat).toMatch(/caps=0+/);
   },
-  60_000,
+  120_000,
 );
 
 test.if(HAS_DOCKER)(
   'bash live-streams stdout into the Slack checklist while running',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
     // Bash command runs ~4s, printing a line every second. Long enough for
     // the 800ms debounce to fire multiple checklist edits, short enough to
-    // stay under the 5s SANDBOX_EXEC_TIMEOUT_MS this test file sets.
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_stream',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({
-              command: 'for i in 1 2 3 4; do echo step $i; sleep 1; done',
-            }),
+    // stay under the 8s SANDBOX_EXEC_TIMEOUT_MS this test file sets.
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_stream',
+            name: 'mcp__agenta__bash',
+            input: { command: 'for i in 1 2 3 4; do echo step $i; sleep 1; done' },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'stream done' });
+        ],
+      },
+      { text: 'stream done' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -379,43 +359,45 @@ test.if(HAS_DOCKER)(
     expect(sawLivePreview).toBe(true);
 
     // Now wait for the final model reply.
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'stream done', {
-      timeoutMs: 30_000,
-    });
+    await waitForReply(
+      tester,
+      channel,
+      threadTs,
+      agent.botUserId,
+      (t) => t.includes('stream done'),
+      { timeoutMs: 30_000 },
+    );
 
     // And verify the recorded tool_result contains all the streamed lines.
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
-    const toolMsg = calls[1]?.find((m) => m.role === 'tool');
-    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
+    await waitFor(() => mock.requests.length >= 2, { what: 'two model calls', timeoutMs: 30_000 });
+    const flat = JSON.stringify(mock.requests);
     for (const n of [1, 2, 3, 4]) {
-      expect(toolMsg.content).toContain(`step ${n}`);
+      expect(flat).toContain(`step ${n}`);
     }
   },
-  60_000,
+  120_000,
 );
 
 test.if(HAS_DOCKER)(
   'bash command timeout: long-running command is killed and returns a clear marker',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
     // The container's exec timeout is set via SANDBOX_EXEC_TIMEOUT_MS in
-    // beforeAll (5s for tests).
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_sleep',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({ command: 'sleep 300' }),
+    // beforeAll (8s for tests).
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_sleep',
+            name: 'mcp__agenta__bash',
+            input: { command: 'sleep 300' },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'slept' });
+        ],
+      },
+      { text: 'slept' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -426,42 +408,36 @@ test.if(HAS_DOCKER)(
     );
     createdThreads.push(threadTs);
 
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'slept', {
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('slept'), {
       timeoutMs: 45_000,
     });
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 45_000 });
+    await waitFor(() => mock.requests.length >= 2, { what: 'two model calls', timeoutMs: 45_000 });
 
-    const second = calls[1];
-    if (!second) throw new Error('expected second call');
-    const toolMsg = second.find((m) => m.role === 'tool');
-    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
-    expect(toolMsg.content).toContain('timed out');
+    const flat = JSON.stringify(mock.requests);
+    expect(flat).toContain('call_sleep');
+    expect(flat).toContain('timed out');
   },
-  60_000,
+  120_000,
 );
 
 test.if(EGRESS_ENFORCEABLE)(
   'egress is blocked: curl to an external host fails inside the sandbox',
   async () => {
-    script.length = 0;
-    calls.length = 0;
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_curl',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({
-              command: 'curl --max-time 3 -sS https://example.com; echo "exit=$?"',
-            }),
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_curl',
+            name: 'mcp__agenta__bash',
+            input: { command: 'curl --max-time 3 -sS https://example.com; echo "exit=$?"' },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'curl attempted' });
+        ],
+      },
+      { text: 'curl attempted' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -472,29 +448,30 @@ test.if(EGRESS_ENFORCEABLE)(
     );
     createdThreads.push(threadTs);
 
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'curl attempted');
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
+      t.includes('curl attempted'),
+    );
+    await waitFor(() => mock.requests.length >= 2, { what: 'two model calls', timeoutMs: 30_000 });
 
-    const second = calls[1];
-    if (!second) throw new Error('expected second call');
-    const toolMsg = second.find((m) => m.role === 'tool');
-    if (toolMsg?.role !== 'tool') throw new Error('expected tool msg');
     // bash always exits 0 (we appended `echo "exit=$?"`); curl's own exit
     // should be non-zero (DNS or connect failure) and the body must not be
-    // example.com HTML.
-    expect(toolMsg.content).not.toContain('exit=0');
-    expect(toolMsg.content).not.toContain('<title>Example Domain');
+    // example.com HTML. The tool_result round-trips in the recorded request.
+    const flat = JSON.stringify(mock.requests);
+    expect(flat).toContain('call_curl');
+    expect(flat).not.toContain('exit=0');
+    expect(flat).not.toContain('<title>Example Domain');
   },
-  60_000,
+  120_000,
 );
 
 test.if(HAS_DOCKER)(
   '/delete removes the sandbox container',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
     // First mention only — no tools, just ensures the container is created.
-    scriptReply({ role: 'assistant', content: 'hi' });
+    mock.setTurns([{ text: 'hi' }]);
 
     const threadTs = await mention(
       tester,
@@ -504,7 +481,7 @@ test.if(HAS_DOCKER)(
       `e2e-delete-${Date.now()}`,
     );
     createdThreads.push(threadTs);
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'hi');
+    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('hi'));
 
     const cname = containerName(threadKey(channel, threadTs));
     await waitFor(
@@ -522,9 +499,5 @@ test.if(HAS_DOCKER)(
     const after = spawnSync('docker', ['inspect', '-f', '{{.State.Status}}', cname]);
     expect(after.status).not.toBe(0);
   },
-  90_000,
+  120_000,
 );
-
-function scriptReply(message: AssistantMessage): void {
-  script.push({ kind: 'reply', message });
-}

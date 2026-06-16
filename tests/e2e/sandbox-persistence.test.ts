@@ -1,8 +1,19 @@
+// Migrated to the SDK harness + mock-model (#315 Phase A). The product behavior
+// asserted is unchanged — agent A writes a marker file in the sandbox, the tenant
+// is restarted (simulated bot restart), and agent B reads the marker back, proving
+// the per-thread persistent volume + sandbox record survive a restart and that the
+// SDK session resumes across it (#308/#309). The model is now driven by the
+// mock-model server (ANTHROPIC_BASE_URL) scripted with MockTurn[] instead of the
+// bespoke `scriptedCallModel`/`script` queue, and the tool_result round-trip
+// assertion reads the mock's recorded request bodies (Anthropic shape) rather than
+// the recorded OpenAI-shape `Message[]`.
+//
+// docker-only: the simulated-restart path here uses docker-specific
+// container/volume operations that have no Fly equivalent.
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AssistantMessage, CallModel, Message } from '../../src/tenant/model/gateway';
 import { threadKey } from '../../src/tenant/runtime/thread';
 import { containerName } from '../../src/tenant/sandbox';
 import { ensureImage } from '../../src/tenant/sandbox/docker';
@@ -23,35 +34,12 @@ import {
   waitForReply,
 } from './helpers';
 
-// Sandbox persistence across simulated bot restarts. We can't fork an OS
-// process inside `bun test`, but the persistence machinery is in the
-// session.json file + the provider's in-memory cache — so we simulate a
-// restart by stopping agent A (cleanly disconnecting + resetting the
-// provider's in-memory state) and starting agent B with the same data dir.
-// docker-only: the simulated-restart path here uses docker-specific
-// container/volume operations that have no Fly equivalent.
-
 const HAS_DOCKER = DOCKER_PROVIDER_ACTIVE;
 
 let channel: string;
 let tester: Tester;
 let agent: Agent;
 const createdThreads: string[] = [];
-
-type Scripted = { kind: 'reply'; message: AssistantMessage };
-const script: Scripted[] = [];
-const calls: Message[][] = [];
-
-const scriptedCallModel: CallModel = async (messages) => {
-  calls.push(messages);
-  const next = script.shift();
-  if (!next) return { role: 'assistant', content: 'unscripted' };
-  return next.message;
-};
-
-function scriptReply(message: AssistantMessage): void {
-  script.push({ kind: 'reply', message });
-}
 
 function dockerInspectRunning(name: string): boolean {
   const r = spawnSync('docker', ['inspect', '-f', '{{.State.Running}}', name]);
@@ -77,7 +65,12 @@ beforeAll(async () => {
   channel = requireEnv('TEST_CHANNEL_ID');
   process.env.SANDBOX_EXEC_TIMEOUT_MS = '8000';
   await ensureImage();
-  [agent, tester] = await Promise.all([startBotAndTenant(scriptedCallModel), startTester()]);
+  // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
+  // server (returned as `agent.mock`); the callModel arg is unused.
+  [agent, tester] = await Promise.all([
+    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startTester(),
+  ]);
 }, 120_000);
 
 afterAll(async () => {
@@ -92,27 +85,24 @@ afterAll(async () => {
 test.if(HAS_DOCKER)(
   'sandbox survives simulated bot restart: new agent reuses the same container',
   async () => {
-    script.length = 0;
-    calls.length = 0;
+    const mock = agent.mock;
+    if (!mock) throw new Error('expected SDK-mode mock handle');
+    mock.reset();
 
-    // Turn 1 (agent A): write a marker file in the workspace.
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_marker',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({
-              command: 'echo first-boot > ~/marker && ls -la ~/marker',
-            }),
+    // Turn 0 (agent A): write a marker file in the workspace. Turn 1: the
+    // continuation reply after the tool result.
+    mock.setTurns([
+      {
+        toolUses: [
+          {
+            id: 'call_marker',
+            name: 'mcp__agenta__bash',
+            input: { command: 'echo first-boot > ~/marker && ls -la ~/marker' },
           },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'marker written' });
+        ],
+      },
+      { text: 'marker written' },
+    ]);
 
     const threadTs = await mention(
       tester,
@@ -127,10 +117,19 @@ test.if(HAS_DOCKER)(
     // Cold fresh-container provisioning on the docker-CD sandbox runs ~65s
     // (slower than the old Fly provider, #276); the old 60s floor flaked (#310).
     // 90s matches the helper default and stays well under the 240s per-test cap.
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'marker written', {
-      timeoutMs: 90_000,
+    await waitForReply(
+      tester,
+      channel,
+      threadTs,
+      agent.botUserId,
+      (t) => t.includes('marker written'),
+      { timeoutMs: 90_000 },
+    );
+    // Model invoked twice: once to emit the tool_call, once after the tool result.
+    await waitFor(() => mock.requests.length >= 2, {
+      what: 'two model calls',
+      timeoutMs: 30_000,
     });
-    await waitFor(() => calls.length === 2, { what: 'two model calls', timeoutMs: 30_000 });
 
     // session.json must now carry the docker sandbox record.
     const session1 = readSessionRaw(tk);
@@ -142,13 +141,10 @@ test.if(HAS_DOCKER)(
 
     // Simulate a bot restart: disconnect agent A AND clear the docker
     // provider's in-memory state (the new process would have done both
-    // implicitly). We re-import the module fresh? Not necessary — the
-    // _resetImageReadyCache test helper clears `tokens` which is what
-    // tracks the in-memory route. Release both lockfiles AND stop the
-    // tenant HTTP server — `startBotAndTenant` below re-acquires 'bot'
-    // + 'agent' and starts a fresh tenant on a new port; without these
-    // teardowns we'd race the locks (refuses with our own pid) and leak
-    // the loopback socket.
+    // implicitly). Release both lockfiles AND stop the tenant HTTP server —
+    // `startBotAndTenant` below re-acquires 'bot' + 'agent' and starts a fresh
+    // tenant on a new port; without these teardowns we'd race the locks (refuses
+    // with our own pid) and leak the loopback socket.
     await agent.socket.disconnect();
     agent.tenant.stop();
     agent.lock.release();
@@ -160,43 +156,51 @@ test.if(HAS_DOCKER)(
     const { _resetSyncedAttachments } = await import('../../src/tenant/sandbox');
     _resetSyncedAttachments();
 
-    // Start agent B with the same data dir.
-    agent = await startBotAndTenant(scriptedCallModel);
+    // Start agent B with the same data dir. The reboot spins up a BRAND-NEW
+    // mock-model server (re-points ANTHROPIC_BASE_URL), so re-grab the handle
+    // and re-script it before the next mention.
+    agent = await startBotAndTenant(undefined, { harness: 'sdk' });
+    const mock2 = agent.mock;
+    if (!mock2) throw new Error('expected SDK-mode mock handle after reboot');
+    mock2.reset();
 
-    // Turn 2 (agent B): read the marker. If the sandbox was re-provisioned
-    // and the volume was wiped, the read would fail. Per-thread persistent
-    // volumes mean the workspace state survives both bot restarts and
-    // container replacement.
-    scriptReply({
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_read',
-          type: 'function',
-          function: {
-            name: 'bash',
-            arguments: JSON.stringify({ command: 'cat ~/marker' }),
-          },
-        },
-      ],
-    });
-    scriptReply({ role: 'assistant', content: 'marker read' });
+    // Turn 0 (agent B): read the marker. If the sandbox was re-provisioned and
+    // the volume was wiped, the read would fail. Per-thread persistent volumes
+    // mean the workspace state survives both bot restarts and container
+    // replacement. Turn 1: the continuation reply. (Fresh mock server, so the
+    // resumed SDK session re-walks from index 0 here.)
+    mock2.setTurns([
+      {
+        toolUses: [
+          { id: 'call_read', name: 'mcp__agenta__bash', input: { command: 'cat ~/marker' } },
+        ],
+      },
+      { text: 'marker read' },
+    ]);
 
     await mention(tester, agent.botUserId, channel, threadTs, 'check marker');
     // Same docker-CD slowness on the restart-reuse turn (#310).
-    await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'marker read', {
-      timeoutMs: 90_000,
+    await waitForReply(
+      tester,
+      channel,
+      threadTs,
+      agent.botUserId,
+      (t) => t.includes('marker read'),
+      { timeoutMs: 90_000 },
+    );
+    await waitFor(() => mock2.requests.length >= 2, {
+      what: 'two model calls after reboot',
+      timeoutMs: 30_000,
     });
-    await waitFor(() => calls.length === 4, { what: 'four model calls', timeoutMs: 30_000 });
 
     // The bash result for the read should contain `first-boot`, proving the
-    // marker survived = the same container.
-    const fourth = calls[3];
-    if (!fourth) throw new Error('expected fourth call');
-    const readResult = fourth.find((m) => m.role === 'tool' && m.tool_call_id === 'call_read');
-    if (readResult?.role !== 'tool') throw new Error('expected read tool msg');
-    expect(readResult.content).toContain('first-boot');
+    // marker survived = the same container. The tool_result round-trip lands in
+    // the continuation request body (the bespoke version asserted this on the
+    // post-restart `tool` message; here it's in the recorded request body).
+    const flat = JSON.stringify(mock2.requests);
+    expect(flat).toContain('call_read');
+    expect(flat).toContain('tool_result');
+    expect(flat).toContain('first-boot');
 
     // session.json should still reference the same container with the same token.
     const session2 = readSessionRaw(tk);
