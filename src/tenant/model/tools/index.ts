@@ -45,6 +45,13 @@ export const TOOLS: Record<string, Tool> = {
 // are live, so turn.ts sees the refreshed array without re-importing.
 export let TOOL_DEFS: ToolDef[] = Object.values(TOOLS).map((t) => t.def);
 
+// Recompute TOOL_DEFS from the current TOOLS registry. Called after the overlay
+// loader mutates TOOLS (below), and exported so tests that inject/remove a tool
+// can restore the live-binding array without leaking into later tests.
+export function rebuildToolDefs(): void {
+  TOOL_DEFS = Object.values(TOOLS).map((t) => t.def);
+}
+
 // Validates one candidate against the same contract _registry.test.ts enforces
 // for built-ins. Throws on any problem so a broken overlay fails boot loudly
 // rather than registering a half-broken tool.
@@ -127,7 +134,7 @@ export async function registerExtraTools(env: NodeJS.ProcessEnv = process.env): 
     }
   }
 
-  TOOL_DEFS = Object.values(TOOLS).map((t) => t.def);
+  rebuildToolDefs();
 }
 
 export async function invokeTool(

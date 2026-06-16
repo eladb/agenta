@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { TOOLS } from '../tools';
+import { rebuildToolDefs, registerExtraTools, TOOLS } from '../tools';
 import type { Tool, ToolContext } from '../tools/types';
 import { buildAgentaMcpServer } from './mcp-tools';
 
@@ -120,6 +123,81 @@ describe('buildAgentaMcpServer — invocation routing', () => {
 
     expect(res.isError).toBe(true);
     expect(res.content).toEqual([{ type: 'text', text: 'error: kaboom' }]);
+
+    await client.close();
+  });
+});
+
+// Phase 5 (#282): salto's overlay image adds tools via AGENTA_EXTRA_TOOLS. They
+// must reach the model through the SDK harness exactly like the built-ins —
+// proven end-to-end here: registerExtraTools scans a dir → TOOLS → the SDK MCP
+// server exposes + invokes the overlay tool, with its richer schema (enum +
+// optional) routed through the json-schema-to-zod shim.
+describe('buildAgentaMcpServer — AGENTA_EXTRA_TOOLS overlay (Phase 5 / #282)', () => {
+  const OVERLAY = 'salto_overlay_probe';
+  let tmp: string | undefined;
+  let savedEnv: string | undefined;
+
+  afterEach(() => {
+    // registerExtraTools mutates BOTH TOOLS and the module-level TOOL_DEFS;
+    // restore both so the overlay tool can't leak into a later test's view.
+    delete TOOLS[OVERLAY];
+    rebuildToolDefs();
+    if (savedEnv === undefined) delete process.env.AGENTA_EXTRA_TOOLS;
+    else process.env.AGENTA_EXTRA_TOOLS = savedEnv;
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    tmp = undefined;
+  });
+
+  test('an overlay tool registered via AGENTA_EXTRA_TOOLS surfaces + runs on the SDK harness', async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'agenta-overlay-'));
+    // A realistic overlay tool: object params with an enum + an optional field,
+    // so the shim is exercised beyond the simple-string built-ins.
+    writeFileSync(
+      join(tmp, 'deploy.ts'),
+      `export default {
+  def: {
+    type: 'function',
+    function: {
+      name: '${OVERLAY}',
+      description: 'Deploy the salto stack to an environment.',
+      parameters: {
+        type: 'object',
+        properties: {
+          env: { type: 'string', enum: ['dev', 'prod'], description: 'target env' },
+          dry_run: { type: 'boolean', description: 'plan only' },
+        },
+        required: ['env'],
+        additionalProperties: false,
+      },
+    },
+  },
+  describe: () => 'salto deploy',
+  invoke: async (args) => 'deployed to ' + args.env + (args.dry_run ? ' (dry-run)' : ''),
+};
+`,
+    );
+
+    savedEnv = process.env.AGENTA_EXTRA_TOOLS;
+    process.env.AGENTA_EXTRA_TOOLS = tmp;
+    await registerExtraTools();
+
+    // It landed in the shared registry the SDK harness reads from...
+    expect(TOOLS[OVERLAY]).toBeDefined();
+
+    // ...and the SDK MCP server exposes it (bare name) + invokes it through the
+    // same zod-shim path as the built-ins.
+    const server = buildAgentaMcpServer(noopCtx);
+    const client = await connect(server);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toContain(OVERLAY);
+
+    const res = await client.callTool({
+      name: OVERLAY,
+      arguments: { env: 'prod', dry_run: true },
+    });
+    expect(res.content).toEqual([{ type: 'text', text: 'deployed to prod (dry-run)' }]);
+    expect(res.isError).toBeFalsy();
 
     await client.close();
   });
