@@ -289,10 +289,9 @@ export async function setHome(threadKey: string, home: HomeConfig | undefined): 
   });
 }
 
-// Atomic read-modify-write of the `model` triplet (#128). Symmetric with
-// setHome — called once on first mention from `handler.ts`. The frozen
-// snapshot is just the triplet (name + base_url + api_key_env); the API key
-// value is read at use time, never persisted here.
+// Atomic read-modify-write of the frozen `model` (#128). Symmetric with
+// setHome — called once on first mention from `handler.ts`. The snapshot is
+// just the model id (`name`); the SDK reads its backend creds from env.
 export async function setModel(threadKey: string, model: ModelTriplet | undefined): Promise<void> {
   await updateSession(threadKey, (existing) => {
     if (!existing) {

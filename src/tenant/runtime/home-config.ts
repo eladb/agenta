@@ -24,15 +24,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { HomeSpec } from '../../shared/types';
 
-// Per-channel model/provider triplet (#128). All three fields are required
-// when a model triplet is in play — partial overrides aren't supported
-// (silently inheriting just `base_url` from env would be a footgun). Only
-// the env var NAME is persisted; the secret VALUE is read at use time via
-// `process.env[api_key_env]`, mirroring how `auth_env` works for git PATs.
+// Per-thread model selection (#128). The SDK harness is Claude-only and learns
+// its backend + credentials entirely from process env (`CLAUDE_CODE_USE_BEDROCK`
+// + AWS creds, or `ANTHROPIC_*`), so the only thing we freeze per thread is the
+// model id — `name` (a bare model id or a `bedrock://…` one; the scheme is
+// stripped in `sdk-turn.ts`). Named `ModelTriplet` historically, back when the
+// deleted OpenAI-compat gateway also needed a base_url + api_key_env.
 export type ModelTriplet = {
   name: string;
-  base_url: string;
-  api_key_env: string;
 };
 
 // The per-thread home snapshot frozen into `session.json` on first mention.

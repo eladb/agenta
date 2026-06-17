@@ -235,9 +235,7 @@ async function resolveSystemPromptAndModel(
   let model = existing?.model;
   if (model === undefined) {
     if (!ctx.fallbackModel) {
-      throw new Error(
-        `[${tk}] cannot resolve model: no env fallback (set MODEL_API_KEY + MODEL_BASE_URL + MODEL_NAME)`,
-      );
+      throw new Error(`[${tk}] cannot resolve model: no env fallback (set MODEL_NAME)`);
     }
     model = { ...ctx.fallbackModel };
     await setModel(tk, model);
