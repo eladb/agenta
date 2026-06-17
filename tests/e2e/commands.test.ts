@@ -5,7 +5,6 @@ import {
   deleteThread,
   mention,
   requireEnv,
-  STUB_REPLY_PREFIX,
   safeShutdown,
   setupTempDataDir,
   startBotAndTenant,
@@ -59,11 +58,16 @@ test('/delete -> bot acks with "deleted (stub)"', async () => {
   expect(text).toBe('deleted (stub)');
 });
 
-test('/stop with extra text -> treated as normal mention (routed to model)', async () => {
+test('/stop with extra text -> treated as a normal mention (routed to model)', async () => {
+  agent.mock.reset();
+  agent.mock.setTurns([{ text: 'routed to the model' }]);
+
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, '/stop and please');
   createdThreads.push(threadTs);
+  // `/stop and please` is not the exact `/stop` command, so it's a normal
+  // mention and reaches the model rather than the stop ack.
   const text = await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
-    t.startsWith(STUB_REPLY_PREFIX),
+    t.includes('routed to the model'),
   );
-  expect(text).toBe(`${STUB_REPLY_PREFIX}/stop and please`);
-});
+  expect(text).toContain('routed to the model');
+}, 120_000);

@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { log } from '../../../shared/log';
-import type { ToolDef } from '../gateway';
+import type { ToolDef } from './types';
 import { askUser } from './ask-user';
 import { bash, formatBashResult } from './bash';
 import { editFileTool } from './edit-file';

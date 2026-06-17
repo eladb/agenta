@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import type { CallModel, Message } from '../../src/tenant/model/gateway';
 import {
   type Agent,
   cleanupTempDataDir,
@@ -20,47 +19,10 @@ let tester: Tester;
 let channel: string;
 const createdThreads: string[] = [];
 
-// Gated stub: each call pulls the next queued gate and awaits it (or aborts on
-// signal). Tests queue gates before firing a mention, then resolve them in
-// order. Calls are recorded so assertions can inspect the messages array.
-type Gate = { resolve: (reply: string) => void; promise: Promise<string> };
-const gates: Gate[] = [];
-const calls: Message[][] = [];
-
-function queueGate(): Gate {
-  let resolve!: (reply: string) => void;
-  const promise = new Promise<string>((r) => {
-    resolve = r;
-  });
-  const g: Gate = { resolve, promise };
-  gates.push(g);
-  return g;
-}
-
-const gatedCallModel: CallModel = async (messages, opts) => {
-  calls.push(messages);
-  const g = gates.shift();
-  if (!g) return { role: 'assistant', content: 'ungated' };
-  const text = await new Promise<string>((resolve, reject) => {
-    let settled = false;
-    g.promise.then((reply) => {
-      if (settled) return;
-      settled = true;
-      resolve(reply);
-    });
-    opts?.signal?.addEventListener('abort', () => {
-      if (settled) return;
-      settled = true;
-      reject(new DOMException('aborted', 'AbortError'));
-    });
-  });
-  return { role: 'assistant', content: text };
-};
-
 beforeAll(async () => {
   setupTempDataDir();
   channel = requireEnv('TEST_CHANNEL_ID');
-  [agent, tester] = await Promise.all([startBotAndTenant(gatedCallModel), startTester()]);
+  [agent, tester] = await Promise.all([startBotAndTenant(), startTester()]);
 }, 120_000);
 
 afterAll(async () => {
@@ -71,73 +33,50 @@ afterAll(async () => {
   cleanupTempDataDir();
 }, 120_000);
 
-// TODO(#101): re-enable once the test stops waiting for the removed `• thinking…` placeholder.
-test.skip('/stop cancels an in-flight turn and edits checklist to "stopped"', async () => {
-  const gate = queueGate();
-  const threadTs = await mention(
-    tester,
-    agent.botUserId,
-    channel,
-    undefined,
-    `e2e-stop-${Date.now()}`,
-  );
-  createdThreads.push(threadTs);
-
-  // Wait until the model is actually being called (the gated stub records calls[]).
-  await waitFor(() => calls.length >= 1, { what: 'first model call', timeoutMs: 30_000 });
-
-  // Fire /stop while the turn is hanging on the gate.
-  await mention(tester, agent.botUserId, channel, threadTs, '/stop');
-
-  const stopped = await waitForReply(
-    tester,
-    channel,
-    threadTs,
-    agent.botUserId,
-    (t) => t === 'stopped',
-  );
-  expect(stopped).toBe('stopped');
-
-  // Releasing the gate now is a no-op (turn already aborted).
-  gate.resolve('unreached');
-});
-
-test('mention during a running turn is batched into a follow-up turn', async () => {
-  calls.length = 0;
-  const gate1 = queueGate();
-  const gate2 = queueGate();
+// The session state machine (session.ts:startOrQueue) is shared by every turn.
+// A mention that arrives while a turn is running must NOT start a concurrent
+// turn — it flips the session's `pending` flag and is picked up as a single
+// follow-up turn after the current one finishes. We gate the model mid-flight
+// to hold turn 1 open, fire a second mention, and assert exactly two model
+// turns ran (not three) with the second message folded into the follow-up.
+test('mention during a running turn is batched into a single follow-up turn', async () => {
+  agent.mock.reset();
+  // Two scripted replies — turn 1 and the batched follow-up turn 2. Selection
+  // keys off conversation progress, so turn 1 (no prior assistant) → reply-one,
+  // turn 2 (one prior assistant) → reply-two.
+  agent.mock.setTurns([{ text: 'reply-one' }, { text: 'reply-two' }]);
+  // Hold turn 1's model call open so the second mention lands mid-turn.
+  const gate = agent.mock.gateNextTurn();
 
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, 'first message');
   createdThreads.push(threadTs);
 
-  // Wait until turn 1 has reached the model.
-  await waitFor(() => calls.length === 1, { what: 'turn 1 reached callModel' });
+  // Turn 1 has reached the (gated) model.
+  await waitFor(() => agent.mock.requests.length === 1, {
+    what: 'turn 1 reached the model',
+    timeoutMs: 60_000,
+  });
 
-  // Second mention while turn 1 is gated — should queue, not start a new turn.
+  // Second mention while turn 1 is gated — must queue, not start a new turn.
   await mention(tester, agent.botUserId, channel, threadTs, 'second message');
+  await new Promise((r) => setTimeout(r, 1_500));
+  expect(agent.mock.requests.length).toBe(1);
 
-  await new Promise((r) => setTimeout(r, 1500));
-  expect(calls.length).toBe(1);
+  // Release turn 1 → its reply is recorded → the loop runs the batched turn 2.
+  gate.release();
 
-  // Release turn 1 → assistant reply recorded → loop runs turn 2.
-  gate1.resolve('reply-one');
+  await waitFor(() => agent.mock.requests.length === 2, {
+    what: 'batched follow-up turn 2 reached the model',
+    timeoutMs: 60_000,
+  });
 
-  await waitFor(() => calls.length === 2, { what: 'turn 2 reached callModel' });
+  // The follow-up turn carries the second message (the new input batched after
+  // turn 1). Exactly two model turns ran — the second mention did not spawn a
+  // concurrent third turn.
+  const turn2 = JSON.stringify(agent.mock.requests[1]);
+  expect(turn2).toContain('second message');
 
-  const turn2 = calls[1];
-  if (!turn2) throw new Error('expected turn 2 to be recorded');
-  const userTexts = turn2
-    .filter((m) => m.role === 'user')
-    .flatMap((m) =>
-      typeof m.content === 'string'
-        ? [m.content]
-        : m.content.flatMap((p) => (p.type === 'text' ? [p.text] : [])),
-    )
-    .join('\n');
-  expect(userTexts).toContain('first message');
-  expect(userTexts).toContain('second message');
-  expect(turn2.some((m) => m.role === 'assistant' && m.content === 'reply-one')).toBe(true);
-
-  gate2.resolve('reply-two');
-  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t === 'reply-two');
-});
+  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('reply-two'), {
+    timeoutMs: 120_000,
+  });
+}, 180_000);

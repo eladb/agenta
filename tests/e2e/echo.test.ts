@@ -5,7 +5,6 @@ import {
   deleteThread,
   mention,
   requireEnv,
-  STUB_REPLY_PREFIX,
   safeShutdown,
   setupTempDataDir,
   startBotAndTenant,
@@ -33,14 +32,23 @@ afterAll(async () => {
   cleanupTempDataDir();
 }, 120_000);
 
-test('mention without command -> bot replies via the model gateway (stub)', async () => {
-  const unique = `e2e-echo-${Date.now()}`;
-  const threadTs = await mention(tester, agent.botUserId, channel, undefined, unique);
+test('mention without a command -> bot posts the model reply', async () => {
+  agent.mock.reset();
+  agent.mock.setTurns([{ text: 'pong from the model' }]);
+
+  const threadTs = await mention(
+    tester,
+    agent.botUserId,
+    channel,
+    undefined,
+    `e2e-echo-${Date.now()}`,
+  );
   createdThreads.push(threadTs);
 
+  // The SDK harness appends an AI-generated disclaimer to the reply, so match
+  // on a substring rather than exact equality.
   const text = await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
-    t.startsWith(STUB_REPLY_PREFIX),
+    t.includes('pong from the model'),
   );
-
-  expect(text).toBe(`${STUB_REPLY_PREFIX}${unique}`);
-});
+  expect(text).toContain('pong from the model');
+}, 120_000);

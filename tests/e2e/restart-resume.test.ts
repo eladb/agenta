@@ -9,12 +9,10 @@ import {
   deleteThread,
   mention,
   requireEnv,
-  STUB_REPLY_PREFIX,
   setupTempDataDir,
   shutdown,
   startBotAndTenant,
   startTester,
-  stubCallModel,
   type Tester,
   waitForReply,
 } from './helpers';
@@ -43,7 +41,8 @@ afterAll(async () => {
 // crashed turn is cleared to 'idle' without auto-retry and without posting
 // any Slack notice. The user's next mention re-triggers work fresh.
 test('boot recovery silently clears interrupted sessions to idle', async () => {
-  agent = await startBotAndTenant(stubCallModel);
+  agent = await startBotAndTenant();
+  agent.mock.setTurns([{ text: 'parent reply' }]);
 
   // Run one real mention so a session.json exists with all the fields a
   // prior turn would populate (sandbox/git/home/model/display — see
@@ -56,8 +55,15 @@ test('boot recovery silently clears interrupted sessions to idle', async () => {
     'restart-resume parent',
   );
   createdThreads.push(threadTs);
-  await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
-    t.startsWith(STUB_REPLY_PREFIX),
+  await waitForReply(
+    tester,
+    channel,
+    threadTs,
+    agent.botUserId,
+    (t) => t.includes('parent reply'),
+    {
+      timeoutMs: 120_000,
+    },
   );
 
   const tk = makeThreadKey(channel, threadTs);
@@ -77,4 +83,4 @@ test('boot recovery silently clears interrupted sessions to idle', async () => {
 
   const after = await readSession(tk);
   expect(after?.status).toBe('idle');
-});
+}, 120_000);
