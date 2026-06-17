@@ -83,7 +83,7 @@ try {
 
 // Extra tools (overlay images): scan AGENTA_EXTRA_TOOLS dirs and register
 // their tools alongside the built-ins. Must complete before the first
-// envelope arrives — turn.ts reads TOOLS/TOOL_DEFS at call-time, so the
+// envelope arrives — mcp-tools.ts iterates TOOLS directly at call-time, so the
 // registry just has to be fully populated by the time /events is served. A
 // broken overlay fails boot loudly rather than running a half-registry.
 await registerExtraTools();

@@ -279,32 +279,6 @@ export async function editFile(
   );
 }
 
-export async function grep(
-  threadKey: string,
-  pattern: string,
-  opts: { path?: string; glob?: string } = {},
-  signal?: AbortSignal,
-): Promise<DockerResult> {
-  return postJson(threadKey, '/grep', { pattern, ...opts }, signal);
-}
-
-export async function glob(
-  threadKey: string,
-  pattern: string,
-  opts: { path?: string } = {},
-  signal?: AbortSignal,
-): Promise<DockerResult> {
-  return postJson(threadKey, '/glob', { pattern, ...opts }, signal);
-}
-
-export async function listDir(
-  threadKey: string,
-  path: string | undefined,
-  signal?: AbortSignal,
-): Promise<DockerResult> {
-  return postJson(threadKey, '/ls', path ? { path } : {}, signal);
-}
-
 export async function writeBinary(
   threadKey: string,
   path: string,

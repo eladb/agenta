@@ -55,40 +55,6 @@ export function taskRow(args: {
   return row;
 }
 
-// Map a tool call (label + optional args preview) to an in_progress row.
-// `id` is the tool_call_id so the later completion row reuses it.
-export function toolStartRow(args: {
-  id: string;
-  label: string;
-  argsPreview?: string;
-}): TaskUpdateChunk {
-  return taskRow({
-    id: args.id,
-    title: args.label,
-    status: 'in_progress',
-    ...(args.argsPreview !== undefined && args.argsPreview.length > 0
-      ? { details: args.argsPreview }
-      : {}),
-  });
-}
-
-// Map a tool result back onto the same row id. `error` flips the status;
-// the first line of the result is surfaced as the row output (truncated).
-export function toolEndRow(args: {
-  id: string;
-  label: string;
-  output: string;
-  error: boolean;
-}): TaskUpdateChunk {
-  const firstLine = args.output.split('\n')[0] ?? '';
-  return taskRow({
-    id: args.id,
-    title: args.label,
-    status: args.error ? 'error' : 'complete',
-    output: firstLine,
-  });
-}
-
 // Split a long markdown body into ≤MARKDOWN_CHUNK_MAX-char strings. Returns
 // [] for empty/whitespace-only input so callers can skip an empty append.
 // Splits on hard char boundaries (no token/markdown awareness) — fine for a

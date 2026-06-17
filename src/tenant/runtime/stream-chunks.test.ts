@@ -8,8 +8,6 @@ import {
   markdownChunks,
   TASK_FIELD_MAX,
   taskRow,
-  toolEndRow,
-  toolStartRow,
   truncateField,
 } from './stream-chunks';
 
@@ -58,49 +56,6 @@ describe('taskRow', () => {
     const row = taskRow({ id: 'c1', title: 't', status: 'pending' });
     expect(row.details).toBeUndefined();
     expect(row.output).toBeUndefined();
-  });
-});
-
-describe('tool row id stability + status transitions', () => {
-  it('start and end rows share the same id', () => {
-    const start = toolStartRow({ id: 'call_abc', label: 'Run bash' });
-    const end = toolEndRow({ id: 'call_abc', label: 'Run bash', output: 'ok', error: false });
-    expect(start.id).toBe('call_abc');
-    expect(end.id).toBe('call_abc');
-    expect(start.id).toBe(end.id);
-  });
-
-  it('start row is in_progress', () => {
-    expect(toolStartRow({ id: 'c', label: 'x' }).status).toBe('in_progress');
-  });
-
-  it('end row flips to complete on success', () => {
-    expect(toolEndRow({ id: 'c', label: 'x', output: 'done', error: false }).status).toBe(
-      'complete',
-    );
-  });
-
-  it('end row flips to error on failure', () => {
-    expect(toolEndRow({ id: 'c', label: 'x', output: 'boom', error: true }).status).toBe('error');
-  });
-
-  it('start row attaches an args preview as details when present', () => {
-    const row = toolStartRow({ id: 'c', label: 'x', argsPreview: 'ls -la' });
-    expect(row.details).toBe('ls -la');
-  });
-
-  it('start row omits details for an empty args preview', () => {
-    expect(toolStartRow({ id: 'c', label: 'x', argsPreview: '' }).details).toBeUndefined();
-  });
-
-  it('end row surfaces only the first line of the result as output', () => {
-    const row = toolEndRow({ id: 'c', label: 'x', output: 'first\nsecond\nthird', error: false });
-    expect(row.output).toBe('first');
-  });
-
-  it('end row truncates a long first line to the field cap', () => {
-    const row = toolEndRow({ id: 'c', label: 'x', output: 'q'.repeat(400), error: false });
-    expect((row.output ?? '').length).toBe(TASK_FIELD_MAX);
   });
 });
 

@@ -2,19 +2,12 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { invokeTool, registerExtraTools, TOOL_DEFS, TOOLS } from './index';
+import { invokeTool, registerExtraTools, TOOLS } from './index';
 
 const CTX = { threadKey: 'unit-test' };
 
-describe('TOOL_DEFS', () => {
-  test('exposes every tool registered in TOOLS', () => {
-    const names = TOOL_DEFS.map((t) => t.function.name).sort();
-    const keys = Object.keys(TOOLS).sort();
-    expect(names).toEqual(keys);
-  });
-
+describe('TOOLS registry', () => {
   test('expected set of tools is present', () => {
-    const names = new Set(TOOL_DEFS.map((t) => t.function.name));
     for (const expected of [
       'get_current_time',
       'fetch_url',
@@ -27,7 +20,7 @@ describe('TOOL_DEFS', () => {
       'github_update_pr',
       'github_pr_comment',
     ]) {
-      expect(names.has(expected)).toBe(true);
+      expect(TOOLS[expected]).toBeDefined();
     }
   });
 });
@@ -62,16 +55,14 @@ describe('invokeTool', () => {
 });
 
 describe('registerExtraTools', () => {
-  // registerExtraTools mutates the shared TOOLS / TOOL_DEFS module state.
-  // Track names we register so each test can roll the registry back, keeping
-  // the built-in invariants above intact regardless of test order.
+  // registerExtraTools mutates the shared TOOLS module state. Track names we
+  // register so each test can roll the registry back, keeping the built-in
+  // invariants above intact regardless of test order.
   const added: string[] = [];
   const dirs: string[] = [];
 
   afterEach(async () => {
     for (const name of added.splice(0)) delete TOOLS[name];
-    // Recompute the live binding off the now-pruned registry.
-    await registerExtraTools({});
     for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
   });
 
@@ -90,12 +81,12 @@ export default {
 `;
 
   test('no-op when AGENTA_EXTRA_TOOLS is unset', async () => {
-    const before = TOOL_DEFS.length;
+    const before = Object.keys(TOOLS).length;
     await registerExtraTools({});
-    expect(TOOL_DEFS.length).toBe(before);
+    expect(Object.keys(TOOLS).length).toBe(before);
   });
 
-  test('registers a fixture tool and exposes it in TOOL_DEFS', async () => {
+  test('registers a fixture tool and exposes it in TOOLS', async () => {
     const dir = await mkDir();
     await writeFile(join(dir, 'extra.ts'), goodTool('extra_demo'));
     added.push('extra_demo');
@@ -103,7 +94,6 @@ export default {
     await registerExtraTools({ AGENTA_EXTRA_TOOLS: dir });
 
     expect(TOOLS.extra_demo).toBeDefined();
-    expect(TOOL_DEFS.map((t) => t.function.name)).toContain('extra_demo');
     const r = await invokeTool('extra_demo', '{}', CTX);
     expect(r.error).toBe(false);
     expect(r.content).toBe('ok from extra_demo');
