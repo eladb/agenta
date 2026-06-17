@@ -35,7 +35,7 @@ import { newEventId, nowIso, record } from '../persistence/events';
 import { dataRoot, readEvents } from '../persistence/store';
 import { postInThread } from '../slack/post';
 import { parseCommand } from './commands';
-import type { DisplayStyle, ModelTriplet } from './home-config';
+import type { ModelTriplet } from './home-config';
 import { redact } from './redact';
 import { buildUserContent } from './sdk-attachments';
 import {
@@ -157,7 +157,6 @@ export async function runSdkTurn(
   systemPrompt: string,
   input: TurnInput,
   signal: AbortSignal | undefined,
-  displayStyle: DisplayStyle,
   model: ModelTriplet,
   // Test seams (optional): inject a stream driver + recorder + a `query`
   // override so the turn is unit/e2e testable without a real Slack stream.
@@ -188,20 +187,13 @@ export async function runSdkTurn(
   let latestAssistantText = '';
 
   // Per-invocation ToolContext factory. Each tool call gets a fresh context
-  // threading the turn's Slack handles + streamMode + the abort signal (the
-  // signal is forwarded by buildAgentaMcpServer to every tool invoke).
+  // threading the turn's Slack handles + the abort signal (the signal is
+  // forwarded by buildAgentaMcpServer to every tool invoke).
   const ctxFactory = (): ToolContext => ({
     threadKey: input.threadKey,
     web,
     channel,
     threadTs,
-    // Always true for the SDK harness: ask_user is the only consumer of
-    // streamMode, and the SDK path never maintains an inline checklist message
-    // for it to render onto (sdk-stream.ts has no checklistTs in any display
-    // mode). So ask_user must always post its controls as a SEPARATE thread
-    // message — the streamMode path — not just in task_update. (Verbose/pretty
-    // ask_user was unexercised until the Phase-A e2e migration surfaced it.)
-    streamMode: true,
     ...(latestAssistantText.length > 0 ? { modelContent: latestAssistantText } : {}),
     // onProgress (bash live output) is optional for v1 — the SDK streams
     // tool_result frames atomically, so we render the final card body. Wiring
@@ -341,7 +333,6 @@ export async function runSdkTurn(
       stream as AsyncIterable<unknown>,
       driver,
       recorder,
-      displayStyle,
       signal,
     );
 

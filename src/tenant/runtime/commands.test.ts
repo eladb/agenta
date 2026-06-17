@@ -10,10 +10,10 @@ describe('parseCommand', () => {
     expect(parseCommand('/delete')).toBe('delete');
   });
 
-  it('parses /verbose, /pretty, /task_update display toggles', () => {
-    expect(parseCommand('/verbose')).toBe('verbose');
-    expect(parseCommand('/pretty')).toBe('pretty');
-    expect(parseCommand('/task_update')).toBe('task_update');
+  it('removed display toggles are no longer commands', () => {
+    expect(parseCommand('/verbose')).toBeNull();
+    expect(parseCommand('/pretty')).toBeNull();
+    expect(parseCommand('/task_update')).toBeNull();
   });
 
   it('tolerates surrounding whitespace', () => {

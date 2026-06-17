@@ -119,7 +119,7 @@ describe('consumeSdkStream — plan mode', () => {
       { type: 'result', subtype: 'success', session_id: SID, result: 'It is Wednesday.' },
     ];
 
-    const outcome = await consumeSdkStream(streamOf(frames), driver, recorder, 'task_update');
+    const outcome = await consumeSdkStream(streamOf(frames), driver, recorder);
 
     // Session id captured.
     expect(outcome.sessionId).toBe(SID);
@@ -204,7 +204,7 @@ describe('consumeSdkStream — plan mode', () => {
       { type: 'result', subtype: 'success', session_id: SID, result: 'recovered' },
     ];
 
-    await consumeSdkStream(streamOf(frames), driver, recorder, 'task_update');
+    await consumeSdkStream(streamOf(frames), driver, recorder);
 
     const errRow = appended.find(
       (c) => c.type === 'task_update' && c.id === 'tuE' && c.status === 'error',
@@ -225,7 +225,7 @@ describe('consumeSdkStream — text mode (pure conversation)', () => {
       { type: 'result', subtype: 'success', session_id: SID, result: 'the answer is 42' },
     ];
 
-    const outcome = await consumeSdkStream(streamOf(frames), driver, recorder, 'task_update');
+    const outcome = await consumeSdkStream(streamOf(frames), driver, recorder);
 
     expect(planOpens).toHaveLength(0);
     expect(appended.some((c) => c.type === 'plan_update' || c.type === 'task_update')).toBe(false);
@@ -245,7 +245,7 @@ describe('consumeSdkStream — error result', () => {
 
     const frames = [{ type: 'result', subtype: 'error_max_turns', session_id: SID }];
 
-    await consumeSdkStream(streamOf(frames), driver, recorder, 'task_update');
+    await consumeSdkStream(streamOf(frames), driver, recorder);
 
     expect(
       appended.some((c) => c.type === 'markdown_text' && /error_max_turns/.test(String(c.text))),

@@ -1,14 +1,14 @@
 import type { WebClient } from '@slack/web-api';
 import { log } from '../../shared/log';
 import { addReaction, postInThread, removeReaction } from '../slack/post';
-import type { DisplayStyle, ModelTriplet } from './home-config';
+import type { ModelTriplet } from './home-config';
 import { runSdkTurn } from './sdk-turn';
 import { clearSession, preservedFields, updateSession } from './session-store';
 
 // Per-turn Slack routing handed to runSdkTurn. The recipient pair is required
-// by the `task_update` streaming display style (#285) — `chat.startStream`
-// rejects a channel-thread stream without `recipient_team_id`; carried
-// (unused) for verbose/pretty too. Optional so unit tests can omit them.
+// by the Slack streaming display (#285) — `chat.startStream` rejects a
+// channel-thread stream without `recipient_team_id`. Optional so unit tests
+// can omit them.
 export type TurnInput = {
   channel: string;
   threadTs: string;
@@ -87,7 +87,6 @@ export async function startOrQueue(
   systemPrompt: string,
   input: TurnInput,
   model: ModelTriplet,
-  displayStyle: DisplayStyle = 'verbose',
 ): Promise<void> {
   const s = getSession(input.threadKey);
   if (s.status !== 'idle') {
@@ -109,7 +108,7 @@ export async function startOrQueue(
   try {
     while (true) {
       s.abort = new AbortController();
-      await runSdkTurn(web, systemPrompt, input, s.abort.signal, displayStyle, model);
+      await runSdkTurn(web, systemPrompt, input, s.abort.signal, model);
       if (!s.pending) break;
       s.pending = false;
       // If /stop fired during the turn we are now in 'stopping'; flip back

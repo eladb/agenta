@@ -80,12 +80,3 @@ export async function postBlocksInThread(
   return res.ts;
 }
 
-export async function editBlocksMessage(
-  web: WebClient,
-  channel: string,
-  ts: string,
-  text: string,
-  blocks: Blocks,
-): Promise<void> {
-  await web.chat.update({ channel, ts, text, blocks });
-}

@@ -14,15 +14,10 @@ import { resolveByThreadText } from './asks';
 import { parseCommand } from './commands';
 import { dedupeKey } from './dedupe';
 import { isDuplicate } from './dedupe-store';
-import {
-  type DisplayConfig,
-  type HomeConfig,
-  type ModelTriplet,
-  resolveTransport,
-} from './home-config';
+import { type HomeConfig, type ModelTriplet, resolveTransport } from './home-config';
 import { refreshHomeMirror } from './home-refresh';
 import { clearThinking, markThinking, signalStop, startOrQueue } from './session';
-import { readSession, setDisplay, setGit, setHome, setModel } from './session-store';
+import { readSession, setGit, setHome, setModel } from './session-store';
 import { threadKey } from './thread';
 
 // The bot dispatches each event with a resolved home spec (#253). The tenant
@@ -35,14 +30,11 @@ export type EnvelopeContext = {
   // backend from env — CLAUDE_CODE_USE_BEDROCK + AWS creds, or ANTHROPIC_*).
   // Required for production. Frozen per-thread on first mention.
   fallbackModel: ModelTriplet | undefined;
-  // Optional UX style override (defaults to 'verbose'). Until a per-deploy
-  // env knob exists this is left undefined; the legacy default is preserved.
-  display?: DisplayConfig;
   // The Slack team/workspace id (envelope.workspace_id). Required by the
-  // `task_update` streaming display style: `chat.startStream` rejects a
-  // channel-thread stream without `recipient_team_id` (#285 spike). Carried
-  // here so the turn can mint the recipient pair without re-reading the
-  // envelope. Optional so unit tests that don't exercise streaming can omit it.
+  // streaming display: `chat.startStream` rejects a channel-thread stream
+  // without `recipient_team_id` (#285 spike). Carried here so the turn can mint
+  // the recipient pair without re-reading the envelope. Optional so unit tests
+  // that don't exercise streaming can omit it.
   workspaceId?: string;
 };
 
@@ -126,13 +118,6 @@ async function handleMessage(
     return;
   }
 
-  if (cmd === 'verbose' || cmd === 'pretty' || cmd === 'task_update') {
-    await setDisplay(tk, { style: cmd });
-    await postInThread(web, e.channel, e.threadTs, `switched to ${cmd} mode`).catch(() => {});
-    log.info('handler', `[${tk}] /${cmd}`);
-    return;
-  }
-
   if (cmd === 'delete') {
     await postInThread(web, e.channel, e.threadTs, 'deleted (stub)').catch(() => {});
     // Tear down the per-thread WS tunnel + bot-side git HTTP server
@@ -197,7 +182,7 @@ export async function kickoffTurn(
   // rebuilt every turn from disk — see `buildSystemPrompt`). `clearSession`
   // writes idle (preserving these) so the file is there across turns; only
   // `/delete` removes it.
-  const { prompt, model, display } = await resolveSystemPromptAndModel(web, tk, userId, ctx);
+  const { prompt, model } = await resolveSystemPromptAndModel(web, tk, userId, ctx);
 
   // Sandbox warmup: kick off provisioning in the background as soon as a
   // turn is committed. The SDK tool loop (mcp-tools.ts) awaits the same
@@ -219,15 +204,13 @@ export async function kickoffTurn(
       channel,
       threadTs,
       threadKey: tk,
-      // Recipient pair for the `task_update` streaming style (#285).
+      // Recipient pair for the Slack streaming display (#285).
       // `chat.startStream` requires both on a channel-thread stream; the
-      // user id is the mentioning user, the team id rides in on the
-      // envelope. Harmlessly carried for verbose/pretty too (unused there).
+      // user id is the mentioning user, the team id rides in on the envelope.
       recipientUserId: userId,
       recipientTeamId: ctx.workspaceId,
     },
     model,
-    display.style,
   );
 }
 
@@ -236,11 +219,11 @@ async function resolveSystemPromptAndModel(
   tk: string,
   userId: string,
   ctx: EnvelopeContext,
-): Promise<{ prompt: string; model: ModelTriplet; display: DisplayConfig }> {
+): Promise<{ prompt: string; model: ModelTriplet }> {
   const existing = await readSession(tk);
 
-  // Home / model / display stay frozen per thread — mid-thread swaps would
-  // be surprising. Backfill any missing field from the current envelope/env
+  // Home / model stay frozen per thread — mid-thread swaps would be
+  // surprising. Backfill any missing field from the current envelope/env
   // (handles sessions written before each field was added; same shape as the
   // historical migrations). For new threads, the envelope's home wins; for
   // existing ones, the snapshot frozen at first mention is preserved.
@@ -258,11 +241,6 @@ async function resolveSystemPromptAndModel(
     }
     model = { ...ctx.fallbackModel };
     await setModel(tk, model);
-  }
-  let display = existing?.display;
-  if (display === undefined) {
-    display = ctx.display ? { ...ctx.display } : { style: 'verbose' };
-    await setDisplay(tk, display);
   }
 
   // First-mention only: resolve + cache the originating Slack user's
@@ -287,7 +265,7 @@ async function resolveSystemPromptAndModel(
   }
   const agentHomeDir = resolveAgentHomeForPrompt(home);
   const composed = await buildSystemPrompt(agentHomeDir);
-  return { prompt: composed, model, display };
+  return { prompt: composed, model };
 }
 
 // Test override hatch: `AGENT_HOME_DIR` short-circuits the configured
