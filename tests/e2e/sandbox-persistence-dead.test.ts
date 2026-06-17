@@ -69,7 +69,7 @@ beforeAll(async () => {
   // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
   // server (returned as `agent.mock`); the callModel arg is unused.
   [agent, tester] = await Promise.all([
-    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startBotAndTenant(),
     startTester(),
   ]);
 }, 120_000);
@@ -166,7 +166,7 @@ test.if(HAS_DOCKER)(
     // Start agent B with the same data dir. The reboot spins up a BRAND-NEW
     // mock-model server (re-points ANTHROPIC_BASE_URL), so re-grab the handle
     // and re-script it before the next mention.
-    agent = await startBotAndTenant(undefined, { harness: 'sdk' });
+    agent = await startBotAndTenant();
     const mock2 = agent.mock;
     if (!mock2) throw new Error('expected SDK-mode mock handle after reboot');
     mock2.reset();

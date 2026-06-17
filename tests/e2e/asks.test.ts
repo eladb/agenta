@@ -42,7 +42,7 @@ beforeAll(async () => {
   // mock-model server (returned as `agent.mock`). The callModel arg is unused
   // in SDK mode but still required positionally.
   [agent, tester] = await Promise.all([
-    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startBotAndTenant(),
     startTester(),
   ]);
 }, 120_000);

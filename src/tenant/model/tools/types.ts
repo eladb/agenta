@@ -1,5 +1,16 @@
 import type { WebClient } from '@slack/web-api';
-import type { ToolDef } from '../gateway';
+
+// OpenAI-style function tool definition. Each tool declares its name +
+// JSON-Schema parameters in this shape; `mcp-tools.ts` adapts it to the
+// Claude Agent SDK's MCP tool registry at boot (the SDK is the only harness).
+export type ToolDef = {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: object;
+  };
+};
 
 export type ToolProgressChunk = { kind: 'stdout' | 'stderr'; text: string };
 

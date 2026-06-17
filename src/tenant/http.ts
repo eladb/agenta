@@ -23,7 +23,6 @@ import { timingSafeEqual } from 'node:crypto';
 import { WebClient } from '@slack/web-api';
 import { log } from '../shared/log';
 import type { EventEnvelope, HomeSpec } from '../shared/types';
-import type { CallModel } from './model/gateway';
 import { makeEventHandler } from './runtime/handler';
 import {
   type ModelTriplet,
@@ -51,11 +50,6 @@ export type HttpOptions = {
   // recovery done). Until then the bot's drain loop will see 503 and skip
   // dispatching, which is fine — Slack will redeliver on its next attempt.
   readyRef: { value: boolean };
-  // Test seam: e2e harness injects a stubbed `CallModel` so the tenant never
-  // hits the real model gateway. Production never sets this — the handler
-  // builds the real callModel from the per-thread frozen triplet. Wired
-  // through `dispatch` → `makeEventHandler` (`callModelOverride` arg).
-  callModelOverride?: CallModel;
 };
 
 export function startHttp(opts: HttpOptions): ReturnType<typeof Bun.serve> {
@@ -116,7 +110,7 @@ export function startHttp(opts: HttpOptions): ReturnType<typeof Bun.serve> {
           };
           const heartbeat = setInterval(() => send('heartbeat'), HEARTBEAT_INTERVAL_MS);
           heartbeat.unref?.();
-          dispatch(envelope, opts.fallbackModel, opts.callModelOverride)
+          dispatch(envelope, opts.fallbackModel)
             .then(() => {
               send('done');
             })
@@ -167,7 +161,6 @@ export function startHttp(opts: HttpOptions): ReturnType<typeof Bun.serve> {
 async function dispatch(
   envelope: EventEnvelope,
   fallbackModel: ModelTriplet | undefined,
-  callModelOverride: CallModel | undefined,
 ): Promise<void> {
   if (envelope.type === 'interactive') {
     handleInteractivePayload(envelope.payload);
@@ -200,23 +193,17 @@ async function dispatch(
   // forwarded to the handler + frozen into session.json on first mention.
   const home = resolveHomeFromEnvelope(envelope.home, process.env);
 
-  const handler = makeEventHandler(
-    web,
-    envelope.xoxb,
-    botUserId,
-    {
-      home,
-      fallbackModel,
-      // Per-deploy default display style (#287). Undefined unless
-      // AGENTA_DISPLAY_STYLE is set + valid; the handler falls back to
-      // `verbose` when absent, and a per-thread /verbose|/pretty|/task_update
-      // command still overrides this (frozen in session.json).
-      display: parseDisplayStyleEnv(process.env.AGENTA_DISPLAY_STYLE),
-      // The team id for the `task_update` streaming recipient pair (#285).
-      workspaceId: envelope.workspace_id,
-    },
-    callModelOverride,
-  );
+  const handler = makeEventHandler(web, envelope.xoxb, botUserId, {
+    home,
+    fallbackModel,
+    // Per-deploy default display style (#287). Undefined unless
+    // AGENTA_DISPLAY_STYLE is set + valid; the handler falls back to
+    // `verbose` when absent, and a per-thread /verbose|/pretty|/task_update
+    // command still overrides this (frozen in session.json).
+    display: parseDisplayStyleEnv(process.env.AGENTA_DISPLAY_STYLE),
+    // The team id for the `task_update` streaming recipient pair (#285).
+    workspaceId: envelope.workspace_id,
+  });
   await handler(normalized);
 }
 

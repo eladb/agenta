@@ -9,7 +9,6 @@ import {
   getDataDir,
   mention,
   requireEnv,
-  STUB_REPLY_PREFIX,
   safeShutdown,
   setupTempDataDir,
   startBotAndTenant,
@@ -44,36 +43,45 @@ function readJsonl(file: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l));
 }
 
-test('mention persists slack message + assistant message events', async () => {
+test('mention persists the inbound slack message + the assistant reply', async () => {
+  agent.mock.reset();
+  agent.mock.setTurns([{ text: 'recorded reply' }]);
+
   const unique = `e2e-persist-${Date.now()}`;
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, unique);
   createdThreads.push(threadTs);
 
   await waitForReply(tester, channel, threadTs, agent.botUserId, (t) =>
-    t.startsWith(STUB_REPLY_PREFIX),
+    t.includes('recorded reply'),
   );
   await new Promise((r) => setTimeout(r, 300));
 
   const tk = threadKey(channel, threadTs);
   const file = join(getDataDir(), tk, 'messages.jsonl');
-  const events = readJsonl(file);
+  const events = readJsonl(file) as Array<{
+    source: string;
+    type: string;
+    payload: { user?: string; text?: string; slack_ts?: string };
+  }>;
 
-  expect(events.length).toBe(2);
+  // The inbound mention is recorded as a slack message event verbatim.
+  const incoming = events.find((e) => e.source === 'slack' && e.type === 'message');
+  expect(incoming).toBeDefined();
+  expect(incoming?.payload.user).toBe(tester.botUserId);
+  expect(incoming?.payload.text).toBe(unique);
+  expect(incoming?.payload.slack_ts).toBe(threadTs);
 
-  const [incoming, reply] = events as [
-    { source: string; type: string; payload: { user: string; text: string; slack_ts: string } },
-    { source: string; type: string; payload: { text: string; slack_ts: string } },
-  ];
-  expect(incoming.source).toBe('slack');
-  expect(incoming.type).toBe('message');
-  expect(incoming.payload.user).toBe(tester.botUserId);
-  expect(incoming.payload.text).toBe(unique);
-  expect(incoming.payload.slack_ts).toBe(threadTs);
-
-  expect(reply.source).toBe('assistant');
-  expect(reply.type).toBe('message');
-  expect(reply.payload.text).toBe(`${STUB_REPLY_PREFIX}${unique}`);
-});
+  // The model's reply is recorded as an assistant message event. (The SDK
+  // harness may also record tool_call/tool_result events on tool-using turns;
+  // this is a pure text turn, so we just assert the assistant text landed.)
+  const reply = events.find(
+    (e) =>
+      e.source === 'assistant' &&
+      e.type === 'message' &&
+      (e.payload.text ?? '').includes('recorded reply'),
+  );
+  expect(reply).toBeDefined();
+}, 120_000);
 
 test('/delete removes the thread data directory', async () => {
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, '/delete');

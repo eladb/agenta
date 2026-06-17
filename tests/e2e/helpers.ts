@@ -13,8 +13,6 @@ import { log } from '../../src/shared/log';
 import type { TenantsConfig } from '../../src/shared/types';
 import { teardownSession } from '../../src/tenant/git/bootstrap';
 import { startHttp } from '../../src/tenant/http';
-import { type CallModel, createCallModel, type Message } from '../../src/tenant/model/gateway';
-import { withGolden } from '../../src/tenant/model/golden';
 import type { ModelTriplet } from '../../src/tenant/runtime/home-config';
 import { threadKey as makeThreadKey } from '../../src/tenant/runtime/thread';
 import { removeContainer } from '../../src/tenant/sandbox';
@@ -35,35 +33,6 @@ function dockerInstalled(): boolean {
 }
 const _activeProvider = (process.env.SANDBOX_PROVIDER ?? 'docker').toLowerCase();
 export const DOCKER_PROVIDER_ACTIVE = dockerInstalled() && _activeProvider === 'docker';
-
-export const STUB_REPLY_PREFIX = 'stub: ';
-
-// Recording stub: captures every call so tests can assert on the messages
-// array (incl. multipart content for attachments). Reset via resetStubCalls().
-export const stubCalls: Message[][] = [];
-
-export function resetStubCalls(): void {
-  stubCalls.length = 0;
-}
-
-export function lastStubCall(): Message[] | undefined {
-  return stubCalls[stubCalls.length - 1];
-}
-
-export const stubCallModel: CallModel = async (messages) => {
-  stubCalls.push(messages);
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.role !== 'user') continue;
-    if (typeof m.content === 'string') {
-      return { role: 'assistant', content: `${STUB_REPLY_PREFIX}${m.content}` };
-    }
-    const textPart = m.content.find((p) => p.type === 'text');
-    const text = textPart && textPart.type === 'text' ? textPart.text : '(multipart)';
-    return { role: 'assistant', content: `${STUB_REPLY_PREFIX}${text}` };
-  }
-  return { role: 'assistant', content: `${STUB_REPLY_PREFIX}(no user message)` };
-};
 
 export function requireEnv(name: string): string {
   const v = process.env[name];
@@ -96,14 +65,13 @@ export type Agent = {
   // The tenant HTTP server. Stopped on shutdown so its port is released
   // and the bot's in-flight forwarders unblock.
   tenant: { port: number; stop: () => void };
-  // SDK-mode only (#315 Phase A): the long-lived mock-model server driving the
-  // SDK subprocess via ANTHROPIC_BASE_URL. Undefined in the default bespoke
-  // mode. Tests script it (`mock.setTurns`) + assert on `mock.requests`.
-  mock?: MockModelHandle;
-  // SDK-mode only: restores the process env this boot mutated (HARNESS,
-  // ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK). Invoked by
-  // shutdown/safeShutdown. No-op in bespoke mode.
-  restoreEnv?: () => void;
+  // The long-lived mock-model server driving the SDK subprocess via
+  // ANTHROPIC_BASE_URL. Tests script it (`mock.setTurns`) + assert on
+  // `mock.requests`.
+  mock: MockModelHandle;
+  // Restores the process env this boot mutated (ANTHROPIC_BASE_URL,
+  // ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK). Invoked by shutdown/safeShutdown.
+  restoreEnv: () => void;
 };
 
 export type Tester = {
@@ -273,53 +241,35 @@ async function openSocketWithRetry(
 // `connect()` + `listen()` from `src/tenant/slack/*`, both removed under
 // #253. The returned shape keeps the same fields so test call sites
 // don't churn — see `Agent` for the per-field rationale.
-// SDK-mode boot options (#315 Phase A). When `harness: 'sdk'` the tenant runs
-// the Claude Agent SDK turn (`runSdkTurn`) instead of the bespoke loop: we flip
-// `process.env.HARNESS=sdk`, start a mock-model server, and point
-// `ANTHROPIC_BASE_URL` at it so the SDK subprocess talks only to the mock.
-// The injected `callModel` is irrelevant in SDK mode (runSdkTurn ignores it),
-// but we still pass `stubCallModel` so the bespoke gateway is never constructed.
-export type StartOptions = { harness?: 'bespoke' | 'sdk' };
-
-export async function startBotAndTenant(
-  callModel: CallModel = stubCallModel,
-  opts: StartOptions = {},
-): Promise<Agent> {
-  const sdkMode = opts.harness === 'sdk';
+export async function startBotAndTenant(): Promise<Agent> {
   const appToken = requireEnv('SLACK_APP_TOKEN');
   const botToken = requireEnv('SLACK_BOT_TOKEN');
 
-  // --- SDK mode: process-env wiring + the mock-model server. ----------------
-  // One e2e process per test file (run-e2e.ts spawns one bun per file), so
-  // mutating process.env here is file-scoped + isolated; we still snapshot +
-  // restore on shutdown so a `bun test <file>` run that boots twice is clean.
-  let mock: MockModelHandle | undefined;
-  let restoreEnv: (() => void) | undefined;
-  if (sdkMode) {
-    const saved = {
-      harness: process.env.HARNESS,
-      baseUrl: process.env.ANTHROPIC_BASE_URL,
-      apiKey: process.env.ANTHROPIC_API_KEY,
-      bedrock: process.env.CLAUDE_CODE_USE_BEDROCK,
+  // The SDK is the only harness, so every e2e boot drives a real SDK subprocess
+  // pointed at the mock-model server (no real model calls). One e2e process per
+  // test file (run-e2e.ts spawns one bun per file), so mutating process.env
+  // here is file-scoped + isolated; we still snapshot + restore on shutdown so
+  // a `bun test <file>` run that boots twice is clean.
+  const saved = {
+    baseUrl: process.env.ANTHROPIC_BASE_URL,
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    bedrock: process.env.CLAUDE_CODE_USE_BEDROCK,
+  };
+  const restoreEnv = (): void => {
+    const restore = (k: string, v: string | undefined): void => {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     };
-    restoreEnv = () => {
-      const restore = (k: string, v: string | undefined): void => {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      };
-      restore('HARNESS', saved.harness);
-      restore('ANTHROPIC_BASE_URL', saved.baseUrl);
-      restore('ANTHROPIC_API_KEY', saved.apiKey);
-      restore('CLAUDE_CODE_USE_BEDROCK', saved.bedrock);
-    };
-    mock = await startMockModel();
-    process.env.HARNESS = 'sdk';
-    process.env.ANTHROPIC_BASE_URL = mock.baseUrl;
-    // Bedrock OFF — the mock is reached via ANTHROPIC_BASE_URL — and a dummy
-    // key so the SDK subprocess has something to send (the mock ignores it).
-    delete process.env.CLAUDE_CODE_USE_BEDROCK;
-    process.env.ANTHROPIC_API_KEY = 'sdk-e2e-key-not-used';
-  }
+    restore('ANTHROPIC_BASE_URL', saved.baseUrl);
+    restore('ANTHROPIC_API_KEY', saved.apiKey);
+    restore('CLAUDE_CODE_USE_BEDROCK', saved.bedrock);
+  };
+  const mock = await startMockModel();
+  process.env.ANTHROPIC_BASE_URL = mock.baseUrl;
+  // Bedrock OFF — the mock is reached via ANTHROPIC_BASE_URL — and a dummy
+  // key so the SDK subprocess has something to send (the mock ignores it).
+  delete process.env.CLAUDE_CODE_USE_BEDROCK;
+  process.env.ANTHROPIC_API_KEY = 'sdk-e2e-key-not-used';
 
   // Hold the SAME 'bot' + 'agent' lockfiles the production processes
   // take. Production `bun run start:bot` calls `acquire('bot')`; the
@@ -334,13 +284,11 @@ export async function startBotAndTenant(
   try {
     agentLock = acquire('agent');
 
-    // Build the tenant's fallback model triplet. The stub callModel
-    // never actually invokes this — the override short-circuits in
-    // `kickoffTurn` — but `resolveSystemPromptAndModel` still freezes
-    // the triplet into session.json on first mention. Pin a synthetic
-    // env var name so a path that ever DID try to read it would fail
-    // loudly instead of silently picking up the real prod key. Set the
-    // var so envelope validation (when /events sees auth_env) passes.
+    // Build the tenant's fallback model triplet. The SDK reaches the mock via
+    // ANTHROPIC_BASE_URL, so the triplet's `name` is the only field that
+    // matters (passed to the SDK as `options.model`; the mock ignores it).
+    // `resolveSystemPromptAndModel` freezes the triplet into session.json on
+    // first mention. Pin a synthetic api_key_env so envelope validation passes.
     process.env.AGENTA_TEST_STUB_KEY = process.env.AGENTA_TEST_STUB_KEY ?? 'stub-key-not-used';
     const fallbackModel: ModelTriplet = {
       name: 'stub-model',
@@ -359,16 +307,14 @@ export async function startBotAndTenant(
     // Start the tenant HTTP server on a kernel-assigned localhost port
     // so parallel test files don't collide. `readyRef.value = true`
     // immediately — tests skip the boot-time recovery sweep (it runs
-    // against AGENTA_DATA_DIR which is fresh per test). The callModel
-    // override is threaded all the way to `makeEventHandler` via
-    // `startHttp` → `dispatch` so the real gateway is never built.
+    // against AGENTA_DATA_DIR which is fresh per test). The SDK subprocess
+    // reaches the mock-model server via ANTHROPIC_BASE_URL.
     const tenantServer = startHttp({
       port: 0,
       hostname: '127.0.0.1',
       tenantSecret,
       fallbackModel,
       readyRef: { value: true },
-      callModelOverride: callModel,
     });
     tenantHandle = {
       port: tenantServer.port,
@@ -457,8 +403,8 @@ export async function startBotAndTenant(
       lock,
       agentLock,
       tenant: tenantHandle,
-      ...(mock ? { mock } : {}),
-      ...(restoreEnv ? { restoreEnv } : {}),
+      mock,
+      restoreEnv,
     };
   } catch (err) {
     // Tear down in reverse acquisition order so a partial setup leaves
@@ -473,13 +419,13 @@ export async function startBotAndTenant(
       agentLock?.release();
     } catch {}
     lock.release();
-    // SDK mode: stop the mock server + restore the env we mutated so a failed
-    // boot doesn't leak ANTHROPIC_BASE_URL/HARNESS into the next test file.
+    // Stop the mock server + restore the env we mutated so a failed boot
+    // doesn't leak ANTHROPIC_BASE_URL into the next test file.
     try {
-      await mock?.stop();
+      await mock.stop();
     } catch {}
     try {
-      restoreEnv?.();
+      restoreEnv();
     } catch {}
     throw err;
   }
@@ -677,47 +623,4 @@ export async function waitFor(
     await new Promise((r) => setTimeout(r, intervalMs));
   }
   throw new Error(`waitFor timed out${opts.what ? `: ${opts.what}` : ''}`);
-}
-
-// Resolve the golden file path for a test:
-//   tests/golden/<testFileBase>/<kebab-test-name>.jsonl
-// `testFile` should be the source filename (e.g. `skills-golden.test.ts`);
-// the helper strips `.test.ts` so the directory is just `<base>/`.
-export function goldenPathFor(testFile: string, testName: string): string {
-  const base = testFile.replace(/\.test\.ts$/, '');
-  const safe = testName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return join(import.meta.dir, '..', 'golden', base, `${safe}.jsonl`);
-}
-
-// Build a `CallModel` for an e2e test that wraps the real gateway in
-// record/replay logic via `withGolden`. The returned `flush` should be invoked
-// in the test's afterEach/afterAll so a record run actually persists the file.
-//
-// In replay mode the real gateway is never constructed — no `MODEL_API_KEY` is
-// required. In record mode the gateway is constructed lazily from env vars,
-// using the same defaults as `src/index.ts`.
-export function createGoldenCallModel(
-  testFile: string,
-  testName: string,
-): { callModel: CallModel; flush: () => Promise<void>; path: string } {
-  const path = goldenPathFor(testFile, testName);
-  // Construct the real gateway only when needed — in replay mode the inner
-  // CallModel never runs, so we don't want to demand MODEL_API_KEY there.
-  const lazyInner: CallModel = async (messages, opts) => {
-    const apiKey = process.env.MODEL_API_KEY ?? process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error('recording a golden requires MODEL_API_KEY (or ANTHROPIC_API_KEY) to be set');
-    }
-    const real = createCallModel({
-      apiKey,
-      baseUrl: process.env.MODEL_BASE_URL ?? 'https://api.anthropic.com/v1',
-      model: process.env.MODEL_NAME ?? 'claude-sonnet-4-6',
-    });
-    return real(messages, opts);
-  };
-  const { callModel, flush } = withGolden(lazyInner, path);
-  return { callModel, flush, path };
 }

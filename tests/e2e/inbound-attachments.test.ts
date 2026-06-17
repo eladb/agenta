@@ -43,7 +43,7 @@ beforeAll(async () => {
   // Pre-build the sandbox image so the first turn doesn't time out building it.
   await ensureImage();
   [agent, tester] = await Promise.all([
-    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startBotAndTenant(),
     startTester(),
   ]);
 }, 120_000);

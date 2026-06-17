@@ -88,7 +88,7 @@ if (!DOCKER_PROVIDER_ACTIVE) {
     // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
     // server (returned as `agent.mock`); each test scripts it with setTurns.
     [agent, tester] = await Promise.all([
-      startBotAndTenant(undefined, { harness: 'sdk' }),
+      startBotAndTenant(),
       startTester(),
     ]);
   }, 120_000);
