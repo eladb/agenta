@@ -27,13 +27,18 @@ import type { ServerWebSocket } from 'bun';
 
 const PORT = Number(process.env.SANDBOX_PORT ?? 9000);
 const TOKEN = process.env.SANDBOX_TOKEN;
-// Workspace directory: defaults to the sandbox user's home dir (which is
-// also the per-thread persistent volume mount for docker/fly providers).
-// The ECS provider (#218) overrides via SANDBOX_WORKSPACE_DIR=/efs/<slug>
-// so a single shared EFS root + per-thread subdirectory replaces the
-// per-thread access points that #213 originally tried to use.
-// entrypoint.sh mkdir+chowns the directory before exec'ing the server.
-const WORKSPACE = process.env.SANDBOX_WORKSPACE_DIR ?? '/home/sandbox';
+// Workspace directory = the sandbox user's home, where the repo is cloned
+// (`bootstrap.ts` transplants it into `~`) and where the file tools anchor
+// (`sandbox/index.ts:normalizeSandboxPath`, #336). bash runs here too, so `~`,
+// relative paths, and the file tools all resolve to the same place.
+//
+// We deliberately no longer honor the ECS `SANDBOX_WORKSPACE_DIR=/efs/<slug>`
+// override (#339, option A): the repo always lands in `~`, never in `/efs`, so
+// that override only ever split bash's cwd away from the work tree (its #218
+// EFS-persistence intent was never realized — the work tree isn't on EFS). The
+// home is the single workspace on every provider. (`ecs.ts` still mounts/sets
+// the EFS dir; it's now vestigial — a follow-up cleanup, gated on ECS access.)
+const WORKSPACE = '/home/sandbox';
 // Hard cap on /exec runtime. Long-hanging commands (e.g. `curl` to a blocked
 // host waiting on TCP timeout) would otherwise block the model's turn
 // indefinitely. The model sees a clean error in stderr and can adjust.
