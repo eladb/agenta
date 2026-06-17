@@ -3,7 +3,7 @@ import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from '../../shared/log';
 import { dataRoot, ensureThreadDir, threadDir } from '../persistence/store';
-import type { DisplayConfig, HomeConfig, ModelTriplet } from './home-config';
+import type { HomeConfig, ModelTriplet } from './home-config';
 
 // Provider-tagged routing info for a thread's sandbox. Persisted into
 // session.json so per-thread sandboxes survive a bot restart: on the next
@@ -84,8 +84,8 @@ export type GitRecord = {
 };
 
 // Per-thread runtime state. The file persists even when the thread is idle
-// so per-thread routing (sandbox / git / home / model / display) survives
-// across turns. Recovery filters on status !== 'idle'.
+// so per-thread routing (sandbox / git / home / model) survives across turns.
+// Recovery filters on status !== 'idle'.
 //
 // `home` is a snapshot of the envelope's home spec (#253) frozen on first
 // mention. Stored as the raw HomeConfig (remote + auth_env); slug, transport,
@@ -108,10 +108,6 @@ export type SessionState = {
   // mid-conversation. Only the env-var NAME is stored; the secret value is
   // read at every call via `process.env[api_key_env]`.
   model?: ModelTriplet;
-  // Frozen per-thread display style (#141). Snapshotted on first mention
-  // so mid-thread config swaps don't change the UX mid-conversation.
-  // Missing = `verbose` (default).
-  display?: DisplayConfig;
   // The Claude Agent SDK session id for this thread (#303). Captured from the
   // SDK `query()` stream's first frame on the first turn and persisted so
   // subsequent turns resume the same SDK session (`options.resume`). Absent
@@ -209,8 +205,8 @@ export async function updateSession(
 }
 
 // Spread only the routing fields that survive a status transition / clear.
-// Centralizes the "preserve sandbox/git/home/model/display" list so the
-// status flips in session.ts and clearSession stay in sync.
+// Centralizes the "preserve sandbox/git/home/model" list so the status flips
+// in session.ts and clearSession stay in sync.
 export function preservedFields(prev: SessionState | undefined): Partial<SessionState> {
   if (!prev) return {};
   return {
@@ -218,15 +214,14 @@ export function preservedFields(prev: SessionState | undefined): Partial<Session
     ...(prev.git !== undefined ? { git: prev.git } : {}),
     ...(prev.home !== undefined ? { home: prev.home } : {}),
     ...(prev.model !== undefined ? { model: prev.model } : {}),
-    ...(prev.display !== undefined ? { display: prev.display } : {}),
     ...(prev.sdk_session_id !== undefined ? { sdk_session_id: prev.sdk_session_id } : {}),
   };
 }
 
 // "Clear" no longer means delete — going idle leaves the file in place with
-// status: 'idle' so the sandbox / git / home / model / display records
-// survive across turns. `/delete` removes the entire thread dir, which takes
-// session.json with it.
+// status: 'idle' so the sandbox / git / home / model records survive across
+// turns. `/delete` removes the entire thread dir, which takes session.json
+// with it.
 export async function clearSession(threadKey: string): Promise<void> {
   await updateSession(threadKey, (existing) => ({
     status: 'idle',
@@ -311,27 +306,8 @@ export async function setModel(threadKey: string, model: ModelTriplet | undefine
   });
 }
 
-// Atomic read-modify-write of the `display` config (#141). Symmetric with
-// setModel. Called once on first mention from `handler.ts`. `undefined`
-// clears the field (the thread reverts to verbose default on read).
-export async function setDisplay(
-  threadKey: string,
-  display: DisplayConfig | undefined,
-): Promise<void> {
-  await updateSession(threadKey, (existing) => {
-    if (!existing) {
-      if (display === undefined) return undefined;
-      return { status: 'idle', updated_at: '', display };
-    }
-    const next: SessionState = { ...existing };
-    if (display !== undefined) next.display = display;
-    else delete next.display;
-    return next;
-  });
-}
-
 // Atomic read-modify-write of the `sdk_session_id` (#303). Symmetric with
-// setModel/setDisplay. Called by `runSdkTurn` the first time the SDK emits a
+// setModel. Called by `runSdkTurn` the first time the SDK emits a
 // session id for this thread so later turns resume it. `undefined` clears the
 // field (used on /delete-adjacent cleanup, though /delete removes the whole
 // dir). No-op on the disk side when there's no session.json yet.

@@ -1,22 +1,20 @@
-// Pure chunk mappers for the `task_update` streaming display style (#285).
+// Pure chunk mappers for the Slack streaming display (#285).
 //
 // These turn agenta's loop primitives (a tool call, a tool result, a reply
 // body) into Slack streaming chunks. They are deliberately pure — no Slack
 // calls, no I/O — so the bulk of the rendering logic is unit-testable with a
-// plain stubbed `web`. turn.ts owns the imperative startStream/appendStream/
-// stopStream calls and the per-turn `ts`; these functions just shape payloads.
+// plain stubbed `web`. The stream driver (sdk-stream.ts) owns the imperative
+// startStream/appendStream/stopStream calls and the per-turn `ts`; these
+// functions just shape payloads.
 //
-// Naming note (easy to trip on): the user-facing display STYLE is
-// `task_update` (matches the `/task_update` toggle and the `DisplayStyle`
-// union); `task_update` is also the CHUNK `type` for a timeline row. So:
-//   - DisplayStyle 'task_update' → our internal opt-in name
-//   - chunk type 'task_update'   → one timeline row (renders as a task card)
-// turn.ts opens the stream WITHOUT `task_display_mode`, lazily on the first
-// emitted chunk: the #285 spike confirmed task_update chunks render as task
-// cards in plain text mode too, so a markdown-only turn streams with no leading
-// task row (no placeholder "Thinking…" chip) and tool turns open on the real
-// tool's row. (Under an explicit `task_display_mode: 'timeline'` the first
-// chunk MUST be a task_update row — which is exactly the chip we want to avoid.)
+// Naming note (easy to trip on): `task_update` is the CHUNK `type` for a
+// timeline row (renders as a task card). The driver opens the stream WITHOUT
+// `task_display_mode`, lazily on the first emitted chunk: the #285 spike
+// confirmed task_update chunks render as task cards in plain text mode too, so
+// a markdown-only turn streams with no leading task row (no placeholder
+// "Thinking…" chip) and tool turns open on the real tool's row. (Under an
+// explicit `task_display_mode: 'timeline'` the first chunk MUST be a
+// task_update row — which is exactly the chip we want to avoid.)
 
 import type { MarkdownTextChunk, TaskUpdateChunk } from '@slack/types';
 

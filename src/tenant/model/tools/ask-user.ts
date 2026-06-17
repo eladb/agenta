@@ -1,6 +1,6 @@
 import { AskInUseError, type AskKind, getPendingAskByTs, registerAsk } from '../../runtime/asks';
 import { buildAskBlocks } from '../../slack/ask-blocks';
-import { editBlocksMessage, postBlocksInThread } from '../../slack/post';
+import { postBlocksInThread } from '../../slack/post';
 import { oneLine, strArg } from './helpers';
 import type { Tool } from './types';
 
@@ -89,31 +89,15 @@ export const askUser: Tool = {
       ? [{ type: 'section', text: { type: 'mrkdwn', text: ctx.modelContent } }, ...askBlocks]
       : askBlocks;
 
-    // Where the buttons live, and what ts the ask registry is keyed by:
-    //   - stream mode (#285): the spec forbids interactive blocks mid-stream,
-    //     so POST a SEPARATE thread message carrying the blocks. The stream
-    //     shows an "Asking…" task row (managed by turn.ts) that flips to
-    //     complete when this resolves. Keyed by the new message's ts.
-    //   - verbose/pretty: render the blocks onto the running checklist
-    //     message in place (ctx.checklistTs). Once the ask settles, turn.ts's
-    //     next checklist edit clears the blocks.
+    // The Slack streaming spec forbids interactive blocks mid-stream, so POST
+    // a SEPARATE thread message carrying the blocks. The stream shows an
+    // "Asking…" task row that flips to complete when this resolves. The ask
+    // registry is keyed by the new message's ts.
     let messageTs: string;
-    if (ctx.streamMode) {
-      try {
-        messageTs = await postBlocksInThread(web, channel, threadTs, question, blocks);
-      } catch (err) {
-        throw new Error(`ask_user: could not post blocks: ${(err as Error).message}`);
-      }
-    } else {
-      if (!ctx.checklistTs) {
-        throw new Error('ask_user: checklist context unavailable in this run');
-      }
-      messageTs = ctx.checklistTs;
-      try {
-        await editBlocksMessage(web, channel, messageTs, question, blocks);
-      } catch (err) {
-        throw new Error(`ask_user: could not render blocks: ${(err as Error).message}`);
-      }
+    try {
+      messageTs = await postBlocksInThread(web, channel, threadTs, question, blocks);
+    } catch (err) {
+      throw new Error(`ask_user: could not post blocks: ${(err as Error).message}`);
     }
 
     let registered: Promise<string>;
@@ -123,10 +107,9 @@ export const askUser: Tool = {
         threadKey: ctx.threadKey,
         kind: kind as AskKind,
         timeoutMs: ASK_TIMEOUT_MS,
-        // No Slack-side settle handler needed: turn.ts will rewrite the
-        // checklist on its next updateChecklist call, which clears the
-        // blocks. The resolved answer is appended to the ask bullet in
-        // turn.ts so the user still sees what they picked.
+        // No Slack-side settle handler needed: the question lives in its own
+        // thread message and the stream's "Asking…" task row flips to complete
+        // when the ask resolves.
         onSettle: () => {},
       });
     } catch (err) {

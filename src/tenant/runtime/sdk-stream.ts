@@ -17,8 +17,8 @@
 //
 // SDK frame → display mapping (mirrors runStreamingTurn):
 //   - assistant `tool_use` block       → task card in_progress (id = tool_use.id)
-//   - assistant interim `text` (when    → 💬 note card (plan mode) / markdown
-//     the same message also has a tool)    (text mode)
+//   - assistant interim `text` (when    → 💬 note card
+//     the same message also has a tool)
 //   - `user` message tool_result block  → flip the matching card complete/error,
 //                                          clean bash output into details/output
 //   - `result` (success)                → final markdown reply + finalize
@@ -187,18 +187,15 @@ type SdkFrame = any;
 // persistence. Pure w.r.t. Slack/IO — all side effects go through `driver` +
 // `recorder`, both injectable. Returns the captured session id + final text.
 //
-// `displayStyle === 'task_update'` drives the full plan rendering (primary).
-// For 'verbose'/'pretty' a simpler text rendering is used (v1): interim text +
-// the final answer stream as markdown, tools render as compact task rows. The
-// streaming-API path is the same; only the plan-vs-text framing differs.
+// The render is the plan/timeline display: tools render as task rows
+// transitioning in_progress → complete/error, interim reasoning as 💬 note
+// cards, and the final answer streamed as markdown with a feedback footer.
 export async function consumeSdkStream(
   stream: AsyncIterable<SdkFrame>,
   driver: SlackStreamDriver,
   recorder: SdkStreamRecorder,
-  displayStyle: 'verbose' | 'pretty' | 'task_update' = 'task_update',
   signal?: AbortSignal,
 ): Promise<SdkStreamOutcome> {
-  const usePlan = displayStyle === 'task_update';
   let sessionId: string | undefined;
   let toolsRan = 0;
   let noteSeq = 0;
@@ -217,22 +214,18 @@ export async function consumeSdkStream(
   };
 
   // Interim assistant reasoning text (emitted alongside a tool call) → a 💬 note
-  // card in the plan, or a markdown chunk in text mode.
+  // card in the plan.
   const emitReasoning = async (text: string): Promise<void> => {
     const trimmed = text.trim();
     if (trimmed.length === 0) return;
-    if (usePlan) {
-      noteSeq += 1;
-      await driver.append([
-        taskRow({
-          id: `note-${noteSeq}`,
-          title: `💬 ${trimmed.replace(/\s+/g, ' ')}`,
-          status: 'complete',
-        }),
-      ]);
-    } else {
-      await driver.append(markdownChunks(trimmed));
-    }
+    noteSeq += 1;
+    await driver.append([
+      taskRow({
+        id: `note-${noteSeq}`,
+        title: `💬 ${trimmed.replace(/\s+/g, ' ')}`,
+        status: 'complete',
+      }),
+    ]);
   };
 
   try {
@@ -254,7 +247,7 @@ export async function consumeSdkStream(
         for (const b of blocks) {
           // interim reasoning text alongside a tool call → note card
           if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim() && hasTool) {
-            if (usePlan) await driver.ensurePlan('Working…');
+            await driver.ensurePlan('Working…');
             await emitReasoning(b.text);
           }
           if (b?.type === 'tool_use') {
@@ -263,10 +256,8 @@ export async function consumeSdkStream(
             cardTitle.set(b.id, title);
             toolsRan += 1;
             activeRowId = b.id;
-            if (usePlan) {
-              await driver.ensurePlan('Working…');
-              await driver.setPlanTitle(`${prettyToolLabel(bare)}…`);
-            }
+            await driver.ensurePlan('Working…');
+            await driver.setPlanTitle(`${prettyToolLabel(bare)}…`);
             await driver.append([
               taskRow({ id: b.id, title, status: 'in_progress' as TaskStatus }),
             ]);
@@ -304,7 +295,7 @@ export async function consumeSdkStream(
         }
       } else if (frame?.type === 'result') {
         completed = true;
-        if (usePlan && toolsRan > 0) {
+        if (toolsRan > 0) {
           await driver.setPlanTitle(`✅ Done — ${toolsRan} step${toolsRan === 1 ? '' : 's'}`);
         }
         if (frame.subtype === 'success') {
@@ -321,7 +312,7 @@ export async function consumeSdkStream(
               taskRow({ id: activeRowId, title: 'error', status: 'error', output: detail }),
             ]);
           }
-          if (usePlan) await driver.setPlanTitle('⚠️ Error');
+          await driver.setPlanTitle('⚠️ Error');
           await driver.append(markdownChunks(`error: ${detail}`));
         }
         await finalize();
@@ -336,7 +327,7 @@ export async function consumeSdkStream(
           ])
           .catch(() => {});
       }
-      if (usePlan) await driver.setPlanTitle('■ Stopped').catch(() => {});
+      await driver.setPlanTitle('■ Stopped').catch(() => {});
       await driver.append(markdownChunks('stopped')).catch(() => {});
       await finalize();
       return { sessionId, finalText, completed };
@@ -349,7 +340,7 @@ export async function consumeSdkStream(
         ])
         .catch(() => {});
     }
-    if (usePlan) await driver.setPlanTitle('⚠️ Error').catch(() => {});
+    await driver.setPlanTitle('⚠️ Error').catch(() => {});
     await driver.append(markdownChunks(`error: ${msg}`)).catch(() => {});
     await finalize();
     return { sessionId, finalText, completed };
