@@ -14,7 +14,7 @@ Read in full before starting work.
 
 Implementation of `SPEC.md` (v1): a Slack thread-backed agentic sandbox bot. Greenfield — **don't copy from `~/agents`** without asking.
 
-**Stack (locked in):** Bun 1.3.x (`bun test`, loads `.env`) · Slack `@slack/socket-mode` + `@slack/web-api` (not Bolt) · Anthropic via OpenAI-compat endpoint (`/v1/chat/completions`, `Authorization: Bearer`, plain `fetch`, default `claude-sonnet-4-6`) · `file-type` magic-byte MIME · `biome` lint/format · unit tests co-located in `src/`, e2e in `tests/e2e/`.
+**Stack (locked in):** Bun 1.3.x (`bun test`, loads `.env`) · Slack `@slack/socket-mode` + `@slack/web-api` (not Bolt) · the model runs on the **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk` — spawns a claude-code subprocess; Claude-only, Bedrock or Anthropic backend; default model `claude-sonnet-4-6`) · `file-type` magic-byte MIME · `biome` lint/format · unit tests co-located in `src/`, e2e in `tests/e2e/`.
 
 ## Implementation state
 
@@ -29,7 +29,7 @@ Phase history, gotchas, and backlog live as GitHub issues — query directly, th
 ## Production runtime
 
 - **The agenta Fly deployment was torn down 2026-06-02** (#276) to stop recurring cost — `agenta-bot` (shared-cpu-1x + `agenta_data` volume), `agenta-sandbox`, and `agenta-sandbox-ecs` are all gone. There is no longer any agenta prod app: agenta runs only as the **dev bot** (local, see below) plus e2e in CI. The bot still runs the **combo** entrypoint role when stood up (bot + tenant co-located in one machine, the bot's `tenants.json` rendered at boot from env — see `Combo entrypoint (single-tenant deployment)` below), but nothing is deployed. CD (`.github/workflows/cd.yml`) is now **test-only**: pushing to `main` runs e2e on the docker sandbox provider (against the `agenta-ci` app so prod Socket Mode is untouched) and stops — no deploy, no canary. The Fly provider code (`src/tenant/sandbox/fly.ts`) and deploy/canary scripts stay in-tree as reference / a selectable `SANDBOX_PROVIDER` for OSS users.
-- **Also deployed as `acme` on ECS** — same image, combo entrypoint, on AWS ECS (`SANDBOX_PROVIDER=ecs`, Fargate sandboxes) as a *different* Slack app (`A0B5VLX7QUT`, bot `acme`/`U0B65LMHRLL`). Different app ⇒ separate event streams ⇒ **no split-brain** with the Fly `agenta` bot. ECS on-disk state + exec → the `debug-thread` skill. The acme/ECS **deployment** (infra CFN, deploy scripts, CD lane, Slack manifest) has been **extracted out of OSS core** into the private `acme-io/slack-agent` repo (step 2 of the repo split, #267): that repo consumes agenta as a pinned submodule, builds an overlay image (`AGENTA_EXTRA_TOOLS` + acme-specific tools/home), and deploys to AWS account `870494683302` / `eu-central-1` via the **GitHub OIDC** role `agenta-cd-github` (region-locked, trust-scoped to that repo's main) — **no static AWS keys**. The model is Bedrock (`bedrock://`) via the gateway in core (`src/tenant/model/gateway.ts`). Core keeps the generic ECS sandbox provider + Bedrock gateway but **no longer builds or deploys the acme stack** — core's CD is Fly-only. The new repo is **live** (`acme-io/slack-agent`, cutover 2026-06-01): submodule + overlay image (`agenta/` pinned), OIDC CD **proven green end-to-end** (overlay build → ECR → roll acme ECS → acme canary), and the `agenta-cd-github` trust is now scoped to **`acme-io/slack-agent` only** (eladb/agenta removed at cutover). The one thing **not** yet migrated: the host-local acme/ECS watchdog check stays **paused** in `~/.local/bin/canary-monitor.sh` pending a re-point. (Resource IDs + SSO/OIDC details in the `aws-account-migration` + `repo-split-oss-vs-acme` memories.)
+- **Also deployed as `acme` on ECS** — same image, combo entrypoint, on AWS ECS (`SANDBOX_PROVIDER=ecs`, Fargate sandboxes) as a *different* Slack app (`A0B5VLX7QUT`, bot `acme`/`U0B65LMHRLL`). Different app ⇒ separate event streams ⇒ **no split-brain** with the Fly `agenta` bot. ECS on-disk state + exec → the `debug-thread` skill. The acme/ECS **deployment** (infra CFN, deploy scripts, CD lane, Slack manifest) has been **extracted out of OSS core** into the private `acme-io/slack-agent` repo (step 2 of the repo split, #267): that repo consumes agenta as a pinned submodule, builds an overlay image (`AGENTA_EXTRA_TOOLS` + acme-specific tools/home), and deploys to AWS account `870494683302` / `eu-central-1` via the **GitHub OIDC** role `agenta-cd-github` (region-locked, trust-scoped to that repo's main) — **no static AWS keys**. The model is Bedrock (`bedrock://`) via the Claude Agent SDK in core (`CLAUDE_CODE_USE_BEDROCK=1`). Core keeps the generic ECS sandbox provider but **no longer builds or deploys the acme stack** — core's CD is Fly-only. The new repo is **live** (`acme-io/slack-agent`, cutover 2026-06-01): submodule + overlay image (`agenta/` pinned), OIDC CD **proven green end-to-end** (overlay build → ECR → roll acme ECS → acme canary), and the `agenta-cd-github` trust is now scoped to **`acme-io/slack-agent` only** (eladb/agenta removed at cutover). The one thing **not** yet migrated: the host-local acme/ECS watchdog check stays **paused** in `~/.local/bin/canary-monitor.sh` pending a re-point. (Resource IDs + SSO/OIDC details in the `aws-account-migration` + `repo-split-oss-vs-acme` memories.)
 - **Canary watchdog** (host-local, not CD). `install.sh` installs a `*/30` cron on the claude-agents host running `~/.local/bin/canary-monitor.sh` → historically the double canary (agenta/Fly + acme/ECS); on a confirmed red it Slack-alerts `C0B307LP274` and `agents send`s the agenta agent (oncall) to investigate + bounded-remediate (restart only — redeploy/scale/destroy/secret changes escalate). Reusable recipe = the `/canary` skill. **Both halves are now effectively idle**: the agenta/Fly target was torn down (#276, no app to canary), and the acme/ECS half is **paused** — acme deploys from `acme-io/slack-agent` (its own CD canaries acme on each deploy); re-pointing this host watchdog's acme check at that deployment is the remaining follow-up.
 - **AWS access on this host = Identity Center SSO** (not static keys). Profile `default` in `~/.aws/config` → sso-session `agenta` (start URL `https://identitycenter.amazonaws.com/ssoins-6684efb401bab46f`, region `us-east-2`), account `870494683302` (Dev), role `AdministratorAccess`. So bare `aws …` Just Works; no `--profile`/`--region` needed. SSO accounts reachable: `954242454057` Staging/PowerUserAccess · `074993325816` tulip-staging/AcmeDevsTulip · `870494683302` Dev/AdministratorAccess · `691811225051` Acme/{ViewOnlyAccess,AcmeDevs}.
   - **Re-login "dance" (headless remote host).** The token expires (~hours); `aws sso login --sso-session agenta` uses a PKCE auth-code flow whose redirect targets `http://127.0.0.1:<port>/oauth/callback` — but that loopback is on *this* box, unreachable from the operator's browser. So: run `aws sso login --sso-session agenta --no-browser` (in the background — it blocks on the listener), give the operator the printed `https://oidc.us-east-2.amazonaws.com/authorize?…` URL, they approve in their browser and the redirect *fails* — they copy the full `http://127.0.0.1:<port>/oauth/callback?code=…&state=…` URL from the address bar and paste it back. `curl` that exact URL **on this host** (`curl -s "http://127.0.0.1:<port>/oauth/callback?code=…&state=…"`) → the listener consumes the code → "Successfully logged into Start URL". The port is random per invocation; read it from the printed authorize URL's `redirect_uri`. (Cleaner alternative if it ever gets annoying: SSH-tunnel that callback port to the operator's laptop.)
@@ -45,7 +45,7 @@ Phase history, gotchas, and backlog live as GitHub issues — query directly, th
 The runtime splits into two roles, both built from one Docker image (two CMDs):
 
 - **Bot** (`bun run start:bot`) is the Slack ingress. It opens one Socket Mode connection per xapp, acks each envelope on receipt, resolves `(team_id, channel_id?)` against `config/tenants.json`, and POSTs an `EventEnvelope` (`envelope_id, type, workspace_id, xoxb, home, payload`) to the chosen tenant's `/events` URL. No disk writes, no model calls, no secrets beyond the per-tenant bearer + the Slack xoxb the envelope carries. `/health` is 200 iff Socket Mode is connected.
-- **Tenant** (`bun run start:tenant`) is the agent harness — the rest of `src/` (sessions, sandboxes, model gateway, JSONL store, git transport). It exposes `POST /events` (bearer-auth, SSE status stream: heartbeat/error/done) and `GET /health`. Slack ops use the request-scoped `xoxb` from the envelope — never persisted to disk. Recovery still clears stale `running`/`stopping` on boot but no longer posts a Slack notice (no WebClient at boot — accepted spec trade-off).
+- **Tenant** (`bun run start:tenant`) is the agent harness — the rest of `src/` (sessions, sandboxes, the Claude Agent SDK turn, JSONL store, git transport). It exposes `POST /events` (bearer-auth, SSE status stream: heartbeat/error/done) and `GET /health`. Slack ops use the request-scoped `xoxb` from the envelope — never persisted to disk. Recovery still clears stale `running`/`stopping` on boot but no longer posts a Slack notice (no WebClient at boot — accepted spec trade-off).
 
 A **deployment** is `{ bot, N tenants, sandboxes }` all on one cloud. Two deployments today: **agenta-Fly** (bot + `agentalabs` tenant + Fly sandboxes) and **acme-ECS** (bot + `agentalabs` tenant + Fargate sandboxes). Tenant names are deployment-local — same name in two deployments = two separate tenants. The customer is the tenant; the persona (agenta vs. acme) comes from the home repo.
 
@@ -101,7 +101,7 @@ src/
     routing.ts      decideRoute(socketEnv, config, xoxb): extracts (team_id, channel_id?), runs resolveRoute, mints EventEnvelope
     forward.ts      forwardToTenant: POST /events with bearer; drains SSE status stream (heartbeat/error/done)
     health.ts       startHealth: 200 iff Socket Mode connected, else 503
-  tenant/           agent harness. `bun run start:tenant`. Owns data volume, sessions, sandboxes, model gateway.
+  tenant/           agent harness. `bun run start:tenant`. Owns data volume, sessions, sandboxes, the Claude Agent SDK turn.
     index.ts        entry: env-check → lockfile('agent') → recoverInterruptedSessions (silent) → reap orphans → startHttp
     http.ts         POST /events (bearer-auth, SSE status events) + GET /health; hands envelope to runtime/handler
     prompt.ts       buildSystemPrompt(homeDir, envPrefix?): [prefix] + README.md + skills JSON. Pure, no Slack/sandbox deps.
@@ -126,7 +126,9 @@ src/
       home-config.ts  resolveHomeFromEnvelope(home, env) + resolveTransport(home) (pure: slug+transport+paths). No file IO — home spec arrives per request.
       recovery.ts     recoverInterruptedSessions: silently clears stale running/stopping (no boot-time Slack notice under #253)
       asks.ts         pending ask_user registry (≤1/thread); resolveByThreadText for text-override
-      turn.ts         runTurn: one Slack message/turn overwritten as it progresses; 🤔 reaction; injectSteering at boundaries; clears reactions in finally
+      sdk-turn.ts     runSdkTurn: THE turn — drives the Claude Agent SDK `query()`; 🤔 reaction handler-owned; guardLeadingSlash; records assistant/tool events to JSONL; resumes via sdk_session_id
+      sdk-stream.ts   maps the SDK message stream → the Slack streaming display (plan/timeline task cards + final markdown)
+      sdk-attachments.ts  buildUserContent: text-only → string prompt; attachments → one native multimodal user message (base64 inline)
     persistence/
       store.ts        data/{thread_key}/{messages.jsonl, attachments/, session.json}; AGENTA_DATA_DIR override
       events.ts       AgentaEvent union + record()
@@ -134,10 +136,11 @@ src/
       attachments.ts  downloadFiles via url_private_download; MIME from bytes
       backfill.ts     conversations.replies → record each, excluding the triggering ts
     model/
-      gateway.ts      createCallModel: fetch /chat/completions; tool_calls; OpenRouter-friendly headers
-      context.ts      buildMessages: JSONL → OpenAI messages; reattaches tool_calls; synthesizes orphan stubs
+      sdk/            the Claude Agent SDK bridge.
+        mcp-tools.ts       buildAgentaMcpServer: wraps the TOOLS registry as an in-process MCP server (allowedTools mcp__agenta__*); runs the requiresSandbox preamble before each sandbox tool
+        json-schema-to-zod.ts  shims each tool's JSON-Schema params into the zod shape the SDK MCP server wants
       tools/          one file per tool (def + describe + invoke); index.ts = TOOLS registry; _registry.test.ts = contracts.
-                      get-current-time, fetch_url, bash, read-file, write-file, edit-file, grep, glob, list-dir, ask-user, share-file.
+                      get-current-time, fetch_url, web-search, read-page, bash, read-file, write-file, edit-file, ask-user, share-file, github-create-pr, github-update-pr, github-pr-comment.
                       Extensible: index.ts:registerExtraTools(env) scans every dir in AGENTA_EXTRA_TOOLS for *.ts/*.js modules and
                       registers each default-export Tool/Tool[] alongside the built-ins (validated, fail-fast, no name collisions).
                       Called once at tenant boot (index.ts) so an overlay image can add tools without editing core source.
@@ -169,13 +172,12 @@ scripts/
   run-e2e.ts           fresh channel per run, one bun process per test file, archives on exit
   canary.ts            3-step prod smoke (chat → bash → /delete); AGENTA_DEPLOY_TARGET=fly|ecs picks the health gate
   canary-monitor.sh    */30 double-canary watchdog (deployed by install.sh → ~/.local/bin; wakes the oncall agent on red)
-tests/e2e/   helpers.ts (startAgent/startTester/mention/upload/waitForReply/shutdown) · fixtures.ts · *.test.ts
-tests/golden/  <file>/<name>.jsonl recorded (request,response) replayed positionally
+tests/e2e/   helpers.ts (startBotAndTenant/startTester/mention/upload/waitForReply/shutdown) · mock-model.ts (fake Anthropic SSE server) · fixtures.ts · *.test.ts
 ```
 
 ## Gotchas (not derivable from code)
 
-- **JSONL never contains base64.** `payload.files[].local_path` is the only attachment ref; base64 is built in-memory per model call (`context.ts:fileToContentPart`). Add a regression test if you change this.
+- **JSONL never contains base64.** `payload.files[].local_path` is the only attachment ref; base64 is built in-memory per turn (`sdk-attachments.ts:buildUserContent`). Add a regression test if you change this.
 - **MIME from bytes, not extension/Slack metadata.** `attachments.ts:downloadFiles` overwrites Slack's reported type. Hard product requirement.
 - **The tester is also a bot** (`event.bot_id` set). Filter only `event.user === agent.botUserId`, never `if (event.bot_id) return`.
 - **Slack uploads arrive as `subtype: "file_share"`.** `normalize()` whitelists `undefined | file_share | thread_broadcast`; everything else is dropped.
@@ -196,7 +198,7 @@ tests/golden/  <file>/<name>.jsonl recorded (request,response) replayed position
 
 ## Session + recovery semantics
 
-- **`session.json` per thread**: `{status, updated_at, sandbox?, git?, home?, model?}`, atomic temp+rename. `clearSession` rewrites `idle` (preserves sandbox/git/home/model); only `/delete` removes the file + thread dir + sandbox. `signalStop` writes `stopping` **before** `abort()` (else the turn's `finally{clearSession}` races ahead and leaves a stale `stopping`).
+- **`session.json` per thread**: `{status, updated_at, sandbox?, git?, home?, model?, sdk_session_id?}`, atomic temp+rename. `clearSession` rewrites `idle` (preserves sandbox/git/home/model/sdk_session_id — see the `session-preservation-invariant`); only `/delete` removes the file + thread dir + sandbox (+ a best-effort SDK `deleteSession`). `signalStop` writes `stopping` **before** `abort()` (else the turn's `finally{clearSession}` races ahead and leaves a stale `stopping`).
 - **System prompt rebuilds every mention** (not persisted) — edits to `UNIVERSAL_PROMPT_SUFFIX` and the home repo's `README.md`/`skills/` propagate to existing threads on next mention; `refreshHomeMirror` runs first. home/model still freeze per thread. Adding Anthropic prompt caching would break this.
 - **On boot** the tenant's `recoverInterruptedSessions` silently clears stale `running`/`stopping` entries to `idle`. Under the bot↔tenant split (#253) there's no WebClient at boot, so the "agent restarted" Slack notice is gone — interrupted threads see a frozen partial message until the next mention re-triggers work. Per-entry errors don't abort the sweep.
 
@@ -214,13 +216,13 @@ tests/golden/  <file>/<name>.jsonl recorded (request,response) replayed position
 
 **Bot (`bun run start:bot`):** `SLACK_APP_TOKEN` (xapp-) · `SLACK_BOT_TOKEN` (xoxb-) · `TENANTS_JSON_PATH` (default `<repo>/config/tenants.json`; schema in `src/shared/types.ts`/`config/tenants.example.json`; route table + per-tenant URL + per-channel home spec; `auth_env` references resolve against the bot's env for the tenant-secret slot and stay unresolved for the home slot — the bot forwards the NAME, the tenant resolves it) · per-tenant `<auth_env>` (shared bearer the bot uses to call the tenant's `/events`).
 
-**Tenant (`bun run start:tenant`):** `TENANT_SECRET` (the bot's matching bearer) · `MODEL_API_KEY` (falls back to `ANTHROPIC_API_KEY`) · `AGENT_HOMES_ROOT` (mirror root, default `/data/homes`; slug = `<host>-<sanitized-path>` lowercased) · `GITHUB_TOKEN` (PAT for the default https home; Fly secret) · `auth_env` referenced by any direct (`ssh://`/`git@`) channel home (Fly secret holding the deploy-key PEM).
+**Tenant (`bun run start:tenant`):** `TENANT_SECRET` (the bot's matching bearer) · model backend for the SDK — **Bedrock**: `CLAUDE_CODE_USE_BEDROCK=1` + `AWS_BEARER_TOKEN_BEDROCK` + `AWS_REGION` + `MODEL_NAME=bedrock://…` (or a bare Bedrock id); **Anthropic**: `ANTHROPIC_API_KEY` + a `claude-*` `MODEL_NAME`. The tenant still needs `MODEL_API_KEY`/`ANTHROPIC_API_KEY` present so it can build the per-thread model triplet (only `MODEL_NAME` matters for Bedrock). · `AGENT_HOMES_ROOT` (mirror root, default `/data/homes`; slug = `<host>-<sanitized-path>` lowercased) · `GITHUB_TOKEN` (PAT for the default https home; Fly secret) · `auth_env` referenced by any direct (`ssh://`/`git@`) channel home (Fly secret holding the deploy-key PEM).
 
 **E2E:** all runtime vars + `TEST_APP_TOKEN`, `TEST_BOT_TOKEN`, `TEST_CHANNEL_ID`.
 
 **Optional, bot-only:** `HEALTH_PORT` (default 8080; `fly.toml` polls this).
 
-**Optional, tenant-only:** `AGENTA_DATA_DIR` · `MODEL_NAME` (default `claude-sonnet-4-6`) · `MODEL_BASE_URL` (default `https://api.anthropic.com/v1`; **prod sets API_KEY+BASE_URL+NAME together as Fly secrets — if BASE_URL is unset the key goes to api.anthropic.com → 401; rotate all three together**) · `SYSTEM_PROMPT` (prepended to README) · `AGENT_HOME_DIR` (test-only prompt-source override) · `SANDBOX_PROVIDER` (docker|fly|ecs) · `SANDBOX_EGRESS` (allow|block) · `FLY_APP_NAME`+`FLY_API_TOKEN` (when fly) · `FLY_REGION` · `SANDBOX_EXEC_TIMEOUT_MS` (default 60s) · `HEALTH_PORT` (default 8080; `/events` + `/health` share the same Bun.serve) · `AGENTA_EXTRA_TOOLS` (comma-separated dirs scanned at boot for extra `*.ts`/`*.js` tool modules — each default-exports a `Tool`/`Tool[]` registered alongside the built-ins; unset ⇒ built-ins only; used by overlay images to add tools without editing core).
+**Optional, tenant-only:** `AGENTA_DATA_DIR` · `MODEL_NAME` (default `claude-sonnet-4-6`) · `SYSTEM_PROMPT` (prepended to README) · `AGENT_HOME_DIR` (test-only prompt-source override) · `SANDBOX_PROVIDER` (docker|fly|ecs) · `SANDBOX_EGRESS` (allow|block) · `FLY_APP_NAME`+`FLY_API_TOKEN` (when fly) · `FLY_REGION` · `SANDBOX_EXEC_TIMEOUT_MS` (default 60s) · `HEALTH_PORT` (default 8080; `/events` + `/health` share the same Bun.serve) · `AGENTA_EXTRA_TOOLS` (comma-separated dirs scanned at boot for extra `*.ts`/`*.js` tool modules — each default-exports a `Tool`/`Tool[]` registered alongside the built-ins; unset ⇒ built-ins only; used by overlay images to add tools without editing core). `MODEL_BASE_URL`/`MODEL_API_KEY` linger from the deleted OpenAI-compat gateway — the SDK ignores them (the SDK is Claude-only).
 
 **Setup script (rotate every 12h):** `SLACK_CONFIG_ACCESS_TOKEN`, `SLACK_CONFIG_REFRESH_TOKEN`.
 
@@ -247,12 +249,12 @@ bun run deploy         # deploy-bot-fly.ts: agenta-bot + agenta_data in iad
 
 ## Tests
 
-- **Unit** next to source; never touch Slack/Anthropic (`attachments`/`gateway` stub `fetch`).
-- **E2E** boot bot + tenant in-process against real Slack (`helpers.ts:startBotAndTenant` opens Socket Mode in the bot and `POST /events` on a loopback port for the tenant, then wires a one-tenant `tenants.json` pointing at it); **the model is stubbed** (`stubCallModel` records each `messages` array into `stubCalls[]`, returns `stub: <last user text>`). Clean up Slack mutations in `afterAll`. No real-model e2e (cost/flake) — gate behind a flag if ever needed. `run-e2e.ts` runs each file with `--timeout 180000` and `helpers.ts` `waitFor`/`waitForReply` default to 90s — both raised for the slower docker-in-CI sandbox after CD moved e2e off Fly (#276); pass an explicit `timeoutMs` for known-slow/-fast steps.
+- **Unit** next to source; never touch Slack/Anthropic (`attachments` stubs `fetch`; the model runs through the SDK, which e2e points at the mock-model server).
+- **E2E** boot bot + tenant in-process against real Slack (`helpers.ts:startBotAndTenant` opens Socket Mode in the bot and `POST /events` on a loopback port for the tenant, then wires a one-tenant `tenants.json` pointing at it). **The model is a real SDK subprocess pointed at `tests/e2e/mock-model.ts`** — a fake Anthropic `/v1/messages` SSE server reached via `ANTHROPIC_BASE_URL`; tests script turns with `agent.mock.setTurns([...])` / `gateNextTurn()` and assert on real Slack/JSONL/sandbox effects + `agent.mock.requests`. The SDK appends an AI-disclaimer suffix to replies → match with `.includes`, never `===`. Clean up Slack mutations in `afterAll`. No real-Bedrock e2e (cost/flake). `run-e2e.ts` runs each file with `--timeout 240000` and `helpers.ts` `waitFor`/`waitForReply` default to 120s — both raised for the slower docker-in-CI sandbox + SDK cold-start; pass an explicit `timeoutMs` for known-slow/-fast steps.
 
 ## Git / GitHub
 
-- Repo `git@github.com:eladb/agenta.git` (private, `eladb`). Default branch `main`. Commit trailer `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
+- Repo `git@github.com:eladb/agenta.git` (private, `eladb`). Default branch `main`. Commit trailer `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 - **Conventional Commits mandatory** for commit subjects AND PR titles: `<type>(<scope>): <subject> (#NN)`. Types: feat/fix/docs/chore/refactor/test/perf/build/ci/style/revert. `(#NN)` required.
 - **Branch protection** `main-protection` (id `16501910`): requires `unit-tests`, blocks force-push + deletion, no bypass.
 - **Auto-merge is the default** — `change-workflow` runs `gh pr merge <N> --auto --squash --delete-branch` right after create.
