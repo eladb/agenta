@@ -135,7 +135,7 @@ describe('runSdkTurn via mock model — no-sandbox tool', () => {
     const { driver, appended, finals } = makeDriverStub();
     try {
       await seedMention(input.threadKey, 'what time is it?');
-      await runSdkTurn(NO_WEB, 'you are a test agent', input, undefined, 'task_update', MODEL, {
+      await runSdkTurn(NO_WEB, 'you are a test agent', input, undefined, MODEL, {
         driver,
       });
     } finally {
@@ -193,7 +193,7 @@ describe('runSdkTurn via mock model — multi-turn resume', () => {
     const { driver: d1 } = makeDriverStub();
     try {
       await seedMention(tk, 'first question');
-      await runSdkTurn(NO_WEB, 'sys', turnInput, undefined, 'task_update', MODEL, {
+      await runSdkTurn(NO_WEB, 'sys', turnInput, undefined, MODEL, {
         driver: d1,
       });
     } finally {
@@ -210,7 +210,7 @@ describe('runSdkTurn via mock model — multi-turn resume', () => {
     let capturedResume: unknown;
     try {
       await seedMention(tk, 'second question');
-      await runSdkTurn(NO_WEB, 'sys', turnInput, undefined, 'task_update', MODEL, {
+      await runSdkTurn(NO_WEB, 'sys', turnInput, undefined, MODEL, {
         driver: d2,
         // Intercept the options to assert resume is threaded; delegate to the
         // real query so the turn still completes against the mock.
@@ -236,17 +236,9 @@ describe('runSdkTurn via mock model — session persistence (#308)', () => {
     const { driver } = makeDriverStub();
     try {
       await seedMention(tk, 'remember this');
-      await runSdkTurn(
-        NO_WEB,
-        'sys',
-        { ...input, threadKey: tk },
-        undefined,
-        'task_update',
-        MODEL,
-        {
-          driver,
-        },
-      );
+      await runSdkTurn(NO_WEB, 'sys', { ...input, threadKey: tk }, undefined, MODEL, {
+        driver,
+      });
     } finally {
       await mock.stop();
     }
@@ -269,17 +261,9 @@ describe('runSdkTurn via mock model — session persistence (#308)', () => {
     const { driver, finals } = makeDriverStub();
     try {
       // Must NOT throw — the turn falls back to a fresh session.
-      await runSdkTurn(
-        NO_WEB,
-        'sys',
-        { ...input, threadKey: tk },
-        undefined,
-        'task_update',
-        MODEL,
-        {
-          driver,
-        },
-      );
+      await runSdkTurn(NO_WEB, 'sys', { ...input, threadKey: tk }, undefined, MODEL, {
+        driver,
+      });
     } finally {
       await mock.stop();
     }
@@ -292,7 +276,7 @@ describe('runSdkTurn via mock model — session persistence (#308)', () => {
 });
 
 // A minimal stub WebClient for ask_user: it only needs chat.postMessage (to
-// post the interactive blocks in stream/task_update mode) to return a ts and
+// post the interactive blocks as a separate thread message) to return a ts and
 // record the posted blocks. Everything else ask_user touches in this path is
 // the in-process asks registry.
 function makeWebStub(): {
@@ -361,17 +345,9 @@ describe('runSdkTurn via mock model — ask_user (#305)', () => {
       await seedMention(tk, 'pick a color');
       // ask_user BLOCKS inside the MCP handler, so don't await the turn yet —
       // resolve the pending ask out of band, then await completion.
-      const turnDone = runSdkTurn(
-        web,
-        'you are a test agent',
-        askInput,
-        undefined,
-        'task_update',
-        MODEL,
-        {
-          driver,
-        },
-      );
+      const turnDone = runSdkTurn(web, 'you are a test agent', askInput, undefined, MODEL, {
+        driver,
+      });
       const ask = await waitForPendingAsk(tk);
       ask.resolve('green');
       await turnDone;
@@ -455,7 +431,7 @@ describe('runSdkTurn via mock model — ask_user (#305)', () => {
 
     try {
       await seedMention(tk, 'proceed?');
-      const turnDone = runSdkTurn(web, 'sys', askInput, ac.signal, 'task_update', MODEL, {
+      const turnDone = runSdkTurn(web, 'sys', askInput, ac.signal, MODEL, {
         driver,
       });
       await waitForPendingAsk(tk);
@@ -522,17 +498,9 @@ describe('runSdkTurn via mock model — full sandbox tool chain', () => {
         // Pre-provision the sandbox so the tools find a ready container.
         await ensureContainer(chainInput.threadKey);
         await seedMention(chainInput.threadKey, 'write hello sdk to note.txt and read it back');
-        await runSdkTurn(
-          NO_WEB,
-          'you are a test agent',
-          chainInput,
-          undefined,
-          'task_update',
-          MODEL,
-          {
-            driver,
-          },
-        );
+        await runSdkTurn(NO_WEB, 'you are a test agent', chainInput, undefined, MODEL, {
+          driver,
+        });
       } finally {
         await mock.stop();
       }

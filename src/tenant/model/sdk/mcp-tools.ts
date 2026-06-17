@@ -23,7 +23,7 @@ const EXCLUDED = new Set<string>([]);
 //   handler     = calls the existing Tool.invoke(args, ctxFactory(), signal)
 //
 // ctxFactory is called per invocation so each turn threads its own ToolContext
-// (threadKey, Slack hooks, onProgress, streamMode) via closure. signal is the
+// (threadKey, Slack hooks, onProgress) via closure. signal is the
 // turn-level AbortSignal (/stop) forwarded to every tool.
 export function buildAgentaMcpServer(
   ctxFactory: () => ToolContext,

@@ -1,12 +1,6 @@
-export type Command = 'stop' | 'delete' | 'verbose' | 'pretty' | 'task_update';
+export type Command = 'stop' | 'delete';
 
-const COMMANDS: ReadonlySet<string> = new Set([
-  'stop',
-  'delete',
-  'verbose',
-  'pretty',
-  'task_update',
-]);
+const COMMANDS: ReadonlySet<string> = new Set(['stop', 'delete']);
 
 export function parseCommand(textWithoutMention: string): Command | null {
   const trimmed = textWithoutMention.trim();

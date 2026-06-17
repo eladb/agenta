@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { parseDisplayStyleEnv, resolveHomeFromEnvelope, resolveTransport } from './home-config';
+import { resolveHomeFromEnvelope, resolveTransport } from './home-config';
 
 // Under #253 the home spec arrives in each `/events` envelope and is
 // validated by `resolveHomeFromEnvelope` against the tenant's process
@@ -181,37 +181,5 @@ describe('resolveTransport', () => {
 
   test('unparseable remote URL throws with the offending value', () => {
     expect(() => resolveTransport({ remote: 'not even close' })).toThrow(/unparseable remote/);
-  });
-});
-
-// Per-deploy default display style (#287). The helper is pure (takes the raw
-// env value as an arg) so we test it without booting the server. Precedence
-// over a per-thread command is enforced in handler.ts, not here — this only
-// covers parse + validate.
-describe('parseDisplayStyleEnv', () => {
-  test('valid styles → { style }', () => {
-    expect(parseDisplayStyleEnv('verbose')).toEqual({ style: 'verbose' });
-    expect(parseDisplayStyleEnv('pretty')).toEqual({ style: 'pretty' });
-    expect(parseDisplayStyleEnv('task_update')).toEqual({ style: 'task_update' });
-  });
-
-  test('surrounding whitespace is tolerated', () => {
-    expect(parseDisplayStyleEnv('  task_update  ')).toEqual({ style: 'task_update' });
-  });
-
-  test('unset → undefined (preserves verbose default)', () => {
-    expect(parseDisplayStyleEnv(undefined)).toBeUndefined();
-  });
-
-  test('empty / whitespace-only → undefined', () => {
-    expect(parseDisplayStyleEnv('')).toBeUndefined();
-    expect(parseDisplayStyleEnv('   ')).toBeUndefined();
-  });
-
-  test('invalid value → undefined, does not throw', () => {
-    expect(() => parseDisplayStyleEnv('fancy')).not.toThrow();
-    expect(parseDisplayStyleEnv('fancy')).toBeUndefined();
-    // Case-sensitive: the union is lowercase.
-    expect(parseDisplayStyleEnv('VERBOSE')).toBeUndefined();
   });
 });

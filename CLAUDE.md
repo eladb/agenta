@@ -196,8 +196,8 @@ tests/golden/  <file>/<name>.jsonl recorded (request,response) replayed position
 
 ## Session + recovery semantics
 
-- **`session.json` per thread**: `{status, updated_at, sandbox?, git?, home?, model?, display?}`, atomic temp+rename. `clearSession` rewrites `idle` (preserves sandbox/git/home/model/display); only `/delete` removes the file + thread dir + sandbox. `signalStop` writes `stopping` **before** `abort()` (else the turn's `finally{clearSession}` races ahead and leaves a stale `stopping`).
-- **System prompt rebuilds every mention** (not persisted) — edits to `UNIVERSAL_PROMPT_SUFFIX` and the home repo's `README.md`/`skills/` propagate to existing threads on next mention; `refreshHomeMirror` runs first. home/model/display still freeze per thread. Adding Anthropic prompt caching would break this.
+- **`session.json` per thread**: `{status, updated_at, sandbox?, git?, home?, model?}`, atomic temp+rename. `clearSession` rewrites `idle` (preserves sandbox/git/home/model); only `/delete` removes the file + thread dir + sandbox. `signalStop` writes `stopping` **before** `abort()` (else the turn's `finally{clearSession}` races ahead and leaves a stale `stopping`).
+- **System prompt rebuilds every mention** (not persisted) — edits to `UNIVERSAL_PROMPT_SUFFIX` and the home repo's `README.md`/`skills/` propagate to existing threads on next mention; `refreshHomeMirror` runs first. home/model still freeze per thread. Adding Anthropic prompt caching would break this.
 - **On boot** the tenant's `recoverInterruptedSessions` silently clears stale `running`/`stopping` entries to `idle`. Under the bot↔tenant split (#253) there's no WebClient at boot, so the "agent restarted" Slack notice is gone — interrupted threads see a frozen partial message until the next mention re-triggers work. Per-entry errors don't abort the sweep.
 
 ## Slack apps + IDs (workspace `agentalabs` / T0B304AJPUZ)

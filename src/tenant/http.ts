@@ -24,11 +24,7 @@ import { WebClient } from '@slack/web-api';
 import { log } from '../shared/log';
 import type { EventEnvelope, HomeSpec } from '../shared/types';
 import { makeEventHandler } from './runtime/handler';
-import {
-  type ModelTriplet,
-  parseDisplayStyleEnv,
-  resolveHomeFromEnvelope,
-} from './runtime/home-config';
+import { type ModelTriplet, resolveHomeFromEnvelope } from './runtime/home-config';
 import { normalize, type RawEvent } from './slack/events';
 import { handleInteractivePayload } from './slack/interactive';
 
@@ -196,12 +192,7 @@ async function dispatch(
   const handler = makeEventHandler(web, envelope.xoxb, botUserId, {
     home,
     fallbackModel,
-    // Per-deploy default display style (#287). Undefined unless
-    // AGENTA_DISPLAY_STYLE is set + valid; the handler falls back to
-    // `verbose` when absent, and a per-thread /verbose|/pretty|/task_update
-    // command still overrides this (frozen in session.json).
-    display: parseDisplayStyleEnv(process.env.AGENTA_DISPLAY_STYLE),
-    // The team id for the `task_update` streaming recipient pair (#285).
+    // The team id for the Slack streaming recipient pair (#285).
     workspaceId: envelope.workspace_id,
   });
   await handler(normalized);
