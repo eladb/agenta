@@ -21,7 +21,7 @@ function startServer(opts?: { ready?: boolean }) {
     port: 0,
     hostname: '127.0.0.1',
     tenantSecret: SECRET,
-    fallbackModel: { name: 'm', base_url: 'http://x', api_key_env: 'NOPE' },
+    fallbackModel: { name: 'm' },
     readyRef,
   });
   return {

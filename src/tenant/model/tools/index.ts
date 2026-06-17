@@ -1,7 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { log } from '../../../shared/log';
-import type { ToolDef } from './types';
 import { askUser } from './ask-user';
 import { bash, formatBashResult } from './bash';
 import { editFileTool } from './edit-file';
@@ -21,9 +20,9 @@ import { writeFileTool } from './write-file';
 export type { Tool, ToolContext, ToolProgressChunk };
 export { formatBashResult };
 
-// Tool registry. Keys must match each tool's def.function.name — TOOL_DEFS
-// is derived from the values, and invokeTool looks up by the key the model
-// emits in its tool_call.function.name.
+// Tool registry. Keys must match each tool's def.function.name — mcp-tools.ts
+// iterates the values to build the SDK tool list, and invokeTool looks up by
+// the key the model emits in its tool_call.function.name.
 export const TOOLS: Record<string, Tool> = {
   get_current_time: getCurrentTime,
   fetch_url: fetchUrl,
@@ -39,18 +38,6 @@ export const TOOLS: Record<string, Tool> = {
   github_update_pr: githubUpdatePr,
   github_pr_comment: githubPrComment,
 };
-
-// Live ESM binding consumed by turn.ts. `let` (not `const`) so the extra-tools
-// loader can recompute it after registering overlay tools; ESM named exports
-// are live, so turn.ts sees the refreshed array without re-importing.
-export let TOOL_DEFS: ToolDef[] = Object.values(TOOLS).map((t) => t.def);
-
-// Recompute TOOL_DEFS from the current TOOLS registry. Called after the overlay
-// loader mutates TOOLS (below), and exported so tests that inject/remove a tool
-// can restore the live-binding array without leaking into later tests.
-export function rebuildToolDefs(): void {
-  TOOL_DEFS = Object.values(TOOLS).map((t) => t.def);
-}
 
 // Validates one candidate against the same contract _registry.test.ts enforces
 // for built-ins. Throws on any problem so a broken overlay fails boot loudly
@@ -91,7 +78,7 @@ function assertValidTool(tool: unknown, source: string): asserts tool is Tool {
 // throws on the first problem — a name colliding with a built-in or another
 // extra tool is an error, never a silent override. Unset env ⇒ no-op (built-ins
 // only). Call once at tenant boot before any turn runs; it mutates TOOLS in
-// place and recomputes TOOL_DEFS.
+// place.
 export async function registerExtraTools(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const raw = env.AGENTA_EXTRA_TOOLS;
   if (!raw || raw.trim().length === 0) return;
@@ -133,8 +120,6 @@ export async function registerExtraTools(env: NodeJS.ProcessEnv = process.env): 
       }
     }
   }
-
-  rebuildToolDefs();
 }
 
 export async function invokeTool(

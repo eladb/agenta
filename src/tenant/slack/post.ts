@@ -19,10 +19,6 @@ export async function postInThread(
   return res.ts;
 }
 
-export async function deleteMessage(web: WebClient, channel: string, ts: string): Promise<void> {
-  await web.chat.delete({ channel, ts }).catch(() => {});
-}
-
 export async function addReaction(
   web: WebClient,
   channel: string,
@@ -53,19 +49,6 @@ export async function removeReaction(
   }
 }
 
-export async function editMessage(
-  web: WebClient,
-  channel: string,
-  ts: string,
-  text: string,
-): Promise<void> {
-  // Always pass blocks: [] so a previous chat.update that set blocks (e.g.
-  // ask_user rendering interactive elements on the checklist message) gets
-  // cleared when we switch back to plain text. Without this, Slack keeps
-  // the old blocks and the buttons stay visible after the ask resolved.
-  await web.chat.update({ channel, ts, text: mdToMrkdwn(text), blocks: [] });
-}
-
 export async function postBlocksInThread(
   web: WebClient,
   channel: string,
@@ -79,4 +62,3 @@ export async function postBlocksInThread(
   if (!res.ts) throw new Error('chat.postMessage returned no ts');
   return res.ts;
 }
-

@@ -113,12 +113,3 @@ export function buildAskBlocks(
     }
   }
 }
-
-export function buildSettledBlocks(question: string, answerLine: string): Block[] {
-  return [
-    {
-      type: 'section',
-      text: { type: 'mrkdwn', text: `*${question}*\n${answerLine}` },
-    },
-  ];
-}
