@@ -26,22 +26,18 @@ describe('TOOLS registry', () => {
 });
 
 describe('Tool contract', () => {
-  test('every tool def name matches its TOOLS key', () => {
+  test('every tool name matches its TOOLS key', () => {
     for (const [key, tool] of Object.entries(TOOLS)) {
-      expect(tool.def.function.name).toBe(key);
+      expect(tool.name).toBe(key);
     }
   });
 
-  test('every tool has a describe() and it is safe on malformed input', () => {
+  test('every tool has a non-empty description and a params object', () => {
     for (const [, tool] of Object.entries(TOOLS)) {
-      expect(typeof tool.describe).toBe('function');
-      expect(() => tool.describe?.(null)).not.toThrow();
-      expect(() => tool.describe?.({})).not.toThrow();
-      const out = tool.describe?.({});
-      expect(typeof out).toBe('string');
-      expect((out ?? '').length).toBeGreaterThan(0);
-      // Must stay single-line for the Slack checklist.
-      expect((out ?? '').includes('\n')).toBe(false);
+      expect(typeof tool.description).toBe('string');
+      expect(tool.description.length).toBeGreaterThan(0);
+      expect(typeof tool.params).toBe('object');
+      expect(tool.params).not.toBeNull();
     }
   });
 });
@@ -74,8 +70,9 @@ describe('registerExtraTools', () => {
 
   const goodTool = (name: string): string => `
 export default {
-  def: { type: 'function', function: { name: '${name}', description: 'x', parameters: { type: 'object', properties: {} } } },
-  describe: () => '${name} run',
+  name: '${name}',
+  description: 'x',
+  params: { type: 'object', properties: {} },
   invoke: async () => 'ok from ${name}',
 };
 `;
@@ -105,25 +102,23 @@ export default {
     await expect(registerExtraTools({ AGENTA_EXTRA_TOOLS: dir })).rejects.toThrow(/collides/);
   });
 
-  test('throws on a malformed module (missing describe)', async () => {
+  test('throws on a malformed module (missing description)', async () => {
     const dir = await mkDir();
     await writeFile(
       join(dir, 'bad.ts'),
-      `export default { def: { type: 'function', function: { name: 'broken_tool' } }, invoke: async () => 'x' };`,
+      `export default { name: 'broken_tool', invoke: async () => 'x' };`,
     );
-    await expect(registerExtraTools({ AGENTA_EXTRA_TOOLS: dir })).rejects.toThrow(/describe/);
+    await expect(registerExtraTools({ AGENTA_EXTRA_TOOLS: dir })).rejects.toThrow(/description/);
     // Failed registration must not leak a partial entry.
     expect(TOOLS.broken_tool).toBeUndefined();
   });
 
-  test('throws on a bad def (missing function.name)', async () => {
+  test('throws on a bad tool (missing name)', async () => {
     const dir = await mkDir();
     await writeFile(
       join(dir, 'noname.ts'),
-      `export default { def: { type: 'function', function: {} }, describe: () => 'x', invoke: async () => 'x' };`,
+      `export default { description: 'x', params: { type: 'object' }, invoke: async () => 'x' };`,
     );
-    await expect(registerExtraTools({ AGENTA_EXTRA_TOOLS: dir })).rejects.toThrow(
-      /def\.function\.name/,
-    );
+    await expect(registerExtraTools({ AGENTA_EXTRA_TOOLS: dir })).rejects.toThrow(/has no name/);
   });
 });

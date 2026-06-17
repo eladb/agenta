@@ -26,33 +26,18 @@ function parseArgs(raw: unknown): Args {
 }
 
 export const githubUpdatePr: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'github_update_pr',
-      description:
-        "Update a GitHub pull request's title and/or body. Returns the PR URL on success.",
-      parameters: {
-        type: 'object',
-        properties: {
-          repo: { type: 'string', description: 'Target repo in `owner/name` form' },
-          pull_number: { type: 'number', description: 'PR number to update' },
-          title: { type: 'string', description: 'New PR title (optional)' },
-          body: { type: 'string', description: 'New PR body markdown (optional)' },
-        },
-        required: ['repo', 'pull_number'],
-        additionalProperties: false,
-      },
+  name: 'github_update_pr',
+  description: "Update a GitHub pull request's title and/or body. Returns the PR URL on success.",
+  params: {
+    type: 'object',
+    properties: {
+      repo: { type: 'string', description: 'Target repo in `owner/name` form' },
+      pull_number: { type: 'number', description: 'PR number to update' },
+      title: { type: 'string', description: 'New PR title (optional)' },
+      body: { type: 'string', description: 'New PR body markdown (optional)' },
     },
-  },
-  describe: (raw) => {
-    const a = (raw && typeof raw === 'object' ? raw : {}) as {
-      repo?: unknown;
-      pull_number?: unknown;
-    };
-    const repo = typeof a.repo === 'string' ? a.repo : '?';
-    const pr = typeof a.pull_number === 'number' ? `#${a.pull_number}` : '#?';
-    return `update PR ${repo}${pr}`;
+    required: ['repo', 'pull_number'],
+    additionalProperties: false,
   },
   invoke: async (raw, _ctx, signal) => {
     const args = parseArgs(raw);

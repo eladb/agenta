@@ -4,33 +4,22 @@ import type { Tool } from './types';
 const WRITE_CAP = 64 * 1024;
 
 export const writeFileTool: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'write_file',
-      description:
-        'Write a text file in the sandbox, overwriting if it exists. Parent directories are created automatically. Maximum content size is 64 KB.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Path to write (absolute or relative to the workspace, ~).',
-          },
-          content: { type: 'string', description: 'Text content to write.' },
-        },
-        required: ['path', 'content'],
-        additionalProperties: false,
+  name: 'write_file',
+  description:
+    'Write a text file in the sandbox, overwriting if it exists. Parent directories are created automatically. Maximum content size is 64 KB.',
+  params: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description: 'Path to write (absolute or relative to the workspace, ~).',
       },
+      content: { type: 'string', description: 'Text content to write.' },
     },
+    required: ['path', 'content'],
+    additionalProperties: false,
   },
   requiresSandbox: true,
-  describe: (args) => {
-    const a = args as { path?: unknown; content?: unknown } | null;
-    const path = typeof a?.path === 'string' ? a.path : '?';
-    const len = typeof a?.content === 'string' ? a.content.length : 0;
-    return `write ${path} (${len} chars)`;
-  },
   invoke: async (args, ctx, signal) => {
     const path = (args as { path?: unknown } | null)?.path;
     const content = (args as { content?: unknown } | null)?.content;

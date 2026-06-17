@@ -58,20 +58,14 @@ describe('buildAgentaMcpServer — invocation routing', () => {
     let seenSignal: AbortSignal | undefined;
 
     const fake: Tool = {
-      def: {
-        type: 'function',
-        function: {
-          name: FAKE,
-          description: 'probe',
-          parameters: {
-            type: 'object',
-            properties: { value: { type: 'string' } },
-            required: ['value'],
-            additionalProperties: false,
-          },
-        },
+      name: FAKE,
+      description: 'probe',
+      params: {
+        type: 'object',
+        properties: { value: { type: 'string' } },
+        required: ['value'],
+        additionalProperties: false,
       },
-      describe: () => 'probe',
       invoke: async (args, ctx, signal) => {
         seenArgs = args;
         seenCtx = ctx;
@@ -102,15 +96,9 @@ describe('buildAgentaMcpServer — invocation routing', () => {
 
   test('a throwing tool surfaces as isError text', async () => {
     const boom: Tool = {
-      def: {
-        type: 'function',
-        function: {
-          name: FAKE,
-          description: 'boom',
-          parameters: { type: 'object', properties: {}, additionalProperties: false },
-        },
-      },
-      describe: () => 'boom',
+      name: FAKE,
+      description: 'boom',
+      params: { type: 'object', properties: {}, additionalProperties: false },
       invoke: async () => {
         throw new Error('kaboom');
       },
@@ -155,23 +143,17 @@ describe('buildAgentaMcpServer — AGENTA_EXTRA_TOOLS overlay (Phase 5 / #282)',
     writeFileSync(
       join(tmp, 'deploy.ts'),
       `export default {
-  def: {
-    type: 'function',
-    function: {
-      name: '${OVERLAY}',
-      description: 'Deploy the acme stack to an environment.',
-      parameters: {
-        type: 'object',
-        properties: {
-          env: { type: 'string', enum: ['dev', 'prod'], description: 'target env' },
-          dry_run: { type: 'boolean', description: 'plan only' },
-        },
-        required: ['env'],
-        additionalProperties: false,
-      },
+  name: '${OVERLAY}',
+  description: 'Deploy the acme stack to an environment.',
+  params: {
+    type: 'object',
+    properties: {
+      env: { type: 'string', enum: ['dev', 'prod'], description: 'target env' },
+      dry_run: { type: 'boolean', description: 'plan only' },
     },
+    required: ['env'],
+    additionalProperties: false,
   },
-  describe: () => 'acme deploy',
   invoke: async (args) => 'deployed to ' + args.env + (args.dry_run ? ' (dry-run)' : ''),
 };
 `,

@@ -1,15 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { bash, formatBashResult } from './bash';
+import { formatBashResult } from './bash';
 import { invokeTool } from './index';
 
 const CTX = { threadKey: 'unit-test' };
 
 describe('bash', () => {
-  test('describe()', () => {
-    expect(bash.describe?.({ command: 'ls -la' })).toBe('$ ls -la');
-    expect(bash.describe?.({})).toBe('$ (missing command)');
-  });
-
   test('error: missing command', async () => {
     const r = await invokeTool('bash', '{}', CTX);
     expect(r.error).toBe(true);

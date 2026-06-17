@@ -1,4 +1,4 @@
-import { oneLine, strArg, truncate } from './helpers';
+import { strArg, truncate } from './helpers';
 import type { Tool } from './types';
 
 const TIMEOUT_MS = 10_000;
@@ -10,29 +10,20 @@ const TAVILY_URL = 'https://api.tavily.com/search';
 type TavilyResult = { title?: unknown; url?: unknown; content?: unknown };
 
 export const webSearch: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'web_search',
-      description:
-        'Web search via Tavily. Returns a list of {title, url, snippet} results for the given query. Use fetch_url to read a specific result in full.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'The search query' },
-          max_results: {
-            type: 'number',
-            description: `Maximum number of results (default ${DEFAULT_MAX_RESULTS}, cap ${HARD_MAX_RESULTS})`,
-          },
-        },
-        required: ['query'],
-        additionalProperties: false,
+  name: 'web_search',
+  description:
+    'Web search via Tavily. Returns a list of {title, url, snippet} results for the given query. Use fetch_url to read a specific result in full.',
+  params: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'The search query' },
+      max_results: {
+        type: 'number',
+        description: `Maximum number of results (default ${DEFAULT_MAX_RESULTS}, cap ${HARD_MAX_RESULTS})`,
       },
     },
-  },
-  describe: (args) => {
-    const q = strArg(args, 'query');
-    return q ? `web_search: ${oneLine(q, 60)}` : 'web_search (no query)';
+    required: ['query'],
+    additionalProperties: false,
   },
   invoke: async (args, _ctx, signal) => {
     const query = strArg(args, 'query');
