@@ -58,6 +58,20 @@ export function stripBedrockScheme(model: string): string {
   return model.replace(/^bedrock:\/\//, '');
 }
 
+// The Claude Agent SDK parses any prompt that starts with `/` as a slash
+// command — it's intercepted ("/<x> isn't available in this environment") and
+// never reaches the model. agenta's own commands (/stop, /delete, …) are
+// resolved by the handler before we ever build a turn, so a leading `/` here is
+// real user text (e.g. "/etc/hosts", "/deploy the thing"). Prefix a zero-width
+// space so the prompt no longer starts with `/`: the SDK skips slash parsing and
+// the model sees effectively the same text (U+200B is invisible and not
+// stripped by the SDK's leading-`/` check). Only the SDK prompt is guarded —
+// the JSONL/Slack record keeps the user's verbatim text.
+const ZERO_WIDTH_SPACE = '\u200B';
+export function guardLeadingSlash(text: string): string {
+  return text.startsWith('/') ? `${ZERO_WIDTH_SPACE}${text}` : text;
+}
+
 // Collect the user input for this turn from JSONL: the trailing run of slack
 // `message` events (skipping slash-commands), i.e. everything the user said
 // since the last assistant/tool activity, plus any files attached to those
@@ -206,15 +220,8 @@ export async function runSdkTurn(
   // base64 blocks, text files inline, all with a `[attached:]` sandbox path
   // hint). Streaming input composes with `resume` (only `continue` is mutually
   // exclusive with it).
-  //
-  // NOTE: a user message that starts with `/` (and isn't one of agenta's own
-  // commands — those are handled by the handler before we get here) is parsed by
-  // the Claude Agent SDK as a slash command and never reaches the model (the SDK
-  // replies "/<x> isn't available in this environment"). This holds for both the
-  // string and structured-input paths — `disableSlashCommands` is an internal
-  // SDK default with no public override — so it's an accepted SDK-native
-  // behavior change from the bespoke harness (which sent leading-`/` as text).
-  const { text: userText, files: userFiles } = await collectUserTurn(input.threadKey);
+  const { text: rawUserText, files: userFiles } = await collectUserTurn(input.threadKey);
+  const userText = guardLeadingSlash(rawUserText);
   const userContent = await buildUserContent(input.threadKey, userText, userFiles);
   const prompt: string | AsyncIterable<unknown> =
     typeof userContent === 'string'
