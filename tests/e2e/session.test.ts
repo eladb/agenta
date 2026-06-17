@@ -54,7 +54,7 @@ test('mention during a running turn is batched into a single follow-up turn', as
   // Turn 1 has reached the (gated) model.
   await waitFor(() => agent.mock.requests.length === 1, {
     what: 'turn 1 reached the model',
-    timeoutMs: 60_000,
+    timeoutMs: 120_000,
   });
 
   // Second mention while turn 1 is gated — must queue, not start a new turn.
@@ -67,7 +67,7 @@ test('mention during a running turn is batched into a single follow-up turn', as
 
   await waitFor(() => agent.mock.requests.length === 2, {
     what: 'batched follow-up turn 2 reached the model',
-    timeoutMs: 60_000,
+    timeoutMs: 120_000,
   });
 
   // The follow-up turn carries the second message (the new input batched after
@@ -79,4 +79,6 @@ test('mention during a running turn is batched into a single follow-up turn', as
   await waitForReply(tester, channel, threadTs, agent.botUserId, (t) => t.includes('reply-two'), {
     timeoutMs: 120_000,
   });
-}, 180_000);
+  // Generous overall budget: the two 120s mock waits + the reply wait can stack
+  // on a slow docker-CI runner (the SDK subprocess cold-start dominates).
+}, 360_000);
