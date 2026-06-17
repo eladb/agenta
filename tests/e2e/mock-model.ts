@@ -128,6 +128,11 @@ export async function startMockModel(turns: MockTurn[] = []): Promise<MockModelH
 
   const server = Bun.serve({
     port: 0,
+    // A gateNextTurn() hold keeps a response open until the test releases it,
+    // which can exceed Bun's default 10s idle timeout (and slow docker-CI makes
+    // it longer) — Bun would then kill the held connection mid-turn. Raise it to
+    // the max (255s) so a gated turn survives.
+    idleTimeout: 255,
     async fetch(req) {
       const url = new URL(req.url);
       if (req.method === 'POST' && url.pathname.endsWith('/v1/messages')) {
