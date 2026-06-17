@@ -234,13 +234,32 @@ export async function runBash(
   return consumeExecStream(res.body, onChunk);
 }
 
+// The sandbox user's home — where the agent's repo is cloned and where the
+// model expects files to live (matches bash's HOME). Stable across providers
+// (the sandbox Dockerfile's uid-1000 user).
+const SANDBOX_HOME = '/home/sandbox';
+
+// Normalize a model-supplied file path the way bash would, before sending it to
+// the sandbox's file endpoints. Unlike bash, the sandbox server never expands
+// `~`, and on ECS its workspace dir (`SANDBOX_WORKSPACE_DIR`) isn't the home —
+// so `read ~/x`, `read x`, and `read /home/sandbox/x` would resolve differently
+// and the model burns ENOENT retries discovering it must use an absolute path
+// (#336). We anchor everything at the home: expand a leading `~`/`~/`, resolve
+// relative paths against the home, and pass absolute paths through untouched.
+export function normalizeSandboxPath(path: string): string {
+  if (path === '~' || path === '~/') return SANDBOX_HOME;
+  if (path.startsWith('~/')) return join(SANDBOX_HOME, path.slice(2));
+  if (path.startsWith('/')) return path;
+  return join(SANDBOX_HOME, path);
+}
+
 export async function readFile(
   threadKey: string,
   path: string,
   opts: { offset?: number; limit?: number } = {},
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  return postJson(threadKey, '/read', { path, ...opts }, signal);
+  return postJson(threadKey, '/read', { path: normalizeSandboxPath(path), ...opts }, signal);
 }
 
 export async function readBinary(
@@ -261,7 +280,7 @@ export async function writeFile(
   content: string,
   signal?: AbortSignal,
 ): Promise<DockerResult> {
-  return postJson(threadKey, '/write', { path, content }, signal);
+  return postJson(threadKey, '/write', { path: normalizeSandboxPath(path), content }, signal);
 }
 
 export async function editFile(
@@ -274,7 +293,7 @@ export async function editFile(
   return postJson(
     threadKey,
     '/edit',
-    { path, old_string: oldString, new_string: newString },
+    { path: normalizeSandboxPath(path), old_string: oldString, new_string: newString },
     signal,
   );
 }
