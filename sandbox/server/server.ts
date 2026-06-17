@@ -10,9 +10,6 @@
 //   POST /write        { path, content }                -> JSON DockerResult
 //   POST /write_binary { path, content_b64 }            -> JSON DockerResult
 //   POST /edit         { path, old_string, new_string } -> JSON DockerResult
-//   POST /grep         { pattern, path?, glob? }        -> JSON DockerResult
-//   POST /glob         { pattern, path? }               -> JSON DockerResult
-//   POST /ls           { path? }                        -> JSON DockerResult
 //   GET  /tunnel       (WebSocket upgrade)              -> stream-multiplex TCP
 //                                                          loopback:6000 over
 //                                                          binary WS frames
@@ -23,13 +20,7 @@
 // trigger Docker Desktop's auto-restart with a fresh host port).
 
 import { spawn } from 'node:child_process';
-import {
-  readFile as fsReadFile,
-  writeFile as fsWriteFile,
-  mkdir,
-  readdir,
-  stat,
-} from 'node:fs/promises';
+import { readFile as fsReadFile, writeFile as fsWriteFile, mkdir } from 'node:fs/promises';
 import { createServer, type Server as NetServer, type Socket as TcpSocket } from 'node:net';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ServerWebSocket } from 'bun';
@@ -286,85 +277,6 @@ async function handleEdit(req: Request): Promise<Response> {
   return ok(`edited ${body.path}`);
 }
 
-function runRg(args: string[]): Promise<Result> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('rg', args, {
-      cwd: WORKSPACE,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout?.on('data', (c: Buffer) => {
-      stdout += c.toString('utf8');
-    });
-    proc.stderr?.on('data', (c: Buffer) => {
-      stderr += c.toString('utf8');
-    });
-    proc.on('error', reject);
-    proc.on('close', (code) => resolve({ exitCode: code ?? -1, stdout, stderr }));
-  });
-}
-
-async function handleGrep(req: Request): Promise<Response> {
-  const body = (await req.json()) as { pattern?: unknown; path?: unknown; glob?: unknown };
-  if (typeof body.pattern !== 'string' || body.pattern.length === 0) {
-    return new Response('missing pattern', { status: 400 });
-  }
-  const args = ['--line-number', '--color=never', '--max-columns', '500'];
-  if (typeof body.glob === 'string' && body.glob.length > 0) {
-    args.push('-g', body.glob);
-  }
-  args.push('--', body.pattern);
-  if (typeof body.path === 'string' && body.path.length > 0) {
-    args.push(body.path);
-  }
-  const r = await runRg(args);
-  if (r.exitCode === 1 && r.stderr.length === 0) return ok('');
-  return Response.json(r satisfies Result);
-}
-
-async function handleGlob(req: Request): Promise<Response> {
-  const body = (await req.json()) as { pattern?: unknown; path?: unknown };
-  if (typeof body.pattern !== 'string' || body.pattern.length === 0) {
-    return new Response('missing pattern', { status: 400 });
-  }
-  const args = ['--files', '--color=never', '-g', body.pattern];
-  if (typeof body.path === 'string' && body.path.length > 0) {
-    args.push('--', body.path);
-  }
-  const r = await runRg(args);
-  if (r.exitCode === 1 && r.stderr.length === 0) return ok('');
-  return Response.json(r satisfies Result);
-}
-
-async function handleLs(req: Request): Promise<Response> {
-  const body = (await req.json()) as { path?: unknown };
-  const target =
-    typeof body.path === 'string' && body.path.length > 0
-      ? resolveWorkspacePath(body.path)
-      : WORKSPACE;
-  try {
-    const names = await readdir(target);
-    names.sort();
-    const lines: string[] = [];
-    for (const name of names.slice(0, 500)) {
-      const full = join(target, name);
-      try {
-        const s = await stat(full);
-        if (s.isDirectory()) lines.push(`d  ${'-'.padStart(10)}  ${name}/`);
-        else if (s.isFile()) lines.push(`f  ${String(s.size).padStart(10)}  ${name}`);
-        else lines.push(`?  ${'-'.padStart(10)}  ${name}`);
-      } catch {
-        lines.push(`?  ${'-'.padStart(10)}  ${name}`);
-      }
-    }
-    if (names.length > 500) lines.push(`… ${names.length - 500} more entries (truncated)`);
-    return ok(lines.join('\n'));
-  } catch (err) {
-    return fail((err as Error).message);
-  }
-}
-
 // Tunnel state, per active WS connection. The map is keyed on the
 // ServerWebSocket itself so we can find the per-connection state from any of
 // Bun's WS callbacks. One TCP listener per WS; each accepted TCP connection
@@ -480,12 +392,6 @@ Bun.serve({
           return handleWriteBinary(req);
         case '/edit':
           return handleEdit(req);
-        case '/grep':
-          return handleGrep(req);
-        case '/glob':
-          return handleGlob(req);
-        case '/ls':
-          return handleLs(req);
         default:
           return new Response('not found', { status: 404 });
       }
