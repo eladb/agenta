@@ -58,29 +58,25 @@ test('/delete -> bot acks with "deleted (stub)"', async () => {
   expect(text).toBe('deleted (stub)');
 });
 
-test('a non-command message starting with "/" is intercepted by the SDK, not routed to the model', async () => {
+test('a non-command message starting with "/" still reaches the model (slash guard)', async () => {
   agent.mock.reset();
-  agent.mock.setTurns([{ text: 'model-should-not-be-reached' }]);
+  agent.mock.setTurns([{ text: 'routed to the model' }]);
 
   const threadTs = await mention(tester, agent.botUserId, channel, undefined, '/stop and please');
   createdThreads.push(threadTs);
   // `/stop and please` is not agenta's exact `/stop` command (parseCommand
   // requires an exact match), so the handler routes it onward as a normal
-  // mention. The Claude Agent SDK then parses the leading "/" as a slash command
-  // and replies WITHOUT calling the model ("/stop isn't available…") — an
-  // accepted SDK-native behavior change from the bespoke harness, which sent
-  // leading-"/" text straight to the model. We assert the boundary: the bot
-  // replies, but it is neither agenta's `/stop` ack nor the scripted model reply.
-  const reply = await waitForReply(
+  // mention. The Claude Agent SDK would otherwise parse the leading "/" as a
+  // slash command and never call the model — but runSdkTurn's `guardLeadingSlash`
+  // prefixes a zero-width space so the prompt no longer starts with "/", and the
+  // model sees the text. So the scripted model reply comes through.
+  const text = await waitForReply(
     tester,
     channel,
     threadTs,
     agent.botUserId,
-    (t) => t.length > 0,
-    {
-      timeoutMs: 120_000,
-    },
+    (t) => t.includes('routed to the model'),
+    { timeoutMs: 120_000 },
   );
-  expect(reply).not.toBe('stopped');
-  expect(reply).not.toContain('model-should-not-be-reached');
+  expect(text).toContain('routed to the model');
 }, 120_000);
