@@ -206,6 +206,14 @@ export async function runSdkTurn(
   // base64 blocks, text files inline, all with a `[attached:]` sandbox path
   // hint). Streaming input composes with `resume` (only `continue` is mutually
   // exclusive with it).
+  //
+  // NOTE: a user message that starts with `/` (and isn't one of agenta's own
+  // commands — those are handled by the handler before we get here) is parsed by
+  // the Claude Agent SDK as a slash command and never reaches the model (the SDK
+  // replies "/<x> isn't available in this environment"). This holds for both the
+  // string and structured-input paths — `disableSlashCommands` is an internal
+  // SDK default with no public override — so it's an accepted SDK-native
+  // behavior change from the bespoke harness (which sent leading-`/` as text).
   const { text: userText, files: userFiles } = await collectUserTurn(input.threadKey);
   const userContent = await buildUserContent(input.threadKey, userText, userFiles);
   const prompt: string | AsyncIterable<unknown> =
