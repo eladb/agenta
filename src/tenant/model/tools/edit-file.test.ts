@@ -1,14 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { editFileTool } from './edit-file';
 import { invokeTool } from './index';
 
 const CTX = { threadKey: 'unit-test' };
 
 describe('edit_file', () => {
-  test('describe()', () => {
-    expect(editFileTool.describe?.({ path: 'app.py' })).toBe('edit app.py');
-  });
-
   test('error: missing path', async () => {
     const r = await invokeTool(
       'edit_file',

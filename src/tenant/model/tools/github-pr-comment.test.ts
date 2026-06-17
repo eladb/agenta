@@ -4,31 +4,6 @@ import { _internal, githubPrComment } from './github-pr-comment';
 const CTX = { threadKey: 'unit-test' };
 
 describe('github_pr_comment', () => {
-  describe('describe()', () => {
-    test('handles null/empty args', () => {
-      expect(() => githubPrComment.describe?.(null)).not.toThrow();
-      expect(githubPrComment.describe?.(null)).toBe('comment on ?#?');
-      expect(githubPrComment.describe?.({})).toBe('comment on ?#?');
-    });
-
-    test('shows repo + pull_number when provided', () => {
-      expect(githubPrComment.describe?.({ repo: 'eladb/x', pull_number: 7 })).toBe(
-        'comment on eladb/x#7',
-      );
-    });
-
-    test('shows edit when comment_id present', () => {
-      expect(githubPrComment.describe?.({ repo: 'a/b', pull_number: 3, comment_id: 999 })).toBe(
-        'edit comment on a/b#3',
-      );
-    });
-
-    test('stays single-line', () => {
-      const out = githubPrComment.describe?.({ repo: 'a/b', pull_number: 1 }) ?? '';
-      expect(out.includes('\n')).toBe(false);
-    });
-  });
-
   describe('parseArgs', () => {
     const ok = { repo: 'owner/name', pull_number: 5, body: 'Hello' };
 

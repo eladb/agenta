@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { invokeTool } from './index';
-import { readPage } from './read-page';
 
 const ORIG_FETCH = globalThis.fetch;
 const ORIG_KEY = process.env.TAVILY_API_KEY;
@@ -13,13 +12,6 @@ afterEach(() => {
 });
 
 describe('read_page', () => {
-  test('describe()', () => {
-    expect(readPage.describe?.({ url: 'https://example.com/article' })).toBe(
-      'read_page: https://example.com/article',
-    );
-    expect(readPage.describe?.({})).toBe('read_page (no url)');
-  });
-
   beforeEach(() => {
     process.env.TAVILY_API_KEY = 'test-key';
   });

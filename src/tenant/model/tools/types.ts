@@ -1,17 +1,5 @@
 import type { WebClient } from '@slack/web-api';
 
-// OpenAI-style function tool definition. Each tool declares its name +
-// JSON-Schema parameters in this shape; `mcp-tools.ts` adapts it to the
-// Claude Agent SDK's MCP tool registry at boot (the SDK is the only harness).
-export type ToolDef = {
-  type: 'function';
-  function: {
-    name: string;
-    description: string;
-    parameters: object;
-  };
-};
-
 export type ToolProgressChunk = { kind: 'stdout' | 'stderr'; text: string };
 
 // Context passed to every tool invocation. Tools take what they need and
@@ -30,13 +18,14 @@ export type ToolContext = {
   modelContent?: string;
 };
 
+// A tool the model can call. `params` is the JSON-Schema for the tool's
+// arguments; `mcp-tools.ts` adapts each tool to the Claude Agent SDK's MCP
+// tool registry at boot (the SDK is the only harness).
 export type Tool = {
-  def: ToolDef;
+  name: string;
+  description: string;
+  params: object;
   invoke: (args: unknown, ctx: ToolContext, signal?: AbortSignal) => Promise<string>;
-  // Optional human-readable one-liner for the Slack checklist. Receives the
-  // parsed JSON args (or {} if parsing failed). Must be short, safe to call
-  // on malformed input, and not throw.
-  describe?: (args: unknown) => string;
   // True if this tool touches the per-thread sandbox (bash, fs, share_file,
   // …). Used by the turn loop to await the in-flight ensureContainer (kicked
   // off in the background by handler.ts on turn start) and, if it's still

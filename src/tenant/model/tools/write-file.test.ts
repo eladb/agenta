@@ -1,16 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { invokeTool } from './index';
-import { writeFileTool } from './write-file';
 
 const CTX = { threadKey: 'unit-test' };
 
 describe('write_file', () => {
-  test('describe()', () => {
-    expect(writeFileTool.describe?.({ path: 'app.py', content: 'hello' })).toBe(
-      'write app.py (5 chars)',
-    );
-  });
-
   test('error: missing path', async () => {
     const r = await invokeTool('write_file', JSON.stringify({ content: 'x' }), CTX);
     expect(r.error).toBe(true);

@@ -1,4 +1,4 @@
-import { oneLine, strArg, truncate } from './helpers';
+import { strArg, truncate } from './helpers';
 import type { Tool } from './types';
 
 const TIMEOUT_MS = 15_000;
@@ -9,25 +9,16 @@ type TavilyResult = { url?: unknown; raw_content?: unknown };
 type TavilyFailed = { url?: unknown; error?: unknown };
 
 export const readPage: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'read_page',
-      description:
-        'Extract the main article text from a web page via Tavily Extract. Returns {url, content} with content truncated to 16 KB. Use for full-article reads; use fetch_url for raw bytes / JSON.',
-      parameters: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'The URL to extract' },
-        },
-        required: ['url'],
-        additionalProperties: false,
-      },
+  name: 'read_page',
+  description:
+    'Extract the main article text from a web page via Tavily Extract. Returns {url, content} with content truncated to 16 KB. Use for full-article reads; use fetch_url for raw bytes / JSON.',
+  params: {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: 'The URL to extract' },
     },
-  },
-  describe: (args) => {
-    const url = strArg(args, 'url');
-    return url ? `read_page: ${oneLine(url, 60)}` : 'read_page (no url)';
+    required: ['url'],
+    additionalProperties: false,
   },
   invoke: async (args, _ctx, signal) => {
     const url = strArg(args, 'url');

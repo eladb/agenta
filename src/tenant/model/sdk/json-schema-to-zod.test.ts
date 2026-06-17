@@ -3,11 +3,11 @@ import { z } from 'zod';
 import { TOOLS } from '../tools';
 import { jsonSchemaToZodShape } from './json-schema-to-zod';
 
-// Helper: build the shape from a tool's real def, then validate via z.object.
+// Helper: build the shape from a tool's real params, then validate via z.object.
 function shapeFor(name: string): Record<string, z.ZodTypeAny> {
-  const def = TOOLS[name]?.def;
-  if (!def) throw new Error(`no tool ${name}`);
-  return jsonSchemaToZodShape(def.function.parameters);
+  const t = TOOLS[name];
+  if (!t) throw new Error(`no tool ${name}`);
+  return jsonSchemaToZodShape(t.params);
 }
 
 describe('jsonSchemaToZodShape — real tool schemas', () => {

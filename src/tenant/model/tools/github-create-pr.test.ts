@@ -4,25 +4,6 @@ import { _internal, githubCreatePr } from './github-create-pr';
 const CTX = { threadKey: 'unit-test' };
 
 describe('github_create_pr', () => {
-  describe('describe()', () => {
-    test('handles null/empty args', () => {
-      expect(() => githubCreatePr.describe?.(null)).not.toThrow();
-      expect(githubCreatePr.describe?.(null)).toBe('github PR ? from ?');
-      expect(githubCreatePr.describe?.({})).toBe('github PR ? from ?');
-    });
-
-    test('shows repo + head_branch when provided', () => {
-      expect(githubCreatePr.describe?.({ repo: 'eladb/x', head_branch: 'claude/foo' })).toBe(
-        'github PR eladb/x from claude/foo',
-      );
-    });
-
-    test('stays single-line', () => {
-      const out = githubCreatePr.describe?.({ repo: 'a/b', head_branch: 'c' }) ?? '';
-      expect(out.includes('\n')).toBe(false);
-    });
-  });
-
   describe('parseArgs', () => {
     const ok = {
       repo: 'owner/name',

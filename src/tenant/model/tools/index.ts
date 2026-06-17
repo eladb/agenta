@@ -20,9 +20,9 @@ import { writeFileTool } from './write-file';
 export type { Tool, ToolContext, ToolProgressChunk };
 export { formatBashResult };
 
-// Tool registry. Keys must match each tool's def.function.name — mcp-tools.ts
-// iterates the values to build the SDK tool list, and invokeTool looks up by
-// the key the model emits in its tool_call.function.name.
+// Tool registry. Keys must match each tool's name — mcp-tools.ts iterates the
+// values to build the SDK tool list, and invokeTool looks up by the key the
+// model emits in its tool call.
 export const TOOLS: Record<string, Tool> = {
   get_current_time: getCurrentTime,
   fetch_url: fetchUrl,
@@ -47,28 +47,18 @@ function assertValidTool(tool: unknown, source: string): asserts tool is Tool {
     throw new Error(`extra tool from ${source} is not an object`);
   }
   const t = tool as Partial<Tool>;
-  const name = t.def?.function?.name;
+  const name = t.name;
   if (typeof name !== 'string' || name.length === 0) {
-    throw new Error(`extra tool from ${source} has no def.function.name`);
+    throw new Error(`extra tool from ${source} has no name`);
+  }
+  if (typeof t.description !== 'string' || t.description.length === 0) {
+    throw new Error(`extra tool '${name}' from ${source} has no description`);
+  }
+  if (typeof t.params !== 'object' || t.params === null) {
+    throw new Error(`extra tool '${name}' from ${source} has no params object`);
   }
   if (typeof t.invoke !== 'function') {
     throw new Error(`extra tool '${name}' from ${source} has no invoke() function`);
-  }
-  if (typeof t.describe !== 'function') {
-    throw new Error(`extra tool '${name}' from ${source} has no describe() function`);
-  }
-  let described: unknown;
-  try {
-    described = t.describe({});
-  } catch (err) {
-    throw new Error(
-      `extra tool '${name}' from ${source} describe() threw: ${(err as Error).message}`,
-    );
-  }
-  if (typeof described !== 'string' || described.length === 0 || described.includes('\n')) {
-    throw new Error(
-      `extra tool '${name}' from ${source} describe() must return a non-empty single-line string`,
-    );
   }
 }
 
@@ -111,7 +101,7 @@ export async function registerExtraTools(env: NodeJS.ProcessEnv = process.env): 
       const candidates = Array.isArray(exported) ? exported : [exported];
       for (const candidate of candidates) {
         assertValidTool(candidate, path);
-        const name = candidate.def.function.name;
+        const name = candidate.name;
         if (name in TOOLS) {
           throw new Error(`extra tool '${name}' from ${path} collides with an existing tool`);
         }

@@ -1,31 +1,24 @@
 import { editFile } from '../../sandbox';
-import { strArg } from './helpers';
 import type { Tool } from './types';
 
 export const editFileTool: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'edit_file',
-      description:
-        'Replace exactly one occurrence of old_string with new_string in a text file. Fails if old_string occurs zero times or more than once — include enough surrounding context to make the match unique.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Path to the file.' },
-          old_string: {
-            type: 'string',
-            description: 'Exact substring to find (must occur exactly once).',
-          },
-          new_string: { type: 'string', description: 'Replacement string.' },
-        },
-        required: ['path', 'old_string', 'new_string'],
-        additionalProperties: false,
+  name: 'edit_file',
+  description:
+    'Replace exactly one occurrence of old_string with new_string in a text file. Fails if old_string occurs zero times or more than once — include enough surrounding context to make the match unique.',
+  params: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Path to the file.' },
+      old_string: {
+        type: 'string',
+        description: 'Exact substring to find (must occur exactly once).',
       },
+      new_string: { type: 'string', description: 'Replacement string.' },
     },
+    required: ['path', 'old_string', 'new_string'],
+    additionalProperties: false,
   },
   requiresSandbox: true,
-  describe: (args) => `edit ${strArg(args, 'path') ?? '?'}`,
   invoke: async (args, ctx, signal) => {
     const a = args as { path?: unknown; old_string?: unknown; new_string?: unknown } | null;
     if (typeof a?.path !== 'string' || a.path.length === 0) {
