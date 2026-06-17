@@ -35,7 +35,7 @@ beforeAll(async () => {
   // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
   // server (returned as `agent.mock`); the callModel arg is unused.
   [agent, tester] = await Promise.all([
-    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startBotAndTenant(),
     startTester(),
   ]);
   const mock = agent.mock;

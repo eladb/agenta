@@ -1,16 +1,13 @@
-// runSdkTurn — the Claude Agent SDK harness turn (#303, Phase 1 of #282).
-//
-// Parallel to `runTurn` in turn.ts, selected by `HARNESS=sdk` (see handler.ts).
-// The bespoke harness (turn.ts) stays the default and is untouched. This turn:
+// runSdkTurn — the Claude Agent SDK harness turn (#282/#315). The SDK is the
+// only harness; this is the one and only turn implementation. It:
 //   - wraps the existing TOOLS registry as an in-process MCP server
-//     (`buildAgentaMcpServer`, Phase 1 part-1) so the SDK drives our real
-//     sandbox / fs / git tools and NOTHING else (native tools off: `tools: []`,
+//     (`buildAgentaMcpServer`) so the SDK drives our real sandbox / fs / git
+//     tools and NOTHING else (native tools off: `tools: []`,
 //     `allowedTools: ['mcp__agenta__*']`);
 //   - runs the SDK `query()` with the per-thread frozen system prompt (rebuilt
 //     every mention — preserves prompt-unfrozen) + model;
 //   - maps the SDK message stream onto the Slack streaming display via
-//     `consumeSdkStream` (sdk-stream.ts), rendering equivalently to
-//     runStreamingTurn;
+//     `consumeSdkStream` (sdk-stream.ts);
 //   - persists assistant / tool_call / tool_result events to JSONL as it
 //     streams so debug-thread + recovery keep working;
 //   - multi-turns via SDK session resume: the SDK `session_id` is captured from
@@ -47,8 +44,8 @@ import {
   type SdkStreamRecorder,
   type SlackStreamDriver,
 } from './sdk-stream';
+import type { TurnInput } from './session';
 import { readSession, setSdkSessionId } from './session-store';
-import type { TurnInput } from './turn';
 
 // Generous turn cap — the SDK counts each model round-trip; agentic tool chains
 // can take several. Mirrors the spike's 12 with headroom.

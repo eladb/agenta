@@ -113,12 +113,11 @@ export type SessionState = {
   // Missing = `verbose` (default).
   display?: DisplayConfig;
   // The Claude Agent SDK session id for this thread (#303). Captured from the
-  // SDK `query()` stream's first frame on the first SDK-harness turn and
-  // persisted so subsequent turns resume the same SDK session
-  // (`options.resume`). Only populated under `HARNESS=sdk`; absent for the
-  // bespoke harness. `/delete` removes it (with the whole thread dir + a
-  // best-effort SDK `deleteSession`). Must be preserved across the status
-  // flips + clearSession like every other routing field — see
+  // SDK `query()` stream's first frame on the first turn and persisted so
+  // subsequent turns resume the same SDK session (`options.resume`). Absent
+  // until the first turn completes. `/delete` removes it (with the whole thread
+  // dir + a best-effort SDK `deleteSession`). Must be preserved across the
+  // status flips + clearSession like every other routing field — see
   // `session-preservation-invariant` memory (#135).
   sdk_session_id?: string;
 };

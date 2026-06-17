@@ -40,7 +40,7 @@ beforeAll(async () => {
   // SDK mode: the tenant runs the Agent SDK harness driven by the mock-model
   // server (agent.mock). Attachments are inlined into the request the SDK sends.
   [agent, tester] = await Promise.all([
-    startBotAndTenant(undefined, { harness: 'sdk' }),
+    startBotAndTenant(),
     startTester(),
   ]);
 }, 120_000);

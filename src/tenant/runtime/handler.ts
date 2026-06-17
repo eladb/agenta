@@ -2,7 +2,6 @@ import { deleteSession } from '@anthropic-ai/claude-agent-sdk';
 import type { WebClient } from '@slack/web-api';
 import { log } from '../../shared/log';
 import { refFor, teardownSession } from '../git/bootstrap';
-import { type CallModel, createCallModel } from '../model/gateway';
 import { deleteAttachmentsForSlackTs, downloadFiles } from '../persistence/attachments';
 import { backfillIfNew } from '../persistence/backfill';
 import { newEventId, nowIso, record } from '../persistence/events';
@@ -32,9 +31,9 @@ import { threadKey } from './thread';
 // It is frozen per-thread on first mention, same as before.
 export type EnvelopeContext = {
   home: HomeConfig;
-  // Env-derived triplet (MODEL_NAME / MODEL_BASE_URL / MODEL_API_KEY).
-  // Required for production; tests pass a stub that's never invoked because
-  // they also pass `callModelOverride`. Frozen per-thread on first mention.
+  // Env-derived model triplet (MODEL_NAME selects the model; the SDK learns its
+  // backend from env — CLAUDE_CODE_USE_BEDROCK + AWS creds, or ANTHROPIC_*).
+  // Required for production. Frozen per-thread on first mention.
   fallbackModel: ModelTriplet | undefined;
   // Optional UX style override (defaults to 'verbose'). Until a per-deploy
   // env knob exists this is left undefined; the legacy default is preserved.
@@ -55,14 +54,10 @@ export function makeEventHandler(
   botToken: string,
   botUserId: string,
   ctx: EnvelopeContext,
-  // Test seam: e2e + unit tests inject a stubbed callModel directly so the
-  // triplet→fetch path is bypassed. Production never passes this; the handler
-  // builds the real callModel from the per-thread frozen triplet.
-  callModelOverride?: CallModel,
 ): (e: IncomingEvent) => Promise<void> {
   return async (e) => {
     if (e.kind === 'message') {
-      return handleMessage(web, botToken, botUserId, ctx, callModelOverride, e);
+      return handleMessage(web, botToken, botUserId, ctx, e);
     }
     if (e.kind === 'edit') return handleEdit(e);
     if (e.kind === 'delete') return handleDelete(e);
@@ -74,7 +69,6 @@ async function handleMessage(
   botToken: string,
   botUserId: string,
   ctx: EnvelopeContext,
-  callModelOverride: CallModel | undefined,
   e: NormalMessage,
 ): Promise<void> {
   const key = dedupeKey({
@@ -171,7 +165,7 @@ async function handleMessage(
   // is removed in bulk when the thread goes idle (startOrQueue's finally).
   markThinking(web, tk, e.channel, e.ts);
   try {
-    await kickoffTurn(web, tk, e.channel, e.threadTs, e.user, ctx, callModelOverride);
+    await kickoffTurn(web, tk, e.channel, e.threadTs, e.user, ctx);
   } catch (err) {
     // kickoffTurn threw before startOrQueue's finally could run (e.g. model/
     // home resolution failed) — clear the 🤔 so we don't orphan it, then
@@ -194,7 +188,6 @@ export async function kickoffTurn(
   threadTs: string,
   userId: string,
   ctx: EnvelopeContext,
-  callModelOverride: CallModel | undefined,
 ): Promise<void> {
   // Per-thread frozen system prompt + home (from the envelope): composed on
   // the first mention and persisted into session.json so every subsequent
@@ -205,19 +198,9 @@ export async function kickoffTurn(
   // writes idle (preserving these) so the file is there across turns; only
   // `/delete` removes it.
   const { prompt, model, display } = await resolveSystemPromptAndModel(web, tk, userId, ctx);
-  // Build the per-thread callModel from the frozen triplet (env-name only —
-  // the secret value is read at every call inside createCallModel). Tests
-  // pass `callModelOverride` to bypass this and inject a stub.
-  const callModel: CallModel =
-    callModelOverride ??
-    createCallModel({
-      apiKeyEnv: model.api_key_env,
-      baseUrl: model.base_url,
-      model: model.name,
-    });
 
   // Sandbox warmup: kick off provisioning in the background as soon as a
-  // turn is committed. The foreground tool loop in turn.ts awaits the same
+  // turn is committed. The SDK tool loop (mcp-tools.ts) awaits the same
   // in-flight promise via ensureContainer() (the per-thread dedup lives in
   // src/sandbox/index.ts), so if the sandbox is ready by the time a
   // requiresSandbox tool fires, no UI line is shown. If it's still
@@ -229,16 +212,8 @@ export async function kickoffTurn(
   // on the common case.
   kickoffEnsureContainer(tk);
 
-  // Harness selection (#303). `HARNESS=sdk` routes the turn through the
-  // Claude Agent SDK (runSdkTurn) with the frozen model triplet; the bespoke
-  // `runTurn` loop stays the default (unset/any other value). The session
-  // state machine (running/stopping/queue/🤔) is shared either way — only the
-  // inner turn fn differs (see startOrQueue's sdkConfig branch).
-  const sdkConfig = process.env.HARNESS === 'sdk' ? { model } : undefined;
-
   await startOrQueue(
     web,
-    callModel,
     prompt,
     {
       channel,
@@ -251,8 +226,8 @@ export async function kickoffTurn(
       recipientUserId: userId,
       recipientTeamId: ctx.workspaceId,
     },
+    model,
     display.style,
-    sdkConfig,
   );
 }
 
