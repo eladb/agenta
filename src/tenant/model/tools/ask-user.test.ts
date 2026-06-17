@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { _resetAsks } from '../../runtime/asks';
-import { askUser } from './ask-user';
 import { invokeTool } from './index';
 
 const CTX = { threadKey: 'unit-test' };
@@ -10,13 +9,6 @@ afterEach(() => {
 });
 
 describe('ask_user', () => {
-  test('describe()', () => {
-    expect(askUser.describe?.({ question: 'pick one', kind: 'buttons' })).toBe(
-      'ask_user (buttons): pick one',
-    );
-    expect(askUser.describe?.({ kind: 'select' })).toBe('ask_user (select): ?');
-  });
-
   test('error: missing question', async () => {
     const r = await invokeTool('ask_user', JSON.stringify({ kind: 'buttons' }), CTX);
     expect(r.error).toBe(true);

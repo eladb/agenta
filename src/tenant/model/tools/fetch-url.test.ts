@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { fetchUrl } from './fetch-url';
 import { invokeTool } from './index';
 
 const ORIG_FETCH = globalThis.fetch;
@@ -10,11 +9,6 @@ afterEach(() => {
 });
 
 describe('fetch_url', () => {
-  test('describe()', () => {
-    expect(fetchUrl.describe?.({ url: 'https://example.com' })).toBe('fetch https://example.com');
-    expect(fetchUrl.describe?.({})).toBe('fetch (no url)');
-  });
-
   beforeEach(() => {
     globalThis.fetch = (async () =>
       new Response('hello world', { status: 200 })) as unknown as typeof fetch;

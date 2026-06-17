@@ -17,9 +17,9 @@ const EXCLUDED = new Set<string>([]);
 
 // Build an in-process SDK MCP server ("agenta") wrapping every tool in the TOOLS
 // registry except the excluded set. Each registry Tool becomes one SDK tool():
-//   name        = def.function.name           (model sees `mcp__agenta__<name>`)
-//   description = def.function.description
-//   inputSchema = jsonSchemaToZodShape(def.function.parameters)
+//   name        = t.name                       (model sees `mcp__agenta__<name>`)
+//   description = t.description
+//   inputSchema = jsonSchemaToZodShape(t.params)
 //   handler     = calls the existing Tool.invoke(args, ctxFactory(), signal)
 //
 // ctxFactory is called per invocation so each turn threads its own ToolContext
@@ -30,11 +30,10 @@ export function buildAgentaMcpServer(
   signal?: AbortSignal,
 ): ReturnType<typeof createSdkMcpServer> {
   const tools = Object.values(TOOLS)
-    .filter((t) => !EXCLUDED.has(t.def.function.name))
+    .filter((t) => !EXCLUDED.has(t.name))
     .map((t) => {
-      const name = t.def.function.name;
-      const shape = jsonSchemaToZodShape(t.def.function.parameters);
-      return tool(name, t.def.function.description, shape, async (args: unknown) => {
+      const shape = jsonSchemaToZodShape(t.params);
+      return tool(t.name, t.description, shape, async (args: unknown) => {
         const ctx = ctxFactory();
         // Sandbox preamble (mirrors turn.ts's per-tool-call dispatch in the
         // bespoke harness): before a tool that touches the sandbox runs, await

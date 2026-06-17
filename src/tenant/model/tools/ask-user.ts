@@ -1,7 +1,6 @@
 import { AskInUseError, type AskKind, getPendingAskByTs, registerAsk } from '../../runtime/asks';
 import { buildAskBlocks } from '../../slack/ask-blocks';
 import { postBlocksInThread } from '../../slack/post';
-import { oneLine, strArg } from './helpers';
 import type { Tool } from './types';
 
 // How long an ask blocks before auto-resolving to "timeout". Exported so the
@@ -11,41 +10,31 @@ import type { Tool } from './types';
 export const ASK_TIMEOUT_MS = 10 * 60_000;
 
 export const askUser: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'ask_user',
-      description:
-        'Pause and ask the human a question via an interactive Slack message, then return their answer as a string. Use this when you need a decision you genuinely cannot infer from context. Kinds: "buttons" (1 of N, ideal for 2–6 options), "select" (compact dropdown for 7+ options), "multi_select" (any-of-N, answer is a JSON array), "text" (free-form reply in the thread; "options" is ignored). Returns "timeout" after 10 minutes, "cancelled" if the user clicks Cancel. The user can also just type a reply in the thread to answer any kind.',
-      parameters: {
-        type: 'object',
-        properties: {
-          question: { type: 'string', description: 'Question to display to the user.' },
-          kind: {
-            type: 'string',
-            enum: ['buttons', 'select', 'multi_select', 'text'],
-            description: 'Which interactive UI to use.',
-          },
-          options: {
-            type: 'array',
-            items: { type: 'string' },
-            description:
-              'Required for buttons/select/multi_select. Each option must be a non-empty string. Ignored for text.',
-          },
-          placeholder: {
-            type: 'string',
-            description: 'Optional hint shown in the select / dropdown placeholder.',
-          },
-        },
-        required: ['question', 'kind'],
-        additionalProperties: false,
+  name: 'ask_user',
+  description:
+    'Pause and ask the human a question via an interactive Slack message, then return their answer as a string. Use this when you need a decision you genuinely cannot infer from context. Kinds: "buttons" (1 of N, ideal for 2–6 options), "select" (compact dropdown for 7+ options), "multi_select" (any-of-N, answer is a JSON array), "text" (free-form reply in the thread; "options" is ignored). Returns "timeout" after 10 minutes, "cancelled" if the user clicks Cancel. The user can also just type a reply in the thread to answer any kind.',
+  params: {
+    type: 'object',
+    properties: {
+      question: { type: 'string', description: 'Question to display to the user.' },
+      kind: {
+        type: 'string',
+        enum: ['buttons', 'select', 'multi_select', 'text'],
+        description: 'Which interactive UI to use.',
+      },
+      options: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Required for buttons/select/multi_select. Each option must be a non-empty string. Ignored for text.',
+      },
+      placeholder: {
+        type: 'string',
+        description: 'Optional hint shown in the select / dropdown placeholder.',
       },
     },
-  },
-  describe: (args) => {
-    const q = oneLine(strArg(args, 'question') ?? '?', 40);
-    const k = strArg(args, 'kind') ?? '?';
-    return `ask_user (${k}): ${q}`;
+    required: ['question', 'kind'],
+    additionalProperties: false,
   },
   invoke: async (args, ctx, signal) => {
     const a = args as {

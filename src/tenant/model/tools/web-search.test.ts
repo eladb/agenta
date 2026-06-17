@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { invokeTool } from './index';
-import { webSearch } from './web-search';
 
 const ORIG_FETCH = globalThis.fetch;
 const ORIG_KEY = process.env.TAVILY_API_KEY;
@@ -13,13 +12,6 @@ afterEach(() => {
 });
 
 describe('web_search', () => {
-  test('describe()', () => {
-    expect(webSearch.describe?.({ query: 'who is ada lovelace' })).toBe(
-      'web_search: who is ada lovelace',
-    );
-    expect(webSearch.describe?.({})).toBe('web_search (no query)');
-  });
-
   beforeEach(() => {
     process.env.TAVILY_API_KEY = 'test-key';
   });

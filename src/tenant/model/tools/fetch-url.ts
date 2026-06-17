@@ -1,26 +1,17 @@
-import { oneLine, strArg } from './helpers';
+import { strArg } from './helpers';
 import type { Tool } from './types';
 
 const BODY_CAP = 8 * 1024;
 const TIMEOUT_MS = 10_000;
 
 export const fetchUrl: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'fetch_url',
-      description: 'HTTP GET the given URL and return the response body (truncated to 8 KB).',
-      parameters: {
-        type: 'object',
-        properties: { url: { type: 'string', description: 'The URL to GET' } },
-        required: ['url'],
-        additionalProperties: false,
-      },
-    },
-  },
-  describe: (args) => {
-    const url = strArg(args, 'url');
-    return url ? `fetch ${oneLine(url, 60)}` : 'fetch (no url)';
+  name: 'fetch_url',
+  description: 'HTTP GET the given URL and return the response body (truncated to 8 KB).',
+  params: {
+    type: 'object',
+    properties: { url: { type: 'string', description: 'The URL to GET' } },
+    required: ['url'],
+    additionalProperties: false,
   },
   invoke: async (args, _ctx, signal) => {
     const url = strArg(args, 'url');

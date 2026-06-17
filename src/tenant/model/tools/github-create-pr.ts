@@ -142,70 +142,56 @@ function tokenizedUrl(repo: string, token: string): string {
 }
 
 export const githubCreatePr: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'github_create_pr',
-      description:
-        'Create a GitHub pull request. The patch lives at patch_path inside the sandbox (write the unified-diff output of `git diff` or `git diff <base>..HEAD` to that path first). The bot clones the target repo, applies the patch, commits, pushes a new branch, and opens the PR — no GitHub credentials reach the sandbox. Returns the PR URL on success. Fails fast if head_branch already exists on the remote, or if the patch does not apply cleanly against <base>.',
-      parameters: {
-        type: 'object',
-        properties: {
-          repo: { type: 'string', description: 'Target repo in `owner/name` form' },
-          base: {
-            type: 'string',
-            description: 'Branch to open the PR against (default: "main")',
-          },
-          head_branch: {
-            type: 'string',
-            description:
-              'New branch the PR is opened from. Must not already exist on the remote. Conventionally `claude/<short-slug>`.',
-          },
-          title: { type: 'string', description: 'PR title' },
-          body: { type: 'string', description: 'PR body (GitHub-flavored markdown)' },
-          patch_path: {
-            type: 'string',
-            description:
-              'Path inside the sandbox to a unified-diff patch file. Generate it via `git diff <base>..HEAD > /tmp/pr.patch` after committing locally, or `git diff > /tmp/pr.patch` for uncommitted edits.',
-          },
-          commit_message: {
-            type: 'string',
-            description: 'Commit message for the patch (default: title)',
-          },
-          draft: { type: 'boolean', description: 'Open as draft PR' },
-          submodule_updates: {
-            type: 'array',
-            description:
-              'Optional submodule gitlink bumps. `git apply` cannot update gitlinks from a unified diff, so submodule-pointer changes must be passed here. Each entry runs `git update-index --cacheinfo 160000 <sha> <path>` after the patch applies. The submodule must already be registered in the base tree; the submodule itself is NOT cloned. If the only change is a submodule bump, `patch_path` may point at an empty file.',
-            items: {
-              type: 'object',
-              properties: {
-                path: { type: 'string', description: 'Submodule path relative to repo root' },
-                sha: {
-                  type: 'string',
-                  description: '40-char lowercase hex commit SHA to point the submodule at',
-                },
-              },
-              required: ['path', 'sha'],
-              additionalProperties: false,
+  name: 'github_create_pr',
+  description:
+    'Create a GitHub pull request. The patch lives at patch_path inside the sandbox (write the unified-diff output of `git diff` or `git diff <base>..HEAD` to that path first). The bot clones the target repo, applies the patch, commits, pushes a new branch, and opens the PR — no GitHub credentials reach the sandbox. Returns the PR URL on success. Fails fast if head_branch already exists on the remote, or if the patch does not apply cleanly against <base>.',
+  params: {
+    type: 'object',
+    properties: {
+      repo: { type: 'string', description: 'Target repo in `owner/name` form' },
+      base: {
+        type: 'string',
+        description: 'Branch to open the PR against (default: "main")',
+      },
+      head_branch: {
+        type: 'string',
+        description:
+          'New branch the PR is opened from. Must not already exist on the remote. Conventionally `claude/<short-slug>`.',
+      },
+      title: { type: 'string', description: 'PR title' },
+      body: { type: 'string', description: 'PR body (GitHub-flavored markdown)' },
+      patch_path: {
+        type: 'string',
+        description:
+          'Path inside the sandbox to a unified-diff patch file. Generate it via `git diff <base>..HEAD > /tmp/pr.patch` after committing locally, or `git diff > /tmp/pr.patch` for uncommitted edits.',
+      },
+      commit_message: {
+        type: 'string',
+        description: 'Commit message for the patch (default: title)',
+      },
+      draft: { type: 'boolean', description: 'Open as draft PR' },
+      submodule_updates: {
+        type: 'array',
+        description:
+          'Optional submodule gitlink bumps. `git apply` cannot update gitlinks from a unified diff, so submodule-pointer changes must be passed here. Each entry runs `git update-index --cacheinfo 160000 <sha> <path>` after the patch applies. The submodule must already be registered in the base tree; the submodule itself is NOT cloned. If the only change is a submodule bump, `patch_path` may point at an empty file.',
+        items: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Submodule path relative to repo root' },
+            sha: {
+              type: 'string',
+              description: '40-char lowercase hex commit SHA to point the submodule at',
             },
           },
+          required: ['path', 'sha'],
+          additionalProperties: false,
         },
-        required: ['repo', 'head_branch', 'title', 'patch_path'],
-        additionalProperties: false,
       },
     },
+    required: ['repo', 'head_branch', 'title', 'patch_path'],
+    additionalProperties: false,
   },
   requiresSandbox: true,
-  describe: (raw) => {
-    const a = (raw && typeof raw === 'object' ? raw : {}) as {
-      repo?: unknown;
-      head_branch?: unknown;
-    };
-    const repo = typeof a.repo === 'string' ? a.repo : '?';
-    const head = typeof a.head_branch === 'string' ? a.head_branch : '?';
-    return `github PR ${repo} from ${head}`;
-  },
   invoke: async (raw, ctx, signal) => {
     const args = parseArgs(raw);
 

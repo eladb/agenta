@@ -30,38 +30,22 @@ function parseArgs(raw: unknown): Args {
 }
 
 export const githubPrComment: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'github_pr_comment',
-      description:
-        'Post or edit a comment on a GitHub pull request. If comment_id is provided, edits the existing comment; otherwise creates a new one. Returns JSON with the comment URL and ID.',
-      parameters: {
-        type: 'object',
-        properties: {
-          repo: { type: 'string', description: 'Target repo in `owner/name` form' },
-          pull_number: { type: 'number', description: 'PR number to comment on' },
-          body: { type: 'string', description: 'Comment body (GitHub-flavored markdown)' },
-          comment_id: {
-            type: 'number',
-            description: 'Existing comment ID to edit (omit to create a new comment)',
-          },
-        },
-        required: ['repo', 'pull_number', 'body'],
-        additionalProperties: false,
+  name: 'github_pr_comment',
+  description:
+    'Post or edit a comment on a GitHub pull request. If comment_id is provided, edits the existing comment; otherwise creates a new one. Returns JSON with the comment URL and ID.',
+  params: {
+    type: 'object',
+    properties: {
+      repo: { type: 'string', description: 'Target repo in `owner/name` form' },
+      pull_number: { type: 'number', description: 'PR number to comment on' },
+      body: { type: 'string', description: 'Comment body (GitHub-flavored markdown)' },
+      comment_id: {
+        type: 'number',
+        description: 'Existing comment ID to edit (omit to create a new comment)',
       },
     },
-  },
-  describe: (raw) => {
-    const a = (raw && typeof raw === 'object' ? raw : {}) as {
-      repo?: unknown;
-      pull_number?: unknown;
-      comment_id?: unknown;
-    };
-    const repo = typeof a.repo === 'string' ? a.repo : '?';
-    const pr = typeof a.pull_number === 'number' ? `#${a.pull_number}` : '#?';
-    const action = typeof a.comment_id === 'number' ? 'edit comment' : 'comment';
-    return `${action} on ${repo}${pr}`;
+    required: ['repo', 'pull_number', 'body'],
+    additionalProperties: false,
   },
   invoke: async (raw, _ctx, signal) => {
     const args = parseArgs(raw);

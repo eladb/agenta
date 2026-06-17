@@ -4,25 +4,6 @@ import { _internal, githubUpdatePr } from './github-update-pr';
 const CTX = { threadKey: 'unit-test' };
 
 describe('github_update_pr', () => {
-  describe('describe()', () => {
-    test('handles null/empty args', () => {
-      expect(() => githubUpdatePr.describe?.(null)).not.toThrow();
-      expect(githubUpdatePr.describe?.(null)).toBe('update PR ?#?');
-      expect(githubUpdatePr.describe?.({})).toBe('update PR ?#?');
-    });
-
-    test('shows repo + pull_number when provided', () => {
-      expect(githubUpdatePr.describe?.({ repo: 'eladb/x', pull_number: 42 })).toBe(
-        'update PR eladb/x#42',
-      );
-    });
-
-    test('stays single-line', () => {
-      const out = githubUpdatePr.describe?.({ repo: 'a/b', pull_number: 1 }) ?? '';
-      expect(out.includes('\n')).toBe(false);
-    });
-  });
-
   describe('parseArgs', () => {
     const ok = { repo: 'owner/name', pull_number: 5, title: 'New title' };
 

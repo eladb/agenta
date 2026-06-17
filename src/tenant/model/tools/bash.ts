@@ -1,5 +1,5 @@
 import { runBash } from '../../sandbox';
-import { oneLine, strArg, truncate } from './helpers';
+import { strArg, truncate } from './helpers';
 import type { Tool } from './types';
 
 const OUTPUT_CAP = 16 * 1024;
@@ -20,30 +20,21 @@ export function formatBashResult({
 }
 
 export const bash: Tool = {
-  def: {
-    type: 'function',
-    function: {
-      name: 'bash',
-      description:
-        "Execute a bash command in this thread's sandbox container. Returns exit code, stdout, and stderr. State (files, cwd) is per-thread and persists across calls.",
-      parameters: {
-        type: 'object',
-        properties: {
-          command: {
-            type: 'string',
-            description: 'The bash command to run (passed to `bash -lc`).',
-          },
-        },
-        required: ['command'],
-        additionalProperties: false,
+  name: 'bash',
+  description:
+    "Execute a bash command in this thread's sandbox container. Returns exit code, stdout, and stderr. State (files, cwd) is per-thread and persists across calls.",
+  params: {
+    type: 'object',
+    properties: {
+      command: {
+        type: 'string',
+        description: 'The bash command to run (passed to `bash -lc`).',
       },
     },
+    required: ['command'],
+    additionalProperties: false,
   },
   requiresSandbox: true,
-  describe: (args) => {
-    const cmd = strArg(args, 'command');
-    return cmd ? oneLine(`$ ${cmd}`) : '$ (missing command)';
-  },
   invoke: async (args, ctx, signal) => {
     const command = strArg(args, 'command');
     if (!command) throw new Error('bash: missing or invalid command');
