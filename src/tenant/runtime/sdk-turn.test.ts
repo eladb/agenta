@@ -1,5 +1,19 @@
 import { describe, expect, test } from 'bun:test';
-import { guardLeadingSlash, stripBedrockScheme } from './sdk-turn';
+import { buildSdkEnv, guardLeadingSlash, stripBedrockScheme } from './sdk-turn';
+
+describe('buildSdkEnv', () => {
+  test('sets IS_SANDBOX=1 so bypassPermissions works as root (#334)', () => {
+    // The harness runs permissionMode:'bypassPermissions'; Claude Code refuses
+    // that as root unless IS_SANDBOX is set. The tenant container is root in
+    // real deployments, so this env var is what keeps every turn from crashing.
+    expect(buildSdkEnv().IS_SANDBOX).toBe('1');
+  });
+  test('forces prompt caching off + pins the SDK config dir', () => {
+    const env = buildSdkEnv();
+    expect(env.DISABLE_PROMPT_CACHING).toBe('1');
+    expect(env.CLAUDE_CONFIG_DIR).toBeDefined();
+  });
+});
 
 describe('stripBedrockScheme', () => {
   test('strips a bedrock:// prefix', () => {
