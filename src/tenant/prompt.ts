@@ -46,25 +46,37 @@ export const UNIVERSAL_PROMPT_SUFFIX = [
 // config is the single source of truth.
 //
 // `envPrefix` defaults to `process.env.SYSTEM_PROMPT` — when set, it is
-// prepended (with a blank-line separator) to the README.md body. This is the
+// prepended (with a blank-line separator) to the persona body. This is the
 // only behavior delta from the legacy const prompt: SYSTEM_PROMPT used to
 // replace, it now prepends.
 //
+// The persona body is read from `AGENT.md` if present, else `README.md` (#338).
+// `AGENT.md` is the dedicated persona file; `README.md` is the backward-compat
+// fallback so existing home repos keep working unchanged.
+//
 // Layout (inside `agentHomeDir`):
-//   README.md
+//   AGENT.md | README.md  (AGENT.md wins; README.md is the fallback)
 //   skills/<slug>/SKILL.md  (YAML frontmatter parsed for the skills map)
 export async function buildSystemPrompt(
   agentHomeDir: string,
   envPrefix: string | undefined = process.env.SYSTEM_PROMPT,
 ): Promise<string> {
-  const botPath = join(agentHomeDir, 'README.md');
+  // Prefer AGENT.md; fall back to README.md. A missing AGENT.md that falls
+  // back cleanly is silent — only warn when neither file is readable. Missing
+  // both is unusual but not fatal: continue with an empty body so threads still
+  // get the env prefix + skills block.
   let bot = '';
   try {
-    bot = await readFile(botPath, 'utf8');
-  } catch (err) {
-    // README.md missing is unusual but not fatal — emit a warning and continue
-    // with an empty body so threads still get the env prefix + skills block.
-    log.warn('prompt', `README.md not readable at ${botPath}: ${(err as Error).message}`);
+    bot = await readFile(join(agentHomeDir, 'AGENT.md'), 'utf8');
+  } catch {
+    try {
+      bot = await readFile(join(agentHomeDir, 'README.md'), 'utf8');
+    } catch (err) {
+      log.warn(
+        'prompt',
+        `no persona file readable in ${agentHomeDir} (tried AGENT.md, README.md): ${(err as Error).message}`,
+      );
+    }
   }
 
   const skills = await loadSkills(agentHomeDir);
