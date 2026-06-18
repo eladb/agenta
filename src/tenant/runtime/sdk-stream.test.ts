@@ -259,6 +259,9 @@ describe('helpers', () => {
     expect(bareToolName('mcp__agenta__bash')).toBe('bash');
     expect(bareToolName('mcp__agenta__read_file')).toBe('read_file');
     expect(bareToolName('bash')).toBe('bash');
+    // Malformed bare server namespace (no `__<tool>` suffix) → raw, not a fake
+    // bare tool name (#345).
+    expect(bareToolName('mcp__agenta')).toBe('mcp__agenta');
   });
 
   test('toolCardFields cleans bash output and exit bullet', () => {
