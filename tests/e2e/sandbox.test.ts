@@ -253,7 +253,10 @@ test.if(HAS_DOCKER)(
     expect(flat).toContain('app.py');
     expect(flat).toContain('TODO');
     expect(flat).toContain('call_edit');
-    expect(flat).toMatch(/edited app\.py/);
+    // #337 normalizes the path client-side, so the server now echoes the
+    // resolved absolute path ("edited /home/sandbox/app.py"), not the relative
+    // arg. Accept either form — the edit itself still succeeds.
+    expect(flat).toMatch(/edited \S*app\.py/);
     expect(flat).toContain('call_read');
     expect(flat).toContain('def greet(name):');
     expect(flat).toContain('return f\\"hello {name}\\"');
