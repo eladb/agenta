@@ -18,6 +18,10 @@ function writeBot(text: string): void {
   writeFileSync(join(agentHome, 'README.md'), text);
 }
 
+function writeAgent(text: string): void {
+  writeFileSync(join(agentHome, 'AGENT.md'), text);
+}
+
 function writeSkill(slug: string, frontmatter: string, body = ''): void {
   const dir = join(agentHome, 'skills', slug);
   mkdirSync(dir, { recursive: true });
@@ -30,6 +34,33 @@ describe('buildSystemPrompt', () => {
     writeBot(body);
     const out = await buildSystemPrompt(agentHome, undefined);
     expect(out).toBe(`${body}\n\n${UNIVERSAL_PROMPT_SUFFIX}`);
+  });
+
+  test('AGENT.md present -> its body is used as the persona source', async () => {
+    const body = 'You are AGENT.md persona.';
+    writeAgent(body);
+    const out = await buildSystemPrompt(agentHome, undefined);
+    expect(out).toBe(`${body}\n\n${UNIVERSAL_PROMPT_SUFFIX}`);
+  });
+
+  test('only README.md present -> README.md is used (fallback)', async () => {
+    const body = 'You are README.md persona.';
+    writeBot(body);
+    const out = await buildSystemPrompt(agentHome, undefined);
+    expect(out).toBe(`${body}\n\n${UNIVERSAL_PROMPT_SUFFIX}`);
+  });
+
+  test('AGENT.md and README.md both present -> AGENT.md wins', async () => {
+    writeAgent('FROM AGENT');
+    writeBot('FROM README');
+    const out = await buildSystemPrompt(agentHome, undefined);
+    expect(out).toBe(`FROM AGENT\n\n${UNIVERSAL_PROMPT_SUFFIX}`);
+    expect(out).not.toContain('FROM README');
+  });
+
+  test('neither AGENT.md nor README.md present -> empty body, no throw', async () => {
+    const out = await buildSystemPrompt(agentHome, undefined);
+    expect(out).toBe(UNIVERSAL_PROMPT_SUFFIX);
   });
 
   test('README.md + two valid skills -> Available skills block with sorted JSON array', async () => {
