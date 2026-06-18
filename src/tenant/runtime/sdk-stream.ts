@@ -57,14 +57,23 @@ const PRETTY_TOOL_LABELS: Record<string, string> = {
 
 // Strip the `mcp__agenta__` (or any `mcp__<server>__`) prefix the SDK puts on
 // in-process MCP tool names so labels + persisted JSONL use the bare tool name
-// (matching the bespoke harness, which never saw the prefix).
+// (matching the bespoke harness, which never saw the prefix). A malformed name
+// like the bare server namespace `mcp__agenta` (no `__<tool>` suffix) is returned
+// unchanged so the display surfaces it as obviously malformed rather than a fake
+// bare tool name (#345).
 export function bareToolName(name: string): string {
   const m = name.match(/^mcp__[^_]+(?:_[^_]+)*__(.+)$/);
   if (m?.[1]) return m[1];
-  // Fallback: handle the common `mcp__agenta__<name>` shape even if the server
-  // name contains underscores by splitting on the last `__`.
+  // Fallback for well-formed `mcp__<server>__<tool>` names the regex missed
+  // (e.g. a server name shaped oddly): split on the last `__`, but only when a
+  // non-empty `mcp__<server>` prefix precedes it AND a non-empty tool follows.
+  // The bare `mcp__agenta` (its only `__` sits right after `mcp`) has no such
+  // split, so it falls through unchanged.
   const idx = name.lastIndexOf('__');
-  return idx >= 0 ? name.slice(idx + 2) : name;
+  const prefix = idx >= 0 ? name.slice(0, idx) : '';
+  const tool = idx >= 0 ? name.slice(idx + 2) : '';
+  if (tool && /^mcp__.+/.test(prefix)) return tool;
+  return name;
 }
 
 function prettyToolLabel(bareName: string): string {
