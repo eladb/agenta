@@ -104,7 +104,7 @@ src/
   tenant/           agent harness. `bun run start:tenant`. Owns data volume, sessions, sandboxes, the Claude Agent SDK turn.
     index.ts        entry: env-check → lockfile('agent') → recoverInterruptedSessions (silent) → reap orphans → startHttp
     http.ts         POST /events (bearer-auth, SSE status events) + GET /health; hands envelope to runtime/handler
-    prompt.ts       buildSystemPrompt(homeDir, envPrefix?): [prefix] + README.md + skills JSON. Pure, no Slack/sandbox deps.
+    prompt.ts       buildSystemPrompt(homeDir, envPrefix?): [prefix] + AGENT.md|README.md + skills JSON (AGENT.md preferred, README.md fallback, #338). Pure, no Slack/sandbox deps.
     git/
       git-server.ts   per-session HTTP git http-backend on 127.0.0.1:0; core.hooksPath wires the pre-receive hook
       ws-tunnel.ts    per-session WS to sandbox /tunnel; demuxes binary frames into TCP to bot git server; reconnect w/ backoff
@@ -195,11 +195,12 @@ tests/e2e/   helpers.ts (startBotAndTenant/startTester/mention/upload/waitForRep
 - **Ubuntu 24.04 ships a default `ubuntu` uid-1000 user** — Dockerfile `userdel`s it. PEP 668: `pip install` needs `--break-system-packages`.
 - **In-container egress block is in-container only** — a root shell could flush it, but the non-root sandbox user can't reach iptables. Host-side `DOCKER-USER` defense deferred.
 - **Docker re-reads the host port every call** — Desktop reassigns ports on container restart; cache only the Bearer token.
+- **Don't persist sandbox homes on the shared-root EFS mount** — ECS mounts EFS as the raw filesystem root (no access point) and every thread runs as the same uid 1000, so a persisted home lets thread A read thread B's `.ssh` deploy key + cloned private repo (cross-customer exfil for salto). Ephemeral per-task `/home/sandbox` (#339/#340) avoids this; per-thread persistence (#341) was rejected for this reason and would need per-thread EFS access points (the #218 tradeoff) first. Dead `/efs` wiring cleanup tracked in #344.
 
 ## Session + recovery semantics
 
 - **`session.json` per thread**: `{status, updated_at, sandbox?, git?, home?, model?, sdk_session_id?}`, atomic temp+rename. `clearSession` rewrites `idle` (preserves sandbox/git/home/model/sdk_session_id — see the `session-preservation-invariant`); only `/delete` removes the file + thread dir + sandbox (+ a best-effort SDK `deleteSession`). `signalStop` writes `stopping` **before** `abort()` (else the turn's `finally{clearSession}` races ahead and leaves a stale `stopping`).
-- **System prompt rebuilds every mention** (not persisted) — edits to `UNIVERSAL_PROMPT_SUFFIX` and the home repo's `README.md`/`skills/` propagate to existing threads on next mention; `refreshHomeMirror` runs first. home/model still freeze per thread. Adding Anthropic prompt caching would break this.
+- **System prompt rebuilds every mention** (not persisted) — edits to `UNIVERSAL_PROMPT_SUFFIX` and the home repo's `AGENT.md` (or `README.md` fallback)/`skills/` propagate to existing threads on next mention; `refreshHomeMirror` runs first. home/model still freeze per thread. Adding Anthropic prompt caching would break this.
 - **On boot** the tenant's `recoverInterruptedSessions` silently clears stale `running`/`stopping` entries to `idle`. Under the bot↔tenant split (#253) there's no WebClient at boot, so the "agent restarted" Slack notice is gone — interrupted threads see a frozen partial message until the next mention re-triggers work. Per-entry errors don't abort the sweep.
 
 ## Slack apps + IDs (workspace `agentalabs` / T0B304AJPUZ)
